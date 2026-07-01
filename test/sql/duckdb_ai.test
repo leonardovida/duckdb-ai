@@ -57,6 +57,26 @@ SELECT ai_provider_protocol('openai_privacy_filter');
 ----
 privacy_filter
 
+query I
+SELECT ai_recommended_batch_size(100, 50, 6000);
+----
+32
+
+query I
+SELECT ai_recommended_batch_size(100, 50, 6000, 20);
+----
+16
+
+query I
+SELECT ai_recommended_batch_size(100, 50, 6000, 20, 0.5);
+----
+10
+
+query I
+SELECT ai_recommended_batch_size(NULL, 50, 6000) IS NULL;
+----
+true
+
 query II
 SELECT ai_provider_protocol('databricks'), ai_provider_protocol('snowflake');
 ----
@@ -326,6 +346,11 @@ SELECT ai_complete('hello', provider := 'not-a-provider', fail_on_error := false
 ----
 true
 
+query II
+SELECT result.response IS NULL, contains(result.error, 'Unsupported AI provider') FROM (SELECT ai_try_complete('hello', provider := 'not-a-provider') AS result);
+----
+true	true
+
 query I
 SELECT ai_complete_json('hello', provider := 'not-a-provider', fail_on_error := false) IS NULL;
 ----
@@ -457,6 +482,16 @@ SELECT ai_request_json('hello', provider := 'openai', min_request_interval_ms :=
 Binder Error: AI option "min_request_interval_ms" must be between 0 and 60000
 
 statement error
+SELECT ai_request_json('hello', provider := 'openai', token_limit_per_minute := -1);
+----
+Binder Error: AI option "token_limit_per_minute" must be between 0 and 10000000000
+
+statement error
+SELECT ai_request_json('hello', provider := 'openai', token_limit_per_minute := 10000000001);
+----
+Binder Error: AI option "token_limit_per_minute" must be between 0 and 10000000000
+
+statement error
 SELECT ai_request_json('hello', provider := 'openai', input_token_price_per_million := -0.1);
 ----
 Binder Error: AI option "input_token_price_per_million" must be greater than or equal to 0
@@ -520,6 +555,17 @@ Binder Error: Setting duckdb_ai_min_request_interval_ms must be between 0 and 60
 
 statement ok
 RESET duckdb_ai_min_request_interval_ms;
+
+statement ok
+SET duckdb_ai_token_limit_per_minute = 10000000001;
+
+statement error
+SELECT ai_request_json('hello', provider := 'openai');
+----
+Binder Error: Setting duckdb_ai_token_limit_per_minute must be between 0 and 10000000000, or -1 to disable
+
+statement ok
+RESET duckdb_ai_token_limit_per_minute;
 
 statement ok
 SET duckdb_ai_input_token_price_per_million = -2.0;

@@ -41,6 +41,8 @@ struct CompletionOptions {
 	int64_t max_concurrent_requests = 0;
 	bool has_min_request_interval_ms = false;
 	int64_t min_request_interval_ms = 0;
+	bool has_token_limit_per_minute = false;
+	int64_t token_limit_per_minute = 0;
 	bool has_input_token_price_per_million = false;
 	double input_token_price_per_million = 0;
 	bool has_output_token_price_per_million = false;
@@ -150,6 +152,8 @@ std::string NormalizeProviderName(const std::string &provider);
 std::string ProviderBaseUrl(const std::string &provider);
 //! Return the provider protocol used for request/response shaping.
 std::string ProviderProtocol(const std::string &provider);
+//! Return a local approximate token count used by ai_count_tokens() and token-aware pacing.
+int64_t EstimateTokenCount(const std::string &input);
 //! Build a completion request payload without making a network call.
 std::string BuildRequestJson(const std::string &prompt, const std::string &model, const std::string &provider);
 //! Build a completion request payload from a full option set.

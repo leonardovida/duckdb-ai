@@ -252,7 +252,7 @@ These are the main functions most users should start with:
 
 | Function | Use it for |
 | --- | --- |
-| `ai_complete` | General prompt-to-text completions from SQL. |
+| `ai_complete` / `ai_try_complete` | General prompt-to-text completions from SQL, with optional row-level error capture. |
 | `ai_summarize` / `ai_summarize_agg` | Summarizing one text value or a grouped set of rows. |
 | `ai_classify` | Assigning one label from a controlled list. |
 | `ai_filter` | Filtering rows with a natural-language predicate. |
@@ -267,7 +267,7 @@ These are the main functions most users should start with:
 
 | Need | Functions |
 | --- | --- |
-| Completion text | `ai_complete`, `ai_request_json` |
+| Completion text | `ai_complete`, `ai_try_complete`, `ai_request_json` |
 | Structured output | `ai_complete_json`, `ai_complete_record` |
 | Text tasks | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_extract`, `ai_filter` |
 | Aggregates | `ai_summarize_agg`, `ai_agg` |
@@ -276,7 +276,7 @@ These are the main functions most users should start with:
 | SQL safety checks | `ai_is_read_only_sql`, `ai_validate_read_only_sql` |
 | Provider metadata | `ai_provider_base_url`, `ai_provider_protocol`, `ai_models` |
 | Usage and secrets | `ai_usage`, `ai_clear_usage`, `ai_secrets` |
-| Local utility | `ai_count_tokens` |
+| Local utility | `ai_count_tokens`, `ai_recommended_batch_size` |
 
 The full SQL reference is in [`docs/functions.md`](docs/functions.md).
 End-to-end setup examples for each provider are in
@@ -284,21 +284,28 @@ End-to-end setup examples for each provider are in
 
 ## Providers
 
+### Local or self-hosted providers
+
 | Provider | Use it with | Default base URL / key |
 | --- | --- | --- |
 | `ollama` | Local Ollama chat and embedding models | `http://localhost:11434`; optional `OLLAMA_API_KEY` |
-| `openai` | OpenAI chat and embedding models | `https://api.openai.com/v1`; `OPENAI_API_KEY` |
+| `openai_compatible` / `local` | vLLM, LM Studio, LiteLLM, Ollama `/v1`, or another gateway | Set `BASE_URL`; optional `OPENAI_COMPATIBLE_API_KEY` |
+| `openai_privacy_filter` | OpenAI Privacy Filter PII redaction service | `http://localhost:8080`; optional `OPENAI_PRIVACY_FILTER_API_KEY` |
+
+### Remote providers
+
+| Provider | Use it with | Default base URL / key |
+| --- | --- | --- |
 | `azure` | Azure OpenAI deployments | Set `BASE_URL` or `AZURE_OPENAI_BASE_URL`; `AZURE_OPENAI_API_KEY` |
 | `claude` / `anthropic` | Anthropic Claude models | `https://api.anthropic.com/v1`; `ANTHROPIC_API_KEY` |
+| `databricks` | Databricks Model Serving and Unity AI Gateway chat endpoints | Set `BASE_URL` or `DATABRICKS_HOST`; `DATABRICKS_TOKEN` |
+| `deepseek` | DeepSeek chat models | `https://api.deepseek.com`; `DEEPSEEK_API_KEY` |
 | `gemini` / `gcp` / `google` | Gemini through the OpenAI-compatible endpoint | `GEMINI_API_KEY` |
 | `mistral` | Mistral chat models | `https://api.mistral.ai/v1`; `MISTRAL_API_KEY` |
-| `zai` | Z.ai / BigModel chat models | `https://open.bigmodel.cn/api/paas/v4`; `ZAI_API_KEY` |
-| `deepseek` | DeepSeek chat models | `https://api.deepseek.com`; `DEEPSEEK_API_KEY` |
+| `openai` | OpenAI chat and embedding models | `https://api.openai.com/v1`; `OPENAI_API_KEY` |
 | `openrouter` | OpenRouter model routing | `https://openrouter.ai/api/v1`; `OPENROUTER_API_KEY` |
-| `databricks` | Databricks Model Serving and Unity AI Gateway chat endpoints | Set `BASE_URL` or `DATABRICKS_HOST`; `DATABRICKS_TOKEN` |
 | `snowflake` | Snowflake Cortex REST Chat Completions API | Set `BASE_URL`, `SNOWFLAKE_ACCOUNT_URL`, or `SNOWFLAKE_ACCOUNT`; `SNOWFLAKE_PAT` |
-| `openai_privacy_filter` | OpenAI Privacy Filter PII redaction service | `http://localhost:8080`; optional `OPENAI_PRIVACY_FILTER_API_KEY` |
-| `openai_compatible` / `local` | vLLM, LM Studio, LiteLLM, Ollama `/v1`, or another gateway | Set `BASE_URL`; optional `OPENAI_COMPATIBLE_API_KEY` |
+| `zai` | Z.ai / BigModel chat models | `https://open.bigmodel.cn/api/paas/v4`; `ZAI_API_KEY` |
 
 You can configure providers three ways:
 
@@ -443,9 +450,69 @@ For batch workloads, cap provider concurrency and rate:
 ```sql
 SET duckdb_ai_max_concurrent_requests = 4;
 SET duckdb_ai_min_request_interval_ms = 100;
+SET duckdb_ai_token_limit_per_minute = 200000;
 ```
 
-These controls apply to completion and embedding calls.
+These controls apply to completion and embedding calls. The token limit uses the
+local `ai_count_tokens` estimate plus `max_tokens` when present, or a conservative
+default output estimate otherwise. Set `max_tokens` for large jobs so the runtime
+can pace requests against your provider's current tokens-per-minute limit.
+
+Use `ai_recommended_batch_size` with a small provider-limit table to pick a
+starting batch size before running a large enrichment:
+
+```sql
+CREATE OR REPLACE TABLE ai_provider_limits AS
+SELECT
+    'openai' AS provider,
+    'gpt-4o-mini' AS model,
+    200000::BIGINT AS token_limit_per_minute,
+    500::BIGINT AS request_limit_per_minute;
+
+WITH prompt_stats AS (
+    SELECT avg(ai_count_tokens(subject || ': ' || body)) AS input_tokens_per_row
+    FROM support_tickets
+)
+SELECT ai_recommended_batch_size(
+    input_tokens_per_row,
+    200, -- planned max_tokens per row
+    token_limit_per_minute,
+    request_limit_per_minute
+) AS recommended_rows_per_minute
+FROM prompt_stats, ai_provider_limits
+WHERE provider = 'openai' AND model = 'gpt-4o-mini';
+```
+
+For production row enrichment, use `ai_try_complete` when one bad row should not
+fail the full query. It returns a `STRUCT(response VARCHAR, error VARCHAR)`, so
+successful rows and rejected rows can be written separately:
+
+```sql
+CREATE TEMP TABLE ticket_ai_attempts AS
+SELECT
+    ticket_id,
+    ai_try_complete(
+        subject || ': ' || body,
+        provider := 'openai',
+        model := 'gpt-4o-mini',
+        max_tokens := 200,
+        token_limit_per_minute := 200000
+    ) AS result
+FROM support_tickets;
+
+CREATE OR REPLACE TABLE ticket_summaries AS
+SELECT ticket_id, result.response AS summary
+FROM ticket_ai_attempts
+WHERE result.error IS NULL;
+
+CREATE OR REPLACE TABLE ticket_ai_failed_rows AS
+SELECT ticket_id, result.error AS error_reason, current_timestamp AS failed_at
+FROM ticket_ai_attempts
+WHERE result.error IS NOT NULL;
+```
+
+Use the same rejected-row `SELECT` inside `COPY (...) TO 'failed_rows.parquet'`
+or an `s3://...` target when failures should live outside the DuckDB database.
 
 ## Learn More
 

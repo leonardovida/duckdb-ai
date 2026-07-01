@@ -19,6 +19,9 @@ jobs:
   build:
     name: Build Docusaurus
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
     defaults:
       run:
         working-directory: website
@@ -41,6 +44,10 @@ jobs:
 
       - name: Build website
         run: npm run build
+
+      - name: Configure Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !github.event.repository.private
+        uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

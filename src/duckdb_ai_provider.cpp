@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <curl/curl.h>
+#include <deque>
 #include <exception>
 #include <initializer_list>
 #include <iomanip>
@@ -36,11 +37,15 @@ std::mutex usage_mutex;
 std::vector<UsageEvent> usage_events;
 uint64_t next_usage_event_id = 1;
 const size_t MAX_USAGE_EVENTS = 1024;
+constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
+constexpr int64_t DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE = 512;
 std::mutex provider_control_mutex;
 std::condition_variable provider_control_cv;
 int64_t active_provider_requests = 0;
 bool has_last_provider_request_start = false;
 std::chrono::steady_clock::time_point last_provider_request_start;
+std::deque<std::pair<std::chrono::steady_clock::time_point, int64_t>> provider_token_window;
+int64_t provider_token_window_tokens = 0;
 
 std::string LowerAscii(std::string input) {
 	std::transform(input.begin(), input.end(), input.begin(),
@@ -1539,35 +1544,107 @@ int64_t MinRequestIntervalMs(const CompletionOptions &options) {
 	}
 }
 
+int64_t TokenLimitPerMinute(const CompletionOptions &options) {
+	if (options.has_token_limit_per_minute) {
+		return options.token_limit_per_minute;
+	}
+	auto configured = GetEnv("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE");
+	if (configured.empty()) {
+		return 0;
+	}
+	try {
+		auto token_limit_per_minute = std::stoll(configured);
+		if (token_limit_per_minute < 0 || token_limit_per_minute > MAX_TOKEN_LIMIT_PER_MINUTE) {
+			throw InvalidInputException("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE must be between 0 and %lld",
+			                            static_cast<long long>(MAX_TOKEN_LIMIT_PER_MINUTE));
+		}
+		return token_limit_per_minute;
+	} catch (InvalidInputException &) {
+		throw;
+	} catch (...) {
+		throw InvalidInputException("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE must be an integer between 0 and %lld",
+		                            static_cast<long long>(MAX_TOKEN_LIMIT_PER_MINUTE));
+	}
+}
+
+void PruneProviderTokenWindow(std::chrono::steady_clock::time_point now) {
+	auto cutoff = now - std::chrono::minutes(1);
+	while (!provider_token_window.empty() && provider_token_window.front().first <= cutoff) {
+		provider_token_window_tokens -= provider_token_window.front().second;
+		provider_token_window.pop_front();
+	}
+	if (provider_token_window_tokens < 0) {
+		provider_token_window_tokens = 0;
+	}
+}
+
+int64_t EstimatedCompletionTokens(const std::string &prompt, const CompletionOptions &options) {
+	auto output_estimate = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
+	return EstimateTokenCount(prompt) + output_estimate;
+}
+
+int64_t TokenReservation(int64_t estimated_tokens, int64_t token_limit_per_minute) {
+	if (estimated_tokens <= 0 || token_limit_per_minute <= 0) {
+		return 0;
+	}
+	return std::min(estimated_tokens, token_limit_per_minute);
+}
+
 class ProviderRequestGuard {
 public:
-	explicit ProviderRequestGuard(const CompletionOptions &options)
+	explicit ProviderRequestGuard(const CompletionOptions &options, int64_t estimated_tokens)
 	    : max_concurrent_requests(MaxConcurrentRequests(options)),
-	      min_request_interval_ms(MinRequestIntervalMs(options)) {
-		if (max_concurrent_requests <= 0 && min_request_interval_ms <= 0) {
+	      min_request_interval_ms(MinRequestIntervalMs(options)), token_limit_per_minute(TokenLimitPerMinute(options)),
+	      request_tokens(TokenReservation(estimated_tokens, token_limit_per_minute)) {
+		if (max_concurrent_requests <= 0 && min_request_interval_ms <= 0 && token_limit_per_minute <= 0) {
 			return;
 		}
 
 		std::unique_lock<std::mutex> lock(provider_control_mutex);
 		while (true) {
-			auto concurrency_ready = max_concurrent_requests <= 0 || active_provider_requests < max_concurrent_requests;
 			auto now = std::chrono::steady_clock::now();
+			PruneProviderTokenWindow(now);
+			auto concurrency_ready = max_concurrent_requests <= 0 || active_provider_requests < max_concurrent_requests;
 			auto rate_ready = min_request_interval_ms <= 0 || !has_last_provider_request_start ||
 			                  now >= last_provider_request_start + std::chrono::milliseconds(min_request_interval_ms);
-			if (concurrency_ready && rate_ready) {
+			auto token_ready =
+			    token_limit_per_minute <= 0 || provider_token_window_tokens + request_tokens <= token_limit_per_minute;
+			if (concurrency_ready && rate_ready && token_ready) {
 				break;
 			}
 			if (!concurrency_ready) {
 				provider_control_cv.wait(lock);
 			} else {
-				provider_control_cv.wait_until(lock, last_provider_request_start +
-				                                         std::chrono::milliseconds(min_request_interval_ms));
+				std::chrono::steady_clock::time_point wake_at;
+				bool has_wake_at = false;
+				auto set_wake_at = [&](std::chrono::steady_clock::time_point candidate) {
+					if (!has_wake_at || candidate < wake_at) {
+						wake_at = candidate;
+						has_wake_at = true;
+					}
+				};
+				if (!rate_ready) {
+					set_wake_at(last_provider_request_start + std::chrono::milliseconds(min_request_interval_ms));
+				}
+				if (!token_ready && !provider_token_window.empty()) {
+					set_wake_at(provider_token_window.front().first + std::chrono::minutes(1));
+				}
+				if (has_wake_at) {
+					provider_control_cv.wait_until(lock, wake_at);
+				} else {
+					provider_control_cv.wait(lock);
+				}
 			}
 		}
 		active_provider_requests++;
+		auto request_start = std::chrono::steady_clock::now();
 		if (min_request_interval_ms > 0) {
-			last_provider_request_start = std::chrono::steady_clock::now();
+			last_provider_request_start = request_start;
 			has_last_provider_request_start = true;
+		}
+		if (token_limit_per_minute > 0 && request_tokens > 0) {
+			provider_token_window.emplace_back(request_start, request_tokens);
+			provider_token_window_tokens += request_tokens;
 		}
 		acquired = true;
 	}
@@ -1584,6 +1661,8 @@ public:
 private:
 	int64_t max_concurrent_requests;
 	int64_t min_request_interval_ms;
+	int64_t token_limit_per_minute;
+	int64_t request_tokens;
 	bool acquired = false;
 };
 
@@ -2706,6 +2785,13 @@ std::string ProviderProtocol(const std::string &provider) {
 	return ProviderDefaults(provider).protocol;
 }
 
+int64_t EstimateTokenCount(const std::string &input) {
+	if (input.empty()) {
+		return 0;
+	}
+	return static_cast<int64_t>((input.size() + 3) / 4);
+}
+
 std::string BuildRequestJson(const std::string &prompt, const std::string &model, const std::string &provider) {
 	CompletionOptions options;
 	options.model = model;
@@ -2731,7 +2817,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	}
 	auto config = ResolveProvider(options);
 	auto response = [&]() {
-		ProviderRequestGuard request_guard(options);
+		ProviderRequestGuard request_guard(options, EstimatedCompletionTokens(prompt, options));
 		return HttpPost(RequestEndpoint(config), RequestPayload(config, prompt, options), RequestHeaders(config),
 		                TimeoutSeconds(options), false, RetryCount(options), RetryBackoffMs(options));
 	}();
@@ -2752,7 +2838,7 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 		                            config.provider);
 	}
 	auto response = [&]() {
-		ProviderRequestGuard request_guard(options);
+		ProviderRequestGuard request_guard(options, EstimateTokenCount(text));
 		return HttpPost(RequestEndpoint(config), RequestPayload(config, text, options), RequestHeaders(config),
 		                TimeoutSeconds(options), false, RetryCount(options), RetryBackoffMs(options));
 	}();
@@ -2788,7 +2874,7 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	}
 	auto config = ResolveEmbeddingProviderConfig(options, true);
 	auto response = [&]() {
-		ProviderRequestGuard request_guard(options);
+		ProviderRequestGuard request_guard(options, EstimateTokenCount(input));
 		return HttpPost(EmbeddingEndpoint(config), EmbeddingPayload(config, input), RequestHeaders(config),
 		                TimeoutSeconds(options), false, RetryCount(options), RetryBackoffMs(options));
 	}();

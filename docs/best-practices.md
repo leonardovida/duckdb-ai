@@ -204,6 +204,33 @@ For batch workloads, set process-local concurrency and pacing:
 ```sql
 SET duckdb_ai_max_concurrent_requests = 4;
 SET duckdb_ai_min_request_interval_ms = 100;
+SET duckdb_ai_token_limit_per_minute = 200000;
+```
+
+Use `ai_count_tokens` and `ai_recommended_batch_size` before large jobs. Keep
+provider limits in a small table so the numbers are easy to update when your
+account tier changes:
+
+```sql
+CREATE OR REPLACE TABLE ai_provider_limits AS
+SELECT
+    'openai' AS provider,
+    'gpt-4o-mini' AS model,
+    200000::BIGINT AS token_limit_per_minute,
+    500::BIGINT AS request_limit_per_minute;
+
+WITH prompt_stats AS (
+    SELECT avg(ai_count_tokens(subject || ': ' || body)) AS input_tokens_per_row
+    FROM support_tickets
+)
+SELECT ai_recommended_batch_size(
+    input_tokens_per_row,
+    200,
+    token_limit_per_minute,
+    request_limit_per_minute
+) AS recommended_rows_per_minute
+FROM prompt_stats, ai_provider_limits
+WHERE provider = 'openai' AND model = 'gpt-4o-mini';
 ```
 
 Retries are disabled by default. Enable small retry counts only for transient
@@ -228,6 +255,36 @@ SELECT ai_classify(
 )
 FROM support_tickets;
 ```
+
+For production enrichment, prefer `ai_try_complete` so failed rows keep their
+error reason:
+
+```sql
+CREATE TEMP TABLE ticket_ai_attempts AS
+SELECT
+    ticket_id,
+    ai_try_complete(
+        subject || ': ' || body,
+        provider := 'openai',
+        model := 'gpt-4o-mini',
+        max_tokens := 200,
+        token_limit_per_minute := 200000
+    ) AS result
+FROM support_tickets;
+
+CREATE OR REPLACE TABLE ticket_summaries AS
+SELECT ticket_id, result.response AS summary
+FROM ticket_ai_attempts
+WHERE result.error IS NULL;
+
+CREATE OR REPLACE TABLE ticket_ai_failed_rows AS
+SELECT ticket_id, result.error AS error_reason, current_timestamp AS failed_at
+FROM ticket_ai_attempts
+WHERE result.error IS NOT NULL;
+```
+
+Use the same rejected-row `SELECT` inside `COPY (...) TO 'failed_rows.parquet'`
+or an `s3://...` target when failures should live outside the DuckDB database.
 
 ## Log usage without leaking text
 
