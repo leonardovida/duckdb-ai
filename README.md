@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/assets/duckdb-ai-logo.svg" alt="duckdb_ai logo proposal" width="520">
+  <img src="docs/assets/duckdb-ai-logo.svg" alt="duckdb-ai logo" width="520">
 </p>
 
-# duckdb_ai
+# duckdb-ai
 
-`duckdb_ai` is a DuckDB extension for model-backed analytical workflows inside
+duckdb-ai is a DuckDB extension for model-backed analytical workflows inside
 SQL. It adds functions for completions, structured JSON extraction, embeddings,
 natural-language filters, read-only SQL generation, and usage tracking.
 
