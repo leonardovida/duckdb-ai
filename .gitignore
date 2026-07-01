@@ -7,4 +7,5 @@ local-docs/
 .DS_Store
 testext
 test/python/__pycache__/
+website/
 .Rhistory
