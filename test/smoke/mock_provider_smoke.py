@@ -325,6 +325,8 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             provider := 'snowflake',
             model := 'snowflake-llama-3.3-70b'
         ) AS snowflake_completion;
+        SELECT result.response, result.error IS NULL
+        FROM (SELECT ai_try_complete('try complete smoke', max_tokens := 5) AS result);
         SELECT ai_redact(
             'email alice@example.com token fake-token',
             secret := 'smoke_privacy_filter_ai',
@@ -451,10 +453,10 @@ def assert_smoke_result(output: str):
     if missing:
         raise AssertionError(f"duckdb output missing {missing}\n{output}")
 
-    if len(MockProviderHandler.completion_requests) != 30:
-        raise AssertionError(f"expected 30 completion requests, got {len(MockProviderHandler.completion_requests)}")
-    if len(MockProviderHandler.authorization_headers) != 34:
-        raise AssertionError(f"expected 34 auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if len(MockProviderHandler.completion_requests) != 31:
+        raise AssertionError(f"expected 31 completion requests, got {len(MockProviderHandler.completion_requests)}")
+    if len(MockProviderHandler.authorization_headers) != 35:
+        raise AssertionError(f"expected 35 auth headers, got {len(MockProviderHandler.authorization_headers)}")
     for header in MockProviderHandler.authorization_headers:
         if header != "Bearer test-key":
             raise AssertionError(f"unexpected authorization header: {header}")
@@ -591,6 +593,11 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected Snowflake model: {snowflake_request}")
     if snowflake_request["messages"][-1]["content"] != "hello snowflake":
         raise AssertionError(f"unexpected Snowflake prompt: {snowflake_request}")
+    try_complete_request = MockProviderHandler.completion_requests[30]
+    if try_complete_request["messages"][-1]["content"] != "try complete smoke":
+        raise AssertionError(f"unexpected try completion prompt: {try_complete_request}")
+    if try_complete_request.get("max_tokens") != 5:
+        raise AssertionError(f"unexpected try completion max tokens: {try_complete_request}")
     if len(MockProviderHandler.privacy_filter_requests) != 1:
         raise AssertionError(
             f"expected 1 Privacy Filter request, got {len(MockProviderHandler.privacy_filter_requests)}"
@@ -646,14 +653,14 @@ def assert_smoke_result(output: str):
     if similarity_models != ["mock-embedding-default", "mock-embedding-default"]:
         raise AssertionError(f"unexpected similarity embedding models: {similarity_models}")
 
-    if len(MockProviderHandler.log_requests) != 34:
-        raise AssertionError(f"expected 34 log requests, got {len(MockProviderHandler.log_requests)}")
+    if len(MockProviderHandler.log_requests) != 35:
+        raise AssertionError(f"expected 35 log requests, got {len(MockProviderHandler.log_requests)}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 30 or len(embedding_logs) != 3:
+    if len(completion_logs) != 31 or len(embedding_logs) != 3:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")

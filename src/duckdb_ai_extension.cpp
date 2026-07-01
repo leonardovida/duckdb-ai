@@ -40,6 +40,8 @@ namespace duckdb {
 
 namespace {
 
+constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
+
 bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duckdb_ai::CompletionOptions &right) {
 	return left.model == right.model && left.provider == right.provider && left.secret_name == right.secret_name &&
 	       left.system_prompt == right.system_prompt && left.base_url == right.base_url &&
@@ -53,6 +55,8 @@ bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duck
 	       left.max_concurrent_requests == right.max_concurrent_requests &&
 	       left.has_min_request_interval_ms == right.has_min_request_interval_ms &&
 	       left.min_request_interval_ms == right.min_request_interval_ms &&
+	       left.has_token_limit_per_minute == right.has_token_limit_per_minute &&
+	       left.token_limit_per_minute == right.token_limit_per_minute &&
 	       left.has_input_token_price_per_million == right.has_input_token_price_per_million &&
 	       left.input_token_price_per_million == right.input_token_price_per_million &&
 	       left.has_output_token_price_per_million == right.has_output_token_price_per_million &&
@@ -429,7 +433,7 @@ bool TryGetOptionType(const std::string &name, LogicalType &type) {
 		return true;
 	}
 	if (name == "max_tokens" || name == "retry_count" || name == "retry_backoff_ms" ||
-	    name == "max_concurrent_requests" || name == "min_request_interval_ms") {
+	    name == "max_concurrent_requests" || name == "min_request_interval_ms" || name == "token_limit_per_minute") {
 		type = LogicalType::BIGINT;
 		return true;
 	}
@@ -451,9 +455,10 @@ LogicalType OptionType(const std::string &name) {
 	}
 	throw BinderException("Unsupported AI option \"%s\". Supported options: model, provider, temperature, "
 	                      "system_prompt, max_tokens, base_url, timeout_seconds, retry_count, retry_backoff_ms, "
-	                      "max_concurrent_requests, min_request_interval_ms, input_token_price_per_million, "
-	                      "output_token_price_per_million, use_builtin_model_prices, fail_on_error, profile, secret, "
-	                      "response_format, response_schema, json_schema, log_format, log_tags, log_sample_rate",
+	                      "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, "
+	                      "input_token_price_per_million, output_token_price_per_million, use_builtin_model_prices, "
+	                      "fail_on_error, profile, secret, response_format, response_schema, json_schema, log_format, "
+	                      "log_tags, log_sample_rate",
 	                      name);
 }
 
@@ -639,6 +644,15 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 			throw BinderException("%s option \"min_request_interval_ms\" must be between 0 and 60000", function_name);
 		}
 		options.has_min_request_interval_ms = true;
+		return true;
+	}
+	if (name == "token_limit_per_minute") {
+		options.token_limit_per_minute = OptionBigIntValue(value, function_name, name);
+		if (options.token_limit_per_minute < 0 || options.token_limit_per_minute > MAX_TOKEN_LIMIT_PER_MINUTE) {
+			throw BinderException("%s option \"token_limit_per_minute\" must be between 0 and %lld", function_name,
+			                      static_cast<long long>(MAX_TOKEN_LIMIT_PER_MINUTE));
+		}
+		options.has_token_limit_per_minute = true;
 		return true;
 	}
 	if (name == "timeout_seconds") {
@@ -851,6 +865,8 @@ void ApplySettingsWithPrefix(ClientContext &context, const std::string &prefix, 
 	                                options.has_max_concurrent_requests, 0, 1024);
 	ApplyOptionalBigIntRangeSetting(context, prefix + "_min_request_interval_ms", options.min_request_interval_ms,
 	                                options.has_min_request_interval_ms, 0, 60000);
+	ApplyOptionalBigIntRangeSetting(context, prefix + "_token_limit_per_minute", options.token_limit_per_minute,
+	                                options.has_token_limit_per_minute, 0, MAX_TOKEN_LIMIT_PER_MINUTE);
 	ApplyNonNegativeDoubleSetting(context, prefix + "_input_token_price_per_million",
 	                              options.input_token_price_per_million, options.has_input_token_price_per_million);
 	ApplyNonNegativeDoubleSetting(context, prefix + "_output_token_price_per_million",
@@ -1171,6 +1187,69 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	}
 }
 
+LogicalType AiTryCompleteReturnType() {
+	child_list_t<LogicalType> children;
+	children.emplace_back("response", LogicalType::VARCHAR);
+	children.emplace_back("error", LogicalType::VARCHAR);
+	return LogicalType::STRUCT(std::move(children));
+}
+
+unique_ptr<FunctionData> AiTryCompleteBind(ClientContext &context, ScalarFunction &bound_function,
+                                           vector<unique_ptr<Expression>> &arguments) {
+	auto bind_data = AiCompletionBindInternal(context, bound_function, arguments);
+	bound_function.SetReturnType(AiTryCompleteReturnType());
+	return bind_data;
+}
+
+Value AiTryCompleteValue(const LogicalType &result_type, const std::string &response, bool has_error,
+                         const std::string &error) {
+	vector<Value> children;
+	children.reserve(2);
+	if (has_error) {
+		children.emplace_back(LogicalType::VARCHAR);
+		children.emplace_back(error);
+	} else {
+		children.emplace_back(response);
+		children.emplace_back(LogicalType::VARCHAR);
+	}
+	return Value::STRUCT(result_type, std::move(children));
+}
+
+void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto result_type = AiTryCompleteReturnType();
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader prompt_reader(args, bind_data.prompt_index);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
+
+	for (idx_t row = 0; row < args.size(); row++) {
+		std::string prompt;
+		if (!prompt_reader.Read(row, prompt)) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+
+		try {
+			ApplyAiProviderSecret(state.GetContext(), options);
+			auto output = duckdb_ai::Complete(prompt, options).text;
+			result.SetValue(row, AiTryCompleteValue(result_type, output, false, ""));
+		} catch (std::exception &ex) {
+			result.SetValue(row, AiTryCompleteValue(result_type, "", true, ex.what()));
+		}
+	}
+}
+
 std::string RequiredRecordStringInput(const TableFunctionBindInput &input, idx_t index, const std::string &name) {
 	if (index >= input.inputs.size()) {
 		throw BinderException("ai_complete_record requires a %s argument", name);
@@ -1427,7 +1506,7 @@ void AiRecordFunction(ClientContext &context, TableFunctionInput &input, DataChu
 bool IsEmbeddingOption(const std::string &name) {
 	return name == "model" || name == "provider" || name == "profile" || name == "secret" || name == "secret_name" ||
 	       name == "base_url" || name == "timeout_seconds" || name == "retry_count" || name == "retry_backoff_ms" ||
-	       name == "max_concurrent_requests" || name == "min_request_interval_ms" ||
+	       name == "max_concurrent_requests" || name == "min_request_interval_ms" || name == "token_limit_per_minute" ||
 	       name == "input_token_price_per_million" || name == "output_token_price_per_million" ||
 	       name == "use_builtin_model_prices" || name == "fail_on_error" || name == "log_format" ||
 	       name == "log_tags" || name == "log_sample_rate";
@@ -1464,7 +1543,7 @@ unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarF
 			throw BinderException(
 			    "Unsupported AI embedding option \"%s\". Supported options: model, provider, "
 			    "profile, secret, base_url, timeout_seconds, retry_count, retry_backoff_ms, fail_on_error, "
-			    "max_concurrent_requests, min_request_interval_ms, "
+			    "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, "
 			    "input_token_price_per_million, output_token_price_per_million, "
 			    "use_builtin_model_prices, log_format, log_tags, log_sample_rate",
 			    alias);
@@ -1517,7 +1596,7 @@ unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction
 			throw BinderException(
 			    "Unsupported AI similarity option \"%s\". Supported options: model, provider, "
 			    "profile, secret, base_url, timeout_seconds, retry_count, retry_backoff_ms, fail_on_error, "
-			    "max_concurrent_requests, min_request_interval_ms, "
+			    "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, "
 			    "input_token_price_per_million, output_token_price_per_million, "
 			    "use_builtin_model_prices, log_format, log_tags, log_sample_rate",
 			    alias);
@@ -2584,13 +2663,6 @@ unique_ptr<FunctionData> AiCountTokensBind(ClientContext &context, ScalarFunctio
 	return bind_data;
 }
 
-int64_t EstimateTokenCount(const std::string &input) {
-	if (input.empty()) {
-		return 0;
-	}
-	return static_cast<int64_t>((input.size() + 3) / 4);
-}
-
 void AiCountTokensFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
@@ -2606,7 +2678,80 @@ void AiCountTokensFunction(DataChunk &args, ExpressionState &state, Vector &resu
 			result_validity.SetInvalid(row);
 			continue;
 		}
-		result_data[row] = EstimateTokenCount(input);
+		result_data[row] = duckdb_ai::EstimateTokenCount(input);
+	}
+}
+
+double NumericArgValue(DataChunk &args, idx_t column, idx_t row, bool &is_null) {
+	auto value = args.data[column].GetValue(row);
+	if (value.IsNull()) {
+		is_null = true;
+		return 0;
+	}
+	return DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
+}
+
+int64_t RecommendedBatchSize(double input_tokens_per_row, double max_output_tokens_per_row,
+                             double token_limit_per_minute, double request_limit_per_minute, double safety_factor) {
+	if (!std::isfinite(input_tokens_per_row) || input_tokens_per_row < 0) {
+		throw InvalidInputException(
+		    "ai_recommended_batch_size input_tokens_per_row must be greater than or equal to 0");
+	}
+	if (!std::isfinite(max_output_tokens_per_row) || max_output_tokens_per_row < 0) {
+		throw InvalidInputException(
+		    "ai_recommended_batch_size max_output_tokens_per_row must be greater than or equal to 0");
+	}
+	if (!std::isfinite(token_limit_per_minute) || token_limit_per_minute < 0) {
+		throw InvalidInputException(
+		    "ai_recommended_batch_size token_limit_per_minute must be greater than or equal to 0");
+	}
+	if (!std::isfinite(request_limit_per_minute) || request_limit_per_minute < 0) {
+		throw InvalidInputException(
+		    "ai_recommended_batch_size request_limit_per_minute must be greater than or equal to 0");
+	}
+	if (!std::isfinite(safety_factor) || safety_factor <= 0 || safety_factor > 1) {
+		throw InvalidInputException("ai_recommended_batch_size safety_factor must be greater than 0 and at most 1");
+	}
+	if (token_limit_per_minute <= 0 && request_limit_per_minute <= 0) {
+		throw InvalidInputException("ai_recommended_batch_size requires token_limit_per_minute or "
+		                            "request_limit_per_minute to be greater than 0");
+	}
+
+	auto tokens_per_row = std::max(1.0, input_tokens_per_row + max_output_tokens_per_row);
+	auto token_rows = std::numeric_limits<double>::infinity();
+	if (token_limit_per_minute > 0) {
+		token_rows = std::floor((token_limit_per_minute * safety_factor) / tokens_per_row);
+	}
+	auto request_rows = std::numeric_limits<double>::infinity();
+	if (request_limit_per_minute > 0) {
+		request_rows = std::floor(request_limit_per_minute * safety_factor);
+	}
+	auto recommended = std::min(token_rows, request_rows);
+	if (!std::isfinite(recommended)) {
+		throw InvalidInputException("ai_recommended_batch_size requires token_limit_per_minute or "
+		                            "request_limit_per_minute to be greater than 0");
+	}
+	return std::max<int64_t>(1, static_cast<int64_t>(recommended));
+}
+
+void AiRecommendedBatchSizeFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<int64_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t row = 0; row < args.size(); row++) {
+		bool is_null = false;
+		auto input_tokens_per_row = NumericArgValue(args, 0, row, is_null);
+		auto max_output_tokens_per_row = NumericArgValue(args, 1, row, is_null);
+		auto token_limit_per_minute = NumericArgValue(args, 2, row, is_null);
+		auto request_limit_per_minute = args.ColumnCount() >= 4 ? NumericArgValue(args, 3, row, is_null) : 0;
+		auto safety_factor = args.ColumnCount() >= 5 ? NumericArgValue(args, 4, row, is_null) : 0.8;
+		if (is_null) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+		result_data[row] = RecommendedBatchSize(input_tokens_per_row, max_output_tokens_per_row, token_limit_per_minute,
+		                                        request_limit_per_minute, safety_factor);
 	}
 }
 
@@ -3486,6 +3631,10 @@ void RegisterSettingsForPrefix(DBConfig &config, const std::string &prefix, cons
 	AddSetting(config, prefix + "_min_request_interval_ms",
 	           "Minimum milliseconds between AI provider request starts between 0 and 60000; -1 uses default",
 	           LogicalType::BIGINT, Value::BIGINT(-1));
+	AddSetting(config, prefix + "_token_limit_per_minute",
+	           "Maximum estimated AI provider tokens per rolling minute between 0 and 10000000000; 0 disables the "
+	           "limit, -1 uses default",
+	           LogicalType::BIGINT, Value::BIGINT(-1));
 	AddSetting(config, prefix + "_input_token_price_per_million",
 	           "Input token price per million tokens for estimated AI usage cost; -1 disables cost estimates",
 	           LogicalType::DOUBLE, Value::DOUBLE(-1));
@@ -3560,6 +3709,16 @@ void RegisterTaskFunction(ExtensionLoader &loader, const std::string &name, vect
 
 void RegisterCompletionFunction(ExtensionLoader &loader, const std::string &name, bind_scalar_function_t bind) {
 	auto function = ScalarFunction(name, {LogicalType::VARCHAR}, LogicalType::VARCHAR, AiCompletionFunction, bind);
+	function.varargs = LogicalType::ANY;
+	function.SetFallible();
+	function.SetVolatile();
+	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	loader.RegisterFunction(function);
+}
+
+void RegisterTryCompletionFunction(ExtensionLoader &loader) {
+	auto function = ScalarFunction("ai_try_complete", {LogicalType::VARCHAR}, AiTryCompleteReturnType(),
+	                               AiTryCompleteFunction, AiTryCompleteBind);
 	function.varargs = LogicalType::ANY;
 	function.SetFallible();
 	function.SetVolatile();
@@ -3642,6 +3801,7 @@ void AddCompletionNamedParameters(TableFunction &function, bool include_response
 	                                           "retry_backoff_ms",
 	                                           "max_concurrent_requests",
 	                                           "min_request_interval_ms",
+	                                           "token_limit_per_minute",
 	                                           "input_token_price_per_million",
 	                                           "output_token_price_per_million",
 	                                           "use_builtin_model_prices",
@@ -3770,6 +3930,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterAiProviderSecret(loader);
 
 	RegisterCompletionFunction(loader, "ai_complete", AiCompleteBind);
+	RegisterTryCompletionFunction(loader);
 	RegisterCompletionFunction(loader, "ai_request_json", AiRequestJsonBind);
 
 	auto ai_complete_json = ScalarFunction("ai_complete_json", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
@@ -3834,6 +3995,19 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ai_count_tokens.varargs = LogicalType::ANY;
 	ai_count_tokens.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	loader.RegisterFunction(ai_count_tokens);
+
+	ScalarFunctionSet ai_recommended_batch_size("ai_recommended_batch_size");
+	for (idx_t argument_count = 3; argument_count <= 5; argument_count++) {
+		vector<LogicalType> arguments;
+		for (idx_t i = 0; i < argument_count; i++) {
+			arguments.emplace_back(LogicalType::DOUBLE);
+		}
+		auto function = ScalarFunction(std::move(arguments), LogicalType::BIGINT, AiRecommendedBatchSizeFunction);
+		function.SetFallible();
+		function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+		ai_recommended_batch_size.AddFunction(std::move(function));
+	}
+	loader.RegisterFunction(std::move(ai_recommended_batch_size));
 
 	loader.RegisterFunction(TableFunction("ai_usage", {}, AiUsageFunction, AiUsageBind, AiUsageInit));
 	loader.RegisterFunction(

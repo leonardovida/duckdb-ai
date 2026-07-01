@@ -21,6 +21,7 @@ FROM ai_usage();
 | Function | Type | Description |
 | --- | --- | --- |
 | `ai_complete(prompt[, model[, provider]])` | Scalar | Calls a completion model and returns text. |
+| `ai_try_complete(prompt[, model[, provider]])` | Scalar | Calls a completion model and returns `STRUCT(response, error)` for row-level failure capture. |
 | `ai_complete_json(prompt[, model[, provider]])` | Scalar | Calls a completion model and validates the response as a JSON object or array. |
 | `ai_complete_record(prompt, response_schema[, model[, provider]])` | Table | Calls a completion model and projects a JSON object into typed columns from a JSON Schema. |
 | `ai_request_json(prompt[, model[, provider]])` | Scalar | Returns the completion request JSON without making a network call. |
@@ -46,6 +47,7 @@ FROM ai_usage();
 | `ai_is_read_only_sql(sql)` | Scalar | Returns whether SQL is one parser-valid read-only `SELECT`. |
 | `ai_validate_read_only_sql(sql)` | Scalar | Returns normalized SQL or raises if it is not one read-only `SELECT`. |
 | `ai_count_tokens(text[, model[, provider]])` | Scalar | Returns a local approximate token count. |
+| `ai_recommended_batch_size(input_tokens_per_row, max_output_tokens_per_row, token_limit_per_minute[, request_limit_per_minute[, safety_factor]])` | Scalar | Returns a conservative row batch size for rate-limited AI jobs. |
 | `ai_provider_base_url(provider)` | Scalar | Returns the default base URL for a supported provider. |
 | `ai_provider_protocol(provider)` | Scalar | Returns the internal provider protocol. |
 | `ai_usage()` | Table | Returns recent in-process AI usage events. |
@@ -71,6 +73,28 @@ SELECT ai_complete(
 ```
 
 Result: `VARCHAR`
+
+#### `ai_try_complete(prompt[, model[, provider]])`
+
+Description: Calls a configured completion provider and returns a
+`STRUCT(response VARCHAR, error VARCHAR)`. Successful rows have `error = NULL`;
+failed rows have `response = NULL` and the provider or validation error text.
+Use this for batch enrichment when one bad row should be written to a rejected
+rows table instead of failing the whole query.
+
+Example:
+
+```sql
+WITH attempts AS (
+    SELECT id, ai_try_complete(prompt, provider := 'openai') AS result
+    FROM prompts
+)
+SELECT id, result.response
+FROM attempts
+WHERE result.error IS NULL;
+```
+
+Result: `STRUCT(response VARCHAR, error VARCHAR)`
 
 #### `ai_complete_json(prompt[, model[, provider]])`
 
@@ -466,6 +490,21 @@ SELECT ai_count_tokens('DuckDB local analytics');
 
 Result: `BIGINT`
 
+#### `ai_recommended_batch_size(input_tokens_per_row, max_output_tokens_per_row, token_limit_per_minute[, request_limit_per_minute[, safety_factor]])`
+
+Description: Returns a conservative number of rows to process per batch or
+minute for a rate-limited AI job. `input_tokens_per_row` can come from
+`avg(ai_count_tokens(prompt))`, `max_output_tokens_per_row` should match the
+planned `max_tokens`, and `safety_factor` defaults to `0.8`.
+
+Example:
+
+```sql
+SELECT ai_recommended_batch_size(100, 200, 200000, 500);
+```
+
+Result: `BIGINT`
+
 ## Provider metadata functions
 
 #### `ai_provider_base_url(provider)`
@@ -578,6 +617,7 @@ not from direct API key arguments.
 | `retry_backoff_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Base retry backoff from 0 to 60000 milliseconds. |
 | `max_concurrent_requests` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Process-local request concurrency cap from 0 to 1024. |
 | `min_request_interval_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Process-local minimum interval between provider request starts. |
+| `token_limit_per_minute` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Process-local estimated token cap per rolling minute. `0` disables the token cap. |
 | `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | If false, supported functions return `NULL` or an empty result instead of raising provider errors. |
 | `response_format` | `VARCHAR` | Completion and SQL assistant | `text`, `json_object`, or `json_schema`. |
 | `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for structured output hints and validation. |
