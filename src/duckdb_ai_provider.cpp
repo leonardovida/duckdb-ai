@@ -108,42 +108,44 @@ std::string CurrentTimestamp() {
 }
 
 std::string JsonEscape(const std::string &input) {
-	std::ostringstream out;
+	std::string out;
+	out.reserve(input.size());
+	const char *hex = "0123456789abcdef";
 	for (auto c : input) {
 		switch (c) {
 		case '\\':
-			out << "\\\\";
+			out += "\\\\";
 			break;
 		case '"':
-			out << "\\\"";
+			out += "\\\"";
 			break;
 		case '\b':
-			out << "\\b";
+			out += "\\b";
 			break;
 		case '\f':
-			out << "\\f";
+			out += "\\f";
 			break;
 		case '\n':
-			out << "\\n";
+			out += "\\n";
 			break;
 		case '\r':
-			out << "\\r";
+			out += "\\r";
 			break;
 		case '\t':
-			out << "\\t";
+			out += "\\t";
 			break;
 		default:
 			if (static_cast<unsigned char>(c) < 0x20) {
 				auto value = static_cast<unsigned char>(c);
-				out << "\\u";
-				const char *hex = "0123456789abcdef";
-				out << "00" << hex[(value >> 4) & 0xf] << hex[value & 0xf];
+				out += "\\u00";
+				out.push_back(hex[(value >> 4) & 0xf]);
+				out.push_back(hex[value & 0xf]);
 			} else {
-				out << c;
+				out.push_back(c);
 			}
 		}
 	}
-	return out.str();
+	return out;
 }
 
 std::string JsonDouble(double input) {

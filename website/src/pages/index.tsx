@@ -9,9 +9,12 @@ import styles from './index.module.css';
 const functionGroups = [
   'ai_complete',
   'ai_complete_json',
+  'ai_complete_record',
   'ai_embed',
+  'ai_filter',
   'ai_sql',
   'ai_query_data',
+  'ai_count_tokens',
   'ai_usage',
 ];
 
@@ -64,9 +67,13 @@ function DocsSummary(): ReactNode {
             <p>
               The extension is source-first while the public SQL surface and
               provider configuration contract settle. The docs include local
-              validation evidence, smoke-test commands, and release notes.
+              function reference, validation evidence, smoke-test commands, and
+              release notes.
             </p>
             <ul className={styles.linkList}>
+              <li>
+                <Link to="/docs/functions">SQL function reference</Link>
+              </li>
               <li>
                 <Link to="/docs/VALIDATION">Validation evidence</Link>
               </li>
