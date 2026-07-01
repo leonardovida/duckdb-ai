@@ -416,25 +416,38 @@ void ValidateResponseSchemaValue(const std::string &schema, const std::string &f
 	}
 }
 
-LogicalType OptionType(const std::string &name) {
+bool TryGetOptionType(const std::string &name, LogicalType &type) {
 	if (name == "model" || name == "provider" || name == "profile" || name == "secret" || name == "secret_name" ||
 	    name == "system_prompt" || name == "base_url" || name == "response_format" || name == "response_schema" ||
 	    name == "json_schema" || name == "log_format" || name == "log_tags") {
-		return LogicalType::VARCHAR;
+		type = LogicalType::VARCHAR;
+		return true;
 	}
 	if (name == "temperature" || name == "log_sample_rate" || name == "input_token_price_per_million" ||
 	    name == "output_token_price_per_million") {
-		return LogicalType::DOUBLE;
+		type = LogicalType::DOUBLE;
+		return true;
 	}
 	if (name == "max_tokens" || name == "retry_count" || name == "retry_backoff_ms" ||
 	    name == "max_concurrent_requests" || name == "min_request_interval_ms") {
-		return LogicalType::BIGINT;
+		type = LogicalType::BIGINT;
+		return true;
 	}
 	if (name == "timeout_seconds") {
-		return LogicalType::BIGINT;
+		type = LogicalType::BIGINT;
+		return true;
 	}
 	if (name == "fail_on_error" || name == "use_builtin_model_prices") {
-		return LogicalType::BOOLEAN;
+		type = LogicalType::BOOLEAN;
+		return true;
+	}
+	return false;
+}
+
+LogicalType OptionType(const std::string &name) {
+	LogicalType type;
+	if (TryGetOptionType(name, type)) {
+		return type;
 	}
 	throw BinderException("Unsupported AI option \"%s\". Supported options: model, provider, temperature, "
 	                      "system_prompt, max_tokens, base_url, timeout_seconds, retry_count, retry_backoff_ms, "
@@ -469,139 +482,202 @@ Value EvaluateConstantOption(ClientContext &context, Expression &expr, const std
 	return value;
 }
 
+Value CastOptionValue(const Value &value_p, const std::string &function_name, const std::string &name,
+                      const LogicalType &target_type) {
+	if (value_p.IsNull()) {
+		throw BinderException("%s option \"%s\" must not be NULL", function_name, name);
+	}
+	return value_p.DefaultCastAs(target_type);
+}
+
+std::string OptionStringValue(const Value &value, const std::string &function_name, const std::string &name) {
+	return StringValue::Get(CastOptionValue(value, function_name, name, LogicalType::VARCHAR));
+}
+
+double OptionDoubleValue(const Value &value, const std::string &function_name, const std::string &name) {
+	return DoubleValue::Get(CastOptionValue(value, function_name, name, LogicalType::DOUBLE));
+}
+
+int64_t OptionBigIntValue(const Value &value, const std::string &function_name, const std::string &name) {
+	return BigIntValue::Get(CastOptionValue(value, function_name, name, LogicalType::BIGINT));
+}
+
+bool OptionBoolValue(const Value &value, const std::string &function_name, const std::string &name) {
+	return BooleanValue::Get(CastOptionValue(value, function_name, name, LogicalType::BOOLEAN));
+}
+
+std::string NormalizeLogFormatValue(const std::string &value, const std::string &function_name) {
+	auto log_format = LowerAscii(value);
+	if (log_format == "generic_json" || log_format == "generic" || log_format == "json" || log_format == "otlp_json" ||
+	    log_format == "otlp") {
+		return log_format;
+	}
+	throw BinderException("%s option \"log_format\" must be one of: generic_json, otlp_json", function_name);
+}
+
+bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std::string &function_name,
+                                const std::string &name, const Value &value, bool allow_response_options,
+                                bool allow_log_payload_options) {
+	if (name == "model") {
+		options.model = OptionStringValue(value, function_name, name);
+		return true;
+	}
+	if (name == "provider") {
+		options.provider = OptionStringValue(value, function_name, name);
+		return true;
+	}
+	if (name == "profile" || name == "secret" || name == "secret_name") {
+		options.secret_name = OptionStringValue(value, function_name, name);
+		return true;
+	}
+	if (name == "system_prompt") {
+		options.system_prompt = OptionStringValue(value, function_name, name);
+		return true;
+	}
+	if (name == "base_url") {
+		options.base_url = OptionStringValue(value, function_name, name);
+		return true;
+	}
+	if (name == "log_tags") {
+		options.log_tags = OptionStringValue(value, function_name, name);
+		return true;
+	}
+	if (name == "log_format") {
+		options.log_format = NormalizeLogFormatValue(OptionStringValue(value, function_name, name), function_name);
+		return true;
+	}
+	if (name == "response_format") {
+		if (!allow_response_options) {
+			return false;
+		}
+		options.response_format =
+		    NormalizeResponseFormatValue(OptionStringValue(value, function_name, name), function_name);
+		return true;
+	}
+	if (name == "response_schema" || name == "json_schema") {
+		if (!allow_response_options) {
+			return false;
+		}
+		options.response_schema = OptionStringValue(value, function_name, name);
+		ValidateResponseSchemaValue(options.response_schema, function_name);
+		return true;
+	}
+	if (name == "temperature") {
+		options.temperature = OptionDoubleValue(value, function_name, name);
+		if (options.temperature < 0 || options.temperature > 2) {
+			throw BinderException("%s option \"temperature\" must be between 0 and 2", function_name);
+		}
+		options.has_temperature = true;
+		return true;
+	}
+	if (name == "log_sample_rate") {
+		options.log_sample_rate = OptionDoubleValue(value, function_name, name);
+		if (options.log_sample_rate < 0 || options.log_sample_rate > 1) {
+			throw BinderException("%s option \"log_sample_rate\" must be between 0 and 1", function_name);
+		}
+		options.has_log_sample_rate = true;
+		return true;
+	}
+	if (name == "input_token_price_per_million") {
+		options.input_token_price_per_million = OptionDoubleValue(value, function_name, name);
+		if (!std::isfinite(options.input_token_price_per_million) || options.input_token_price_per_million < 0) {
+			throw BinderException("%s option \"input_token_price_per_million\" must be greater than or equal to 0",
+			                      function_name);
+		}
+		options.has_input_token_price_per_million = true;
+		return true;
+	}
+	if (name == "output_token_price_per_million") {
+		options.output_token_price_per_million = OptionDoubleValue(value, function_name, name);
+		if (!std::isfinite(options.output_token_price_per_million) || options.output_token_price_per_million < 0) {
+			throw BinderException("%s option \"output_token_price_per_million\" must be greater than or equal to 0",
+			                      function_name);
+		}
+		options.has_output_token_price_per_million = true;
+		return true;
+	}
+	if (name == "use_builtin_model_prices") {
+		options.use_builtin_model_prices = OptionBoolValue(value, function_name, name);
+		options.has_use_builtin_model_prices = true;
+		return true;
+	}
+	if (name == "max_tokens") {
+		options.max_tokens = OptionBigIntValue(value, function_name, name);
+		if (options.max_tokens <= 0) {
+			throw BinderException("%s option \"max_tokens\" must be greater than 0", function_name);
+		}
+		options.has_max_tokens = true;
+		return true;
+	}
+	if (name == "retry_count") {
+		options.retry_count = OptionBigIntValue(value, function_name, name);
+		if (options.retry_count < 0 || options.retry_count > 10) {
+			throw BinderException("%s option \"retry_count\" must be between 0 and 10", function_name);
+		}
+		options.has_retry_count = true;
+		return true;
+	}
+	if (name == "retry_backoff_ms") {
+		options.retry_backoff_ms = OptionBigIntValue(value, function_name, name);
+		if (options.retry_backoff_ms < 0 || options.retry_backoff_ms > 60000) {
+			throw BinderException("%s option \"retry_backoff_ms\" must be between 0 and 60000", function_name);
+		}
+		options.has_retry_backoff_ms = true;
+		return true;
+	}
+	if (name == "max_concurrent_requests") {
+		options.max_concurrent_requests = OptionBigIntValue(value, function_name, name);
+		if (options.max_concurrent_requests < 0 || options.max_concurrent_requests > 1024) {
+			throw BinderException("%s option \"max_concurrent_requests\" must be between 0 and 1024", function_name);
+		}
+		options.has_max_concurrent_requests = true;
+		return true;
+	}
+	if (name == "min_request_interval_ms") {
+		options.min_request_interval_ms = OptionBigIntValue(value, function_name, name);
+		if (options.min_request_interval_ms < 0 || options.min_request_interval_ms > 60000) {
+			throw BinderException("%s option \"min_request_interval_ms\" must be between 0 and 60000", function_name);
+		}
+		options.has_min_request_interval_ms = true;
+		return true;
+	}
+	if (name == "timeout_seconds") {
+		options.timeout_seconds = OptionBigIntValue(value, function_name, name);
+		if (options.timeout_seconds <= 0) {
+			throw BinderException("%s option \"timeout_seconds\" must be greater than 0", function_name);
+		}
+		options.has_timeout_seconds = true;
+		return true;
+	}
+	if (name == "fail_on_error") {
+		options.fail_on_error = OptionBoolValue(value, function_name, name);
+		return true;
+	}
+	if (name == "log_include_text") {
+		if (!allow_log_payload_options) {
+			return false;
+		}
+		options.log_include_text = OptionBoolValue(value, function_name, name);
+		options.has_log_include_text = true;
+		return true;
+	}
+	if (name == "log_strict") {
+		if (!allow_log_payload_options) {
+			return false;
+		}
+		options.log_strict = OptionBoolValue(value, function_name, name);
+		options.has_log_strict = true;
+		return true;
+	}
+	return false;
+}
+
 void ApplyNamedOption(ClientContext &context, duckdb_ai::CompletionOptions &options, Expression &expr,
                       const std::string &name) {
 	auto target_type = OptionType(name);
 	auto value = EvaluateConstantOption(context, expr, name, target_type);
-	if (name == "model") {
-		options.model = StringValue::Get(value);
-		return;
-	}
-	if (name == "provider") {
-		options.provider = StringValue::Get(value);
-		return;
-	}
-	if (name == "profile" || name == "secret" || name == "secret_name") {
-		options.secret_name = StringValue::Get(value);
-		return;
-	}
-	if (name == "system_prompt") {
-		options.system_prompt = StringValue::Get(value);
-		return;
-	}
-	if (name == "base_url") {
-		options.base_url = StringValue::Get(value);
-		return;
-	}
-	if (name == "log_tags") {
-		options.log_tags = StringValue::Get(value);
-		return;
-	}
-	if (name == "log_format") {
-		auto log_format = LowerAscii(StringValue::Get(value));
-		if (log_format != "generic_json" && log_format != "generic" && log_format != "json" &&
-		    log_format != "otlp_json" && log_format != "otlp") {
-			throw BinderException("AI option \"log_format\" must be one of: generic_json, otlp_json");
-		}
-		options.log_format = log_format;
-		return;
-	}
-	if (name == "response_format") {
-		options.response_format = NormalizeResponseFormatValue(StringValue::Get(value), "AI");
-		return;
-	}
-	if (name == "response_schema" || name == "json_schema") {
-		options.response_schema = StringValue::Get(value);
-		ValidateResponseSchemaValue(options.response_schema, "AI");
-		return;
-	}
-	if (name == "temperature") {
-		options.temperature = DoubleValue::Get(value);
-		if (options.temperature < 0 || options.temperature > 2) {
-			throw BinderException("AI option \"temperature\" must be between 0 and 2");
-		}
-		options.has_temperature = true;
-		return;
-	}
-	if (name == "log_sample_rate") {
-		options.log_sample_rate = DoubleValue::Get(value);
-		if (options.log_sample_rate < 0 || options.log_sample_rate > 1) {
-			throw BinderException("AI option \"log_sample_rate\" must be between 0 and 1");
-		}
-		options.has_log_sample_rate = true;
-		return;
-	}
-	if (name == "input_token_price_per_million") {
-		options.input_token_price_per_million = DoubleValue::Get(value);
-		if (!std::isfinite(options.input_token_price_per_million) || options.input_token_price_per_million < 0) {
-			throw BinderException("AI option \"input_token_price_per_million\" must be greater than or equal to 0");
-		}
-		options.has_input_token_price_per_million = true;
-		return;
-	}
-	if (name == "output_token_price_per_million") {
-		options.output_token_price_per_million = DoubleValue::Get(value);
-		if (!std::isfinite(options.output_token_price_per_million) || options.output_token_price_per_million < 0) {
-			throw BinderException("AI option \"output_token_price_per_million\" must be greater than or equal to 0");
-		}
-		options.has_output_token_price_per_million = true;
-		return;
-	}
-	if (name == "use_builtin_model_prices") {
-		options.use_builtin_model_prices = BooleanValue::Get(value);
-		options.has_use_builtin_model_prices = true;
-		return;
-	}
-	if (name == "max_tokens") {
-		options.max_tokens = BigIntValue::Get(value);
-		if (options.max_tokens <= 0) {
-			throw BinderException("AI option \"max_tokens\" must be greater than 0");
-		}
-		options.has_max_tokens = true;
-		return;
-	}
-	if (name == "retry_count") {
-		options.retry_count = BigIntValue::Get(value);
-		if (options.retry_count < 0 || options.retry_count > 10) {
-			throw BinderException("AI option \"retry_count\" must be between 0 and 10");
-		}
-		options.has_retry_count = true;
-		return;
-	}
-	if (name == "retry_backoff_ms") {
-		options.retry_backoff_ms = BigIntValue::Get(value);
-		if (options.retry_backoff_ms < 0 || options.retry_backoff_ms > 60000) {
-			throw BinderException("AI option \"retry_backoff_ms\" must be between 0 and 60000");
-		}
-		options.has_retry_backoff_ms = true;
-		return;
-	}
-	if (name == "max_concurrent_requests") {
-		options.max_concurrent_requests = BigIntValue::Get(value);
-		if (options.max_concurrent_requests < 0 || options.max_concurrent_requests > 1024) {
-			throw BinderException("AI option \"max_concurrent_requests\" must be between 0 and 1024");
-		}
-		options.has_max_concurrent_requests = true;
-		return;
-	}
-	if (name == "min_request_interval_ms") {
-		options.min_request_interval_ms = BigIntValue::Get(value);
-		if (options.min_request_interval_ms < 0 || options.min_request_interval_ms > 60000) {
-			throw BinderException("AI option \"min_request_interval_ms\" must be between 0 and 60000");
-		}
-		options.has_min_request_interval_ms = true;
-		return;
-	}
-	if (name == "timeout_seconds") {
-		options.timeout_seconds = BigIntValue::Get(value);
-		if (options.timeout_seconds <= 0) {
-			throw BinderException("AI option \"timeout_seconds\" must be greater than 0");
-		}
-		options.has_timeout_seconds = true;
-		return;
-	}
-	if (name == "fail_on_error") {
-		options.fail_on_error = BooleanValue::Get(value);
+	if (!ApplyCompletionValueOption(options, "AI", name, value, true, false)) {
+		throw InternalException("Unhandled AI option \"%s\"", name);
 	}
 }
 
@@ -935,16 +1011,40 @@ unique_ptr<FunctionData> AiCompleteJsonBind(ClientContext &context, ScalarFuncti
 	return bind_data;
 }
 
-bool ReadStringArgument(DataChunk &args, idx_t column, idx_t row, std::string &value) {
-	auto &vector = args.data[column];
+struct StringVectorReader {
+	// DuckDB vectors are chunk-oriented; cache the unified format once instead of per row.
+	StringVectorReader(DataChunk &args, idx_t column) {
+		args.data[column].ToUnifiedFormat(args.size(), data);
+		values = UnifiedVectorFormat::GetData<string_t>(data);
+	}
+
+	bool Read(idx_t row, std::string &value) const {
+		auto mapped_row = data.sel->get_index(row);
+		if (!data.validity.RowIsValid(mapped_row)) {
+			return false;
+		}
+		value = values[mapped_row].GetString();
+		return true;
+	}
+
 	UnifiedVectorFormat data;
-	vector.ToUnifiedFormat(args.size(), data);
-	auto mapped_row = data.sel->get_index(row);
-	if (!data.validity.RowIsValid(mapped_row)) {
+	const string_t *values;
+};
+
+unique_ptr<StringVectorReader> OptionalStringReader(DataChunk &args, bool enabled, idx_t column) {
+	return enabled ? make_uniq<StringVectorReader>(args, column) : nullptr;
+}
+
+bool ReadRuntimeOptions(const duckdb_ai::CompletionOptions &base_options, bool has_model_arg,
+                        const StringVectorReader *model_reader, bool has_provider_arg,
+                        const StringVectorReader *provider_reader, idx_t row, duckdb_ai::CompletionOptions &options) {
+	options = base_options;
+	if (has_model_arg && !model_reader->Read(row, options.model)) {
 		return false;
 	}
-	auto values = UnifiedVectorFormat::GetData<string_t>(data);
-	value = values[mapped_row].GetString();
+	if (has_provider_arg && !provider_reader->Read(row, options.provider)) {
+		return false;
+	}
 	return true;
 }
 
@@ -1002,20 +1102,20 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<string_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader prompt_reader(args, bind_data.prompt_index);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string prompt;
-		if (!ReadStringArgument(args, bind_data.prompt_index, row, prompt)) {
+		if (!prompt_reader.Read(row, prompt)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
 
-		auto options = bind_data.options;
-		if (bind_data.has_model_arg && !ReadStringArgument(args, bind_data.model_index, row, options.model)) {
-			result_validity.SetInvalid(row);
-			continue;
-		}
-		if (bind_data.has_provider_arg && !ReadStringArgument(args, bind_data.provider_index, row, options.provider)) {
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
@@ -1136,145 +1236,9 @@ AiRecordColumn BuildAiRecordColumn(const duckdb_ai::JsonSchemaProperty &property
 }
 
 void ApplyAiRecordValueOption(duckdb_ai::CompletionOptions &options, const std::string &name, const Value &value_p) {
-	if (value_p.IsNull()) {
-		throw BinderException("ai_complete_record option \"%s\" must not be NULL", name);
+	if (!ApplyCompletionValueOption(options, "ai_complete_record", name, value_p, false, true)) {
+		throw BinderException("Unsupported ai_complete_record option \"%s\"", name);
 	}
-	auto value = value_p;
-	if (name == "model") {
-		options.model = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "provider") {
-		options.provider = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "profile" || name == "secret" || name == "secret_name") {
-		options.secret_name = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "system_prompt") {
-		options.system_prompt = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "base_url") {
-		options.base_url = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "log_format") {
-		auto log_format = LowerAscii(StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR)));
-		if (log_format != "generic_json" && log_format != "generic" && log_format != "json" &&
-		    log_format != "otlp_json" && log_format != "otlp") {
-			throw BinderException("ai_complete_record option \"log_format\" must be one of: generic_json, otlp_json");
-		}
-		options.log_format = log_format;
-		return;
-	}
-	if (name == "log_tags") {
-		options.log_tags = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "temperature") {
-		options.temperature = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (options.temperature < 0 || options.temperature > 2) {
-			throw BinderException("ai_complete_record option \"temperature\" must be between 0 and 2");
-		}
-		options.has_temperature = true;
-		return;
-	}
-	if (name == "max_tokens") {
-		options.max_tokens = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.max_tokens <= 0) {
-			throw BinderException("ai_complete_record option \"max_tokens\" must be greater than 0");
-		}
-		options.has_max_tokens = true;
-		return;
-	}
-	if (name == "timeout_seconds") {
-		options.timeout_seconds = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.timeout_seconds <= 0) {
-			throw BinderException("ai_complete_record option \"timeout_seconds\" must be greater than 0");
-		}
-		options.has_timeout_seconds = true;
-		return;
-	}
-	if (name == "retry_count") {
-		options.retry_count = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.retry_count < 0 || options.retry_count > 10) {
-			throw BinderException("ai_complete_record option \"retry_count\" must be between 0 and 10");
-		}
-		options.has_retry_count = true;
-		return;
-	}
-	if (name == "retry_backoff_ms") {
-		options.retry_backoff_ms = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.retry_backoff_ms < 0 || options.retry_backoff_ms > 60000) {
-			throw BinderException("ai_complete_record option \"retry_backoff_ms\" must be between 0 and 60000");
-		}
-		options.has_retry_backoff_ms = true;
-		return;
-	}
-	if (name == "max_concurrent_requests") {
-		options.max_concurrent_requests = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.max_concurrent_requests < 0 || options.max_concurrent_requests > 1024) {
-			throw BinderException("ai_complete_record option \"max_concurrent_requests\" must be between 0 and 1024");
-		}
-		options.has_max_concurrent_requests = true;
-		return;
-	}
-	if (name == "min_request_interval_ms") {
-		options.min_request_interval_ms = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.min_request_interval_ms < 0 || options.min_request_interval_ms > 60000) {
-			throw BinderException("ai_complete_record option \"min_request_interval_ms\" must be between 0 and 60000");
-		}
-		options.has_min_request_interval_ms = true;
-		return;
-	}
-	if (name == "input_token_price_per_million") {
-		options.input_token_price_per_million = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (!std::isfinite(options.input_token_price_per_million) || options.input_token_price_per_million < 0) {
-			throw BinderException(
-			    "ai_complete_record option \"input_token_price_per_million\" must be greater than or equal to 0");
-		}
-		options.has_input_token_price_per_million = true;
-		return;
-	}
-	if (name == "output_token_price_per_million") {
-		options.output_token_price_per_million = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (!std::isfinite(options.output_token_price_per_million) || options.output_token_price_per_million < 0) {
-			throw BinderException(
-			    "ai_complete_record option \"output_token_price_per_million\" must be greater than or equal to 0");
-		}
-		options.has_output_token_price_per_million = true;
-		return;
-	}
-	if (name == "use_builtin_model_prices") {
-		options.use_builtin_model_prices = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		options.has_use_builtin_model_prices = true;
-		return;
-	}
-	if (name == "log_sample_rate") {
-		options.log_sample_rate = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (options.log_sample_rate < 0 || options.log_sample_rate > 1) {
-			throw BinderException("ai_complete_record option \"log_sample_rate\" must be between 0 and 1");
-		}
-		options.has_log_sample_rate = true;
-		return;
-	}
-	if (name == "log_include_text") {
-		options.log_include_text = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		options.has_log_include_text = true;
-		return;
-	}
-	if (name == "log_strict") {
-		options.log_strict = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		options.has_log_strict = true;
-		return;
-	}
-	if (name == "fail_on_error") {
-		options.fail_on_error = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		return;
-	}
-	throw BinderException("Unsupported ai_complete_record option \"%s\"", name);
 }
 
 const duckdb_ai::JsonExtractedValue *FindExtractedField(const duckdb_ai::JsonExtractedValue &value,
@@ -1536,18 +1500,15 @@ unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction
 	return std::move(bind_data);
 }
 
-void ReadEmbeddingInputs(DataChunk &args, const AiCompletionBindData &bind_data, idx_t row, std::string &input,
-                         duckdb_ai::CompletionOptions &options, bool &is_null) {
-	if (!ReadStringArgument(args, bind_data.prompt_index, row, input)) {
+void ReadEmbeddingInputs(const StringVectorReader &input_reader, const StringVectorReader *model_reader,
+                         const StringVectorReader *provider_reader, const AiCompletionBindData &bind_data, idx_t row,
+                         std::string &input, duckdb_ai::CompletionOptions &options, bool &is_null) {
+	if (!input_reader.Read(row, input)) {
 		is_null = true;
 		return;
 	}
-	options = bind_data.options;
-	if (bind_data.has_model_arg && !ReadStringArgument(args, bind_data.model_index, row, options.model)) {
-		is_null = true;
-		return;
-	}
-	if (bind_data.has_provider_arg && !ReadStringArgument(args, bind_data.provider_index, row, options.provider)) {
+	if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader, bind_data.has_provider_arg,
+	                        provider_reader, row, options)) {
 		is_null = true;
 	}
 }
@@ -1578,21 +1539,22 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<double>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader left_reader(args, 0);
+	StringVectorReader right_reader(args, 1);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string left;
 		std::string right;
-		if (!ReadStringArgument(args, 0, row, left) || !ReadStringArgument(args, 1, row, right)) {
+		if (!left_reader.Read(row, left) || !right_reader.Read(row, right)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
 
-		auto options = bind_data.options;
-		if (bind_data.has_model_arg && !ReadStringArgument(args, bind_data.model_index, row, options.model)) {
-			result_validity.SetInvalid(row);
-			continue;
-		}
-		if (bind_data.has_provider_arg && !ReadStringArgument(args, bind_data.provider_index, row, options.provider)) {
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
@@ -1618,12 +1580,16 @@ void AiEmbeddingRequestJsonFunction(DataChunk &args, ExpressionState &state, Vec
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<string_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader input_reader(args, bind_data.prompt_index);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		duckdb_ai::CompletionOptions options;
 		bool is_null = false;
-		ReadEmbeddingInputs(args, bind_data, row, input, options, is_null);
+		ReadEmbeddingInputs(input_reader, model_reader.get(), provider_reader.get(), bind_data, row, input, options,
+		                    is_null);
 		if (is_null) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -1649,12 +1615,16 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<list_entry_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader input_reader(args, bind_data.prompt_index);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		duckdb_ai::CompletionOptions options;
 		bool is_null = false;
-		ReadEmbeddingInputs(args, bind_data, row, input, options, is_null);
+		ReadEmbeddingInputs(input_reader, model_reader.get(), provider_reader.get(), bind_data, row, input, options,
+		                    is_null);
 		if (is_null) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -2473,25 +2443,26 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<string_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader input_reader(args, 0);
+	auto parameter_reader = OptionalStringReader(args, bind_data.required_args == 2, 1);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
-		if (!ReadStringArgument(args, 0, row, input)) {
+		if (!input_reader.Read(row, input)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
 		std::string parameter;
-		if (bind_data.required_args == 2 && !ReadStringArgument(args, 1, row, parameter)) {
+		if (bind_data.required_args == 2 && !parameter_reader->Read(row, parameter)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
 
-		auto options = bind_data.options;
-		if (bind_data.has_model_arg && !ReadStringArgument(args, bind_data.model_index, row, options.model)) {
-			result_validity.SetInvalid(row);
-			continue;
-		}
-		if (bind_data.has_provider_arg && !ReadStringArgument(args, bind_data.provider_index, row, options.provider)) {
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
@@ -2533,21 +2504,22 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<bool>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader input_reader(args, 0);
+	StringVectorReader predicate_reader(args, 1);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		std::string predicate;
-		if (!ReadStringArgument(args, 0, row, input) || !ReadStringArgument(args, 1, row, predicate)) {
+		if (!input_reader.Read(row, input) || !predicate_reader.Read(row, predicate)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
 
-		auto options = bind_data.options;
-		if (bind_data.has_model_arg && !ReadStringArgument(args, bind_data.model_index, row, options.model)) {
-			result_validity.SetInvalid(row);
-			continue;
-		}
-		if (bind_data.has_provider_arg && !ReadStringArgument(args, bind_data.provider_index, row, options.provider)) {
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
@@ -2591,10 +2563,11 @@ void AiCountTokensFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<int64_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader input_reader(args, bind_data.prompt_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
-		if (!ReadStringArgument(args, bind_data.prompt_index, row, input)) {
+		if (!input_reader.Read(row, input)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
@@ -2788,141 +2761,9 @@ void ApplyPromptQueryValueOption(duckdb_ai::CompletionOptions &options, std::str
 		schema_options.sample_rows = ReadSampleRowsValue(value, "ai_query_data");
 		return;
 	}
-	if (name == "model") {
-		options.model = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
+	if (!ApplyCompletionValueOption(options, "ai_query_data", name, value_p, true, false)) {
+		throw BinderException("Unsupported ai_query_data option \"%s\"", name);
 	}
-	if (name == "provider") {
-		options.provider = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "profile" || name == "secret" || name == "secret_name") {
-		options.secret_name = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "system_prompt") {
-		options.system_prompt = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "base_url") {
-		options.base_url = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "log_format") {
-		auto log_format = LowerAscii(StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR)));
-		if (log_format != "generic_json" && log_format != "generic" && log_format != "json" &&
-		    log_format != "otlp_json" && log_format != "otlp") {
-			throw BinderException("ai_query_data option \"log_format\" must be one of: generic_json, otlp_json");
-		}
-		options.log_format = log_format;
-		return;
-	}
-	if (name == "log_tags") {
-		options.log_tags = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "response_format") {
-		options.response_format =
-		    NormalizeResponseFormatValue(StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR)), "ai_query_data");
-		return;
-	}
-	if (name == "response_schema" || name == "json_schema") {
-		options.response_schema = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		ValidateResponseSchemaValue(options.response_schema, "ai_query_data");
-		return;
-	}
-	if (name == "temperature") {
-		options.temperature = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (options.temperature < 0 || options.temperature > 2) {
-			throw BinderException("ai_query_data option \"temperature\" must be between 0 and 2");
-		}
-		options.has_temperature = true;
-		return;
-	}
-	if (name == "log_sample_rate") {
-		options.log_sample_rate = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (options.log_sample_rate < 0 || options.log_sample_rate > 1) {
-			throw BinderException("ai_query_data option \"log_sample_rate\" must be between 0 and 1");
-		}
-		options.has_log_sample_rate = true;
-		return;
-	}
-	if (name == "input_token_price_per_million") {
-		options.input_token_price_per_million = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (!std::isfinite(options.input_token_price_per_million) || options.input_token_price_per_million < 0) {
-			throw BinderException(
-			    "ai_query_data option \"input_token_price_per_million\" must be greater than or equal to 0");
-		}
-		options.has_input_token_price_per_million = true;
-		return;
-	}
-	if (name == "output_token_price_per_million") {
-		options.output_token_price_per_million = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (!std::isfinite(options.output_token_price_per_million) || options.output_token_price_per_million < 0) {
-			throw BinderException(
-			    "ai_query_data option \"output_token_price_per_million\" must be greater than or equal to 0");
-		}
-		options.has_output_token_price_per_million = true;
-		return;
-	}
-	if (name == "use_builtin_model_prices") {
-		options.use_builtin_model_prices = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		options.has_use_builtin_model_prices = true;
-		return;
-	}
-	if (name == "max_tokens") {
-		options.max_tokens = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.max_tokens <= 0) {
-			throw BinderException("ai_query_data option \"max_tokens\" must be greater than 0");
-		}
-		options.has_max_tokens = true;
-		return;
-	}
-	if (name == "retry_count") {
-		options.retry_count = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.retry_count < 0 || options.retry_count > 10) {
-			throw BinderException("ai_query_data option \"retry_count\" must be between 0 and 10");
-		}
-		options.has_retry_count = true;
-		return;
-	}
-	if (name == "retry_backoff_ms") {
-		options.retry_backoff_ms = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.retry_backoff_ms < 0 || options.retry_backoff_ms > 60000) {
-			throw BinderException("ai_query_data option \"retry_backoff_ms\" must be between 0 and 60000");
-		}
-		options.has_retry_backoff_ms = true;
-		return;
-	}
-	if (name == "max_concurrent_requests") {
-		options.max_concurrent_requests = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.max_concurrent_requests < 0 || options.max_concurrent_requests > 1024) {
-			throw BinderException("ai_query_data option \"max_concurrent_requests\" must be between 0 and 1024");
-		}
-		options.has_max_concurrent_requests = true;
-		return;
-	}
-	if (name == "min_request_interval_ms") {
-		options.min_request_interval_ms = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.min_request_interval_ms < 0 || options.min_request_interval_ms > 60000) {
-			throw BinderException("ai_query_data option \"min_request_interval_ms\" must be between 0 and 60000");
-		}
-		options.has_min_request_interval_ms = true;
-		return;
-	}
-	if (name == "timeout_seconds") {
-		options.timeout_seconds = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (options.timeout_seconds <= 0) {
-			throw BinderException("ai_query_data option \"timeout_seconds\" must be greater than 0");
-		}
-		options.has_timeout_seconds = true;
-		return;
-	}
-	if (name == "fail_on_error") {
-		options.fail_on_error = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		return;
-	}
-	throw BinderException("Unsupported ai_query_data option \"%s\"", name);
 }
 
 unique_ptr<TableRef> EmptyPromptQueryResult(const ParserOptions &options) {
@@ -2970,17 +2811,21 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 	auto &result_validity = FlatVector::Validity(result);
 	std::string auto_schema_context;
 	bool has_auto_schema_context = false;
+	StringVectorReader question_reader(args, 0);
+	auto schema_context_reader =
+	    OptionalStringReader(args, bind_data.has_schema_context_arg, bind_data.schema_context_index);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string question;
-		if (!ReadStringArgument(args, 0, row, question)) {
+		if (!question_reader.Read(row, question)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
 
 		auto schema_context = bind_data.schema_context;
-		if (bind_data.has_schema_context_arg &&
-		    !ReadStringArgument(args, bind_data.schema_context_index, row, schema_context)) {
+		if (bind_data.has_schema_context_arg && !schema_context_reader->Read(row, schema_context)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
@@ -2992,12 +2837,9 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 			schema_context = auto_schema_context;
 		}
 
-		auto options = bind_data.options;
-		if (bind_data.has_model_arg && !ReadStringArgument(args, bind_data.model_index, row, options.model)) {
-			result_validity.SetInvalid(row);
-			continue;
-		}
-		if (bind_data.has_provider_arg && !ReadStringArgument(args, bind_data.provider_index, row, options.provider)) {
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
@@ -3171,143 +3013,9 @@ void ApplyPromptAssistantValueOption(PromptAssistantBindData &bind_data, PromptS
 		has_error = true;
 		return;
 	}
-	if (name == "model") {
-		bind_data.options.model = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
+	if (!ApplyCompletionValueOption(bind_data.options, function_name, name, value_p, true, false)) {
+		throw BinderException("Unsupported %s option \"%s\"", function_name, name);
 	}
-	if (name == "provider") {
-		bind_data.options.provider = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "profile" || name == "secret" || name == "secret_name") {
-		bind_data.options.secret_name = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "system_prompt") {
-		bind_data.options.system_prompt = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "base_url") {
-		bind_data.options.base_url = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "log_format") {
-		auto log_format = LowerAscii(StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR)));
-		if (log_format != "generic_json" && log_format != "generic" && log_format != "json" &&
-		    log_format != "otlp_json" && log_format != "otlp") {
-			throw BinderException("%s option \"log_format\" must be one of: generic_json, otlp_json", function_name);
-		}
-		bind_data.options.log_format = log_format;
-		return;
-	}
-	if (name == "log_tags") {
-		bind_data.options.log_tags = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		return;
-	}
-	if (name == "response_format") {
-		bind_data.options.response_format =
-		    NormalizeResponseFormatValue(StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR)), function_name);
-		return;
-	}
-	if (name == "response_schema" || name == "json_schema") {
-		bind_data.options.response_schema = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-		ValidateResponseSchemaValue(bind_data.options.response_schema, function_name);
-		return;
-	}
-	if (name == "temperature") {
-		bind_data.options.temperature = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (bind_data.options.temperature < 0 || bind_data.options.temperature > 2) {
-			throw BinderException("%s option \"temperature\" must be between 0 and 2", function_name);
-		}
-		bind_data.options.has_temperature = true;
-		return;
-	}
-	if (name == "log_sample_rate") {
-		bind_data.options.log_sample_rate = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (bind_data.options.log_sample_rate < 0 || bind_data.options.log_sample_rate > 1) {
-			throw BinderException("%s option \"log_sample_rate\" must be between 0 and 1", function_name);
-		}
-		bind_data.options.has_log_sample_rate = true;
-		return;
-	}
-	if (name == "input_token_price_per_million") {
-		bind_data.options.input_token_price_per_million = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (!std::isfinite(bind_data.options.input_token_price_per_million) ||
-		    bind_data.options.input_token_price_per_million < 0) {
-			throw BinderException("%s option \"input_token_price_per_million\" must be greater than or equal to 0",
-			                      function_name);
-		}
-		bind_data.options.has_input_token_price_per_million = true;
-		return;
-	}
-	if (name == "output_token_price_per_million") {
-		bind_data.options.output_token_price_per_million = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
-		if (!std::isfinite(bind_data.options.output_token_price_per_million) ||
-		    bind_data.options.output_token_price_per_million < 0) {
-			throw BinderException("%s option \"output_token_price_per_million\" must be greater than or equal to 0",
-			                      function_name);
-		}
-		bind_data.options.has_output_token_price_per_million = true;
-		return;
-	}
-	if (name == "use_builtin_model_prices") {
-		bind_data.options.use_builtin_model_prices = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		bind_data.options.has_use_builtin_model_prices = true;
-		return;
-	}
-	if (name == "max_tokens") {
-		bind_data.options.max_tokens = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (bind_data.options.max_tokens <= 0) {
-			throw BinderException("%s option \"max_tokens\" must be greater than 0", function_name);
-		}
-		bind_data.options.has_max_tokens = true;
-		return;
-	}
-	if (name == "retry_count") {
-		bind_data.options.retry_count = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (bind_data.options.retry_count < 0 || bind_data.options.retry_count > 10) {
-			throw BinderException("%s option \"retry_count\" must be between 0 and 10", function_name);
-		}
-		bind_data.options.has_retry_count = true;
-		return;
-	}
-	if (name == "retry_backoff_ms") {
-		bind_data.options.retry_backoff_ms = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (bind_data.options.retry_backoff_ms < 0 || bind_data.options.retry_backoff_ms > 60000) {
-			throw BinderException("%s option \"retry_backoff_ms\" must be between 0 and 60000", function_name);
-		}
-		bind_data.options.has_retry_backoff_ms = true;
-		return;
-	}
-	if (name == "max_concurrent_requests") {
-		bind_data.options.max_concurrent_requests = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (bind_data.options.max_concurrent_requests < 0 || bind_data.options.max_concurrent_requests > 1024) {
-			throw BinderException("%s option \"max_concurrent_requests\" must be between 0 and 1024", function_name);
-		}
-		bind_data.options.has_max_concurrent_requests = true;
-		return;
-	}
-	if (name == "min_request_interval_ms") {
-		bind_data.options.min_request_interval_ms = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (bind_data.options.min_request_interval_ms < 0 || bind_data.options.min_request_interval_ms > 60000) {
-			throw BinderException("%s option \"min_request_interval_ms\" must be between 0 and 60000", function_name);
-		}
-		bind_data.options.has_min_request_interval_ms = true;
-		return;
-	}
-	if (name == "timeout_seconds") {
-		bind_data.options.timeout_seconds = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
-		if (bind_data.options.timeout_seconds <= 0) {
-			throw BinderException("%s option \"timeout_seconds\" must be greater than 0", function_name);
-		}
-		bind_data.options.has_timeout_seconds = true;
-		return;
-	}
-	if (name == "fail_on_error") {
-		bind_data.options.fail_on_error = BooleanValue::Get(value.DefaultCastAs(LogicalType::BOOLEAN));
-		return;
-	}
-	throw BinderException("Unsupported %s option \"%s\"", function_name, name);
 }
 
 unique_ptr<FunctionData> PromptAssistantBindInternal(ClientContext &context, TableFunctionBindInput &input,
@@ -3873,36 +3581,50 @@ void RegisterAiAggregateFunction(ExtensionLoader &loader, const std::string &nam
 	loader.RegisterFunction(functions);
 }
 
+void AddCompletionNamedParameters(TableFunction &function, bool include_response_options,
+                                  bool include_log_payload_options) {
+	static const char *completion_options[] = {"model",
+	                                           "provider",
+	                                           "profile",
+	                                           "secret",
+	                                           "secret_name",
+	                                           "temperature",
+	                                           "system_prompt",
+	                                           "max_tokens",
+	                                           "base_url",
+	                                           "timeout_seconds",
+	                                           "retry_count",
+	                                           "retry_backoff_ms",
+	                                           "max_concurrent_requests",
+	                                           "min_request_interval_ms",
+	                                           "input_token_price_per_million",
+	                                           "output_token_price_per_million",
+	                                           "use_builtin_model_prices",
+	                                           "log_format",
+	                                           "log_tags",
+	                                           "log_sample_rate",
+	                                           "fail_on_error"};
+	for (auto name : completion_options) {
+		function.named_parameters[name] = OptionType(name);
+	}
+	if (include_response_options) {
+		function.named_parameters["response_format"] = LogicalType::VARCHAR;
+		function.named_parameters["response_schema"] = LogicalType::VARCHAR;
+		function.named_parameters["json_schema"] = LogicalType::VARCHAR;
+	}
+	if (include_log_payload_options) {
+		function.named_parameters["log_include_text"] = LogicalType::BOOLEAN;
+		function.named_parameters["log_strict"] = LogicalType::BOOLEAN;
+	}
+}
+
 void AddPromptQueryNamedParameters(TableFunction &function) {
 	function.named_parameters["schema_context"] = LogicalType::VARCHAR;
 	function.named_parameters["schema"] = LogicalType::VARCHAR;
 	function.named_parameters["include_tables"] = LogicalType::LIST(LogicalType::VARCHAR);
 	function.named_parameters["exclude_tables"] = LogicalType::LIST(LogicalType::VARCHAR);
 	function.named_parameters["sample_rows"] = LogicalType::BIGINT;
-	function.named_parameters["model"] = LogicalType::VARCHAR;
-	function.named_parameters["provider"] = LogicalType::VARCHAR;
-	function.named_parameters["profile"] = LogicalType::VARCHAR;
-	function.named_parameters["secret"] = LogicalType::VARCHAR;
-	function.named_parameters["secret_name"] = LogicalType::VARCHAR;
-	function.named_parameters["temperature"] = LogicalType::DOUBLE;
-	function.named_parameters["system_prompt"] = LogicalType::VARCHAR;
-	function.named_parameters["max_tokens"] = LogicalType::BIGINT;
-	function.named_parameters["base_url"] = LogicalType::VARCHAR;
-	function.named_parameters["retry_count"] = LogicalType::BIGINT;
-	function.named_parameters["retry_backoff_ms"] = LogicalType::BIGINT;
-	function.named_parameters["max_concurrent_requests"] = LogicalType::BIGINT;
-	function.named_parameters["min_request_interval_ms"] = LogicalType::BIGINT;
-	function.named_parameters["input_token_price_per_million"] = LogicalType::DOUBLE;
-	function.named_parameters["output_token_price_per_million"] = LogicalType::DOUBLE;
-	function.named_parameters["use_builtin_model_prices"] = LogicalType::BOOLEAN;
-	function.named_parameters["response_format"] = LogicalType::VARCHAR;
-	function.named_parameters["response_schema"] = LogicalType::VARCHAR;
-	function.named_parameters["json_schema"] = LogicalType::VARCHAR;
-	function.named_parameters["log_format"] = LogicalType::VARCHAR;
-	function.named_parameters["log_tags"] = LogicalType::VARCHAR;
-	function.named_parameters["log_sample_rate"] = LogicalType::DOUBLE;
-	function.named_parameters["timeout_seconds"] = LogicalType::BIGINT;
-	function.named_parameters["fail_on_error"] = LogicalType::BOOLEAN;
+	AddCompletionNamedParameters(function, true, false);
 }
 
 void AddPromptSchemaNamedParameters(TableFunction &function) {
@@ -3912,29 +3634,7 @@ void AddPromptSchemaNamedParameters(TableFunction &function) {
 }
 
 void AddAiRecordNamedParameters(TableFunction &function) {
-	function.named_parameters["model"] = LogicalType::VARCHAR;
-	function.named_parameters["provider"] = LogicalType::VARCHAR;
-	function.named_parameters["profile"] = LogicalType::VARCHAR;
-	function.named_parameters["secret"] = LogicalType::VARCHAR;
-	function.named_parameters["secret_name"] = LogicalType::VARCHAR;
-	function.named_parameters["temperature"] = LogicalType::DOUBLE;
-	function.named_parameters["system_prompt"] = LogicalType::VARCHAR;
-	function.named_parameters["max_tokens"] = LogicalType::BIGINT;
-	function.named_parameters["base_url"] = LogicalType::VARCHAR;
-	function.named_parameters["timeout_seconds"] = LogicalType::BIGINT;
-	function.named_parameters["retry_count"] = LogicalType::BIGINT;
-	function.named_parameters["retry_backoff_ms"] = LogicalType::BIGINT;
-	function.named_parameters["max_concurrent_requests"] = LogicalType::BIGINT;
-	function.named_parameters["min_request_interval_ms"] = LogicalType::BIGINT;
-	function.named_parameters["input_token_price_per_million"] = LogicalType::DOUBLE;
-	function.named_parameters["output_token_price_per_million"] = LogicalType::DOUBLE;
-	function.named_parameters["use_builtin_model_prices"] = LogicalType::BOOLEAN;
-	function.named_parameters["log_format"] = LogicalType::VARCHAR;
-	function.named_parameters["log_tags"] = LogicalType::VARCHAR;
-	function.named_parameters["log_sample_rate"] = LogicalType::DOUBLE;
-	function.named_parameters["log_include_text"] = LogicalType::BOOLEAN;
-	function.named_parameters["log_strict"] = LogicalType::BOOLEAN;
-	function.named_parameters["fail_on_error"] = LogicalType::BOOLEAN;
+	AddCompletionNamedParameters(function, false, true);
 }
 
 void AddPromptAssistantNamedParameters(TableFunction &function, bool include_error) {

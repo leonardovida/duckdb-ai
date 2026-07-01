@@ -12,6 +12,11 @@ SQL, usage logging, and local validation evidence.
 
 ## Start here
 
+- [SQL function reference](functions.md): every scalar, aggregate, and table
+  function exposed by the extension, with examples and result shapes.
+- [Provider guides](provider-guides.md): end-to-end examples for Ollama, OpenAI,
+  Azure OpenAI, Claude, Gemini, Mistral, Z.ai, DeepSeek, OpenRouter, and local
+  OpenAI-compatible gateways.
 - [Validation](VALIDATION.md): local build, test, and smoke evidence for the
   pinned DuckDB extension build.
 - [Smoke testing](SMOKE_TESTING.md): deterministic mock-provider checks plus

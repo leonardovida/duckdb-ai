@@ -15,6 +15,8 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 const sidebars: SidebarsConfig = {
   docsSidebar: [
     'index',
+    'functions',
+    'provider-guides',
     'VALIDATION',
     'SMOKE_TESTING',
     'DISTRIBUTION',
