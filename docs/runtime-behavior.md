@@ -131,25 +131,3 @@ embedding arrays, `ai_complete_json()` validation, and
 
 `ai_complete_json()` and `ai_complete_record()` intentionally implement a
 documented JSON Schema subset rather than full JSON Schema draft parity.
-
-## CI coverage
-
-Pull requests run the same deterministic extension checks used locally:
-
-```sh
-GEN=ninja make release
-GEN=ninja make test
-python3 test/smoke/mock_provider_smoke.py
-```
-
-Docs changes should also pass:
-
-```sh
-cd website
-npm run typecheck
-npm run build
-```
-
-The mock-provider smoke covers cache hits, allowlist failures, retry behavior,
-provider error redaction, usage events, structured JSON validation, embeddings,
-and SQL-assistant provider paths without live network credentials.

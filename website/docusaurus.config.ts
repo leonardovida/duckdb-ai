@@ -90,12 +90,12 @@ const config: Config = {
               to: '/docs',
             },
             {
-              label: 'Validation',
-              to: '/docs/VALIDATION',
+              label: 'SQL reference',
+              to: '/docs/functions',
             },
             {
-              label: 'Releasing',
-              to: '/docs/RELEASING',
+              label: 'Provider guides',
+              to: '/docs/provider-guides',
             },
           ],
         },
@@ -112,12 +112,12 @@ const config: Config = {
           title: 'More',
           items: [
             {
-              label: 'Smoke testing',
-              to: '/docs/SMOKE_TESTING',
+              label: 'Cookbooks',
+              to: '/docs/cookbooks',
             },
             {
-              label: 'Distribution',
-              to: '/docs/DISTRIBUTION',
+              label: 'Security and data flow',
+              to: '/docs/security-data-flow',
             },
           ],
         },

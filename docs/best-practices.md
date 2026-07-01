@@ -374,26 +374,3 @@ SELECT * FROM ai_models();
 Treat `ai_models()` as a convenience catalog, not a billing source of truth.
 Provider pricing and regional availability change; verify prices with the
 provider before using estimates for chargeback or budgeting.
-
-## Validate before release
-
-Run the local deterministic checks after changes to SQL functions, provider
-request shapes, logging, settings, or docs:
-
-```sh
-PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
-GEN=ninja make release
-GEN=ninja make test
-python3 test/smoke/mock_provider_smoke.py
-```
-
-For docs changes, also run:
-
-```sh
-cd website
-npm run typecheck
-npm run build
-```
-
-Run live provider smoke tests only when you intentionally want to validate real
-credentials, provider account configuration, or provider-specific model access.
