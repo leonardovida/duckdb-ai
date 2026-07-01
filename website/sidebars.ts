@@ -35,11 +35,6 @@ const sidebars: SidebarsConfig = {
     'best-practices',
     'runtime-behavior',
     'security-data-flow',
-    'VALIDATION',
-    'SMOKE_TESTING',
-    'DISTRIBUTION',
-    'RELEASING',
-    'UPDATING',
   ],
 };
 

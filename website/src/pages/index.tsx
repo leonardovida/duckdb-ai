@@ -63,25 +63,24 @@ function DocsSummary(): ReactNode {
             </div>
           </article>
           <article>
-            <Heading as="h2">Current status</Heading>
+            <Heading as="h2">Start here</Heading>
             <p>
-              The extension is source-first while the public SQL surface and
-              provider configuration contract settle. The docs include local
-              function reference, validation evidence, smoke-test commands, and
-              release notes.
+              Use the reference pages and cookbooks to choose a provider,
+              configure credentials, call models from SQL, and understand how
+              provider data moves through the extension.
             </p>
             <ul className={styles.linkList}>
               <li>
                 <Link to="/docs/functions">SQL function reference</Link>
               </li>
               <li>
-                <Link to="/docs/VALIDATION">Validation evidence</Link>
+                <Link to="/docs/provider-guides">Provider guides</Link>
               </li>
               <li>
-                <Link to="/docs/SMOKE_TESTING">Smoke testing</Link>
+                <Link to="/docs/cookbooks">Cookbooks</Link>
               </li>
               <li>
-                <Link to="/docs/DISTRIBUTION">Distribution status</Link>
+                <Link to="/docs/security-data-flow">Security and data flow</Link>
               </li>
             </ul>
           </article>

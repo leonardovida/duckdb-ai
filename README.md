@@ -534,12 +534,11 @@ or an `s3://...` target when failures should live outside the DuckDB database.
 - [`docs/provider-guides.md`](docs/provider-guides.md): end-to-end examples for
   every supported provider.
 - [`docs/best-practices.md`](docs/best-practices.md): provider selection,
-  secrets, defaults, privacy, logging, throughput, and validation guidance.
+  secrets, defaults, privacy, logging, throughput, and cost guidance.
+- [`docs/runtime-behavior.md`](docs/runtime-behavior.md): function stability,
+  runtime state, caching, concurrency, retries, and egress allowlisting.
 - [`docs/security-data-flow.md`](docs/security-data-flow.md): egress controls,
   per-function data flow, logging defaults, and proxy/TLS notes.
-- [`docs/SMOKE_TESTING.md`](docs/SMOKE_TESTING.md): local mock-provider, Ollama,
-  and remote-provider smoke checks.
-- [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md): release and distribution notes.
 - [`SECURITY.md`](SECURITY.md): vulnerability reporting policy.
 - [`CHANGELOG.md`](CHANGELOG.md): release notes and compatibility policy.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): development workflow for contributors.
