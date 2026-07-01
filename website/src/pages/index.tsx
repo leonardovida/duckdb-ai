@@ -52,9 +52,9 @@ function DocsSummary(): ReactNode {
           <article>
             <Heading as="h2">What it covers</Heading>
             <p>
-              <code>duckdb_ai</code> adds SQL functions for completion models,
-              structured JSON output, embeddings, generated read-only SQL,
-              usage logging, and provider metadata.
+              duckdb-ai adds SQL functions for completion models, structured
+              JSON output, embeddings, generated read-only SQL, usage logging,
+              and provider metadata.
             </p>
             <div className={styles.chips}>
               {functionGroups.map((name) => (
@@ -96,7 +96,7 @@ export default function Home(): ReactNode {
   return (
     <Layout
       title={siteConfig.title}
-      description="Documentation for the duckdb_ai DuckDB extension">
+      description="Documentation for the duckdb-ai DuckDB extension">
       <HomepageHeader />
       <main>
         <DocsSummary />

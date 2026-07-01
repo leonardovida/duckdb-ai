@@ -4,7 +4,7 @@ sidebar_position: 4
 
 # Best practices
 
-Use this page as the operating guide for running `duckdb_ai` in notebooks,
+Use this page as the operating guide for running duckdb-ai in notebooks,
 batch jobs, local workflows, and managed environments.
 
 ## Choose the right provider path

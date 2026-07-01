@@ -5,7 +5,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
 const config: Config = {
-  title: 'duckdb_ai',
+  title: 'duckdb-ai',
   tagline: 'AI provider functions for DuckDB SQL',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
@@ -64,7 +64,7 @@ const config: Config = {
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'duckdb_ai',
+      title: 'duckdb-ai',
       items: [
         {
           type: 'docSidebar',
@@ -122,7 +122,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} duckdb_ai contributors. Built with Docusaurus.`,
+      copyright: `Copyright © ${new Date().getFullYear()} duckdb-ai contributors. Built with Docusaurus.`,
     },
     prism: {
       theme: prismThemes.github,

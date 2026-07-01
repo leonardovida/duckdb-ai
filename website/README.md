@@ -1,6 +1,6 @@
-# duckdb_ai docs site
+# duckdb-ai docs site
 
-This directory contains the Docusaurus site shell for the `duckdb_ai`
+This directory contains the Docusaurus site shell for the duckdb-ai
 documentation. The published docs content is sourced from the repository-level
 `docs/` directory.
 
