@@ -3,9 +3,9 @@ sidebar_position: 1
 slug: /
 ---
 
-# duckdb_ai documentation
+# duckdb-ai documentation
 
-`duckdb_ai` is a DuckDB extension that lets SQL call AI model providers. It
+duckdb-ai is a DuckDB extension that lets SQL call AI model providers. It
 currently focuses on deterministic request shaping, provider metadata,
 completion and embedding calls, structured JSON validation, generated read-only
 SQL, usage logging, and local validation evidence.

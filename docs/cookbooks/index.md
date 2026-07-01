@@ -4,7 +4,7 @@ sidebar_position: 1
 
 # Cookbooks
 
-These cookbooks show practical `duckdb_ai` workflows over local DuckDB tables.
+These cookbooks show practical duckdb-ai workflows over local DuckDB tables.
 They use the same `support_tickets` sample data so you can move from one example
 to the next without changing context.
 
