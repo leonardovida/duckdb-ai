@@ -4,6 +4,46 @@ This file records local validation evidence for the pinned DuckDB extension
 build. It is not a substitute for CI history; update it when release gates are
 run on a new platform or DuckDB submodule revision.
 
+## 2026-07-01 0.1.0 macOS release-candidate validation
+
+Environment:
+
+- Platform: macOS 26.3, Darwin 25.3.0, arm64
+- DuckDB submodule: `08e34c44`
+- extension-ci-tools submodule: `b777c70`
+- CMake: `4.3.4`
+- Ninja: `1.13.2`
+- Extension version: `0.1.0`
+
+Commands:
+
+```sh
+PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
+npm run typecheck
+npm run build
+GEN=ninja make release
+GEN=ninja make test
+python3 test/smoke/mock_provider_smoke.py
+PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make tidy-check
+```
+
+Result:
+
+- Format check passed.
+- Docusaurus typecheck and production build passed.
+- Release build passed and linked `extension/duckdb_ai/duckdb_ai.duckdb_extension`.
+- CMake loaded `duckdb_ai` from this repository at `0.1.0`.
+- SQLLogic tests passed with 147 assertions.
+- Mock provider smoke passed.
+- Clang-tidy check passed.
+
+Release notes:
+
+- This is a source-first preview release. Public binary distribution, signing,
+  and custom extension repository publishing are not configured for `0.1.0`.
+- No live Ollama or remote-provider smoke was run for this release candidate
+  because no binaries are being published.
+
 ## 2026-07-01 macOS local validation
 
 Environment:

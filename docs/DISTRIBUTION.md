@@ -13,7 +13,7 @@ it yet and no signing or S3 target is configured.
 - Build-only CI is enabled through
   `.github/workflows/MainDistributionPipeline.yml`.
 - Public binary distribution is not configured.
-- The extension version is still `0.0.0-dev` in `extension_config.cmake`.
+- The initial preview source release is `0.1.0` in `extension_config.cmake`.
 - The repository should stay in source-first mode until the SQL function surface
   and provider configuration contract stabilize.
 
