@@ -709,6 +709,26 @@ bool TryGetSetting(ClientContext &context, const std::string &name, Value &value
 	return context.TryGetCurrentSetting(name, value) && !value.IsNull();
 }
 
+enum class AiModelSettingKind { GENERIC, COMPLETION, TASK, AGGREGATE, EMBEDDING, SQL_ASSISTANT };
+
+std::string ModelSettingName(AiModelSettingKind kind) {
+	switch (kind) {
+	case AiModelSettingKind::COMPLETION:
+		return "duckdb_ai_completion_model";
+	case AiModelSettingKind::TASK:
+		return "duckdb_ai_task_model";
+	case AiModelSettingKind::AGGREGATE:
+		return "duckdb_ai_aggregate_model";
+	case AiModelSettingKind::EMBEDDING:
+		return "duckdb_ai_embedding_model";
+	case AiModelSettingKind::SQL_ASSISTANT:
+		return "duckdb_ai_sql_model";
+	case AiModelSettingKind::GENERIC:
+		break;
+	}
+	return "";
+}
+
 void ApplyStringSetting(ClientContext &context, const std::string &name, std::string &target) {
 	Value value;
 	if (!TryGetSetting(context, name, value)) {
@@ -840,8 +860,17 @@ void ApplySettingsWithPrefix(ClientContext &context, const std::string &prefix, 
 	ApplyTimeoutSetting(context, prefix + "_timeout_seconds", options);
 }
 
-void ApplySettings(ClientContext &context, duckdb_ai::CompletionOptions &options) {
+void ApplyModelSetting(ClientContext &context, AiModelSettingKind kind, duckdb_ai::CompletionOptions &options) {
+	auto setting_name = ModelSettingName(kind);
+	if (!setting_name.empty()) {
+		ApplyStringSetting(context, setting_name, options.model);
+	}
+}
+
+void ApplySettings(ClientContext &context, duckdb_ai::CompletionOptions &options,
+                   AiModelSettingKind kind = AiModelSettingKind::GENERIC) {
 	ApplySettingsWithPrefix(context, "duckdb_ai", options);
+	ApplyModelSetting(context, kind, options);
 	if (!options.response_format.empty()) {
 		options.response_format = NormalizeResponseFormatValue(options.response_format, "AI setting");
 	}
@@ -952,7 +981,7 @@ unique_ptr<FunctionData> AiCompletionBindInternal(ClientContext &context, Scalar
                                                   vector<unique_ptr<Expression>> &arguments,
                                                   bool validate_json_output = false) {
 	auto bind_data = make_uniq<AiCompletionBindData>(false, validate_json_output);
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::COMPLETION);
 	if (arguments.empty()) {
 		throw BinderException("%s requires a prompt argument", bound_function.name);
 	}
@@ -1321,7 +1350,7 @@ unique_ptr<FunctionData> AiRecordBind(ClientContext &context, TableFunctionBindI
 		throw BinderException("ai_complete_record expects prompt, response_schema, optional model, optional provider");
 	}
 	auto bind_data = make_uniq<AiRecordBindData>();
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::COMPLETION);
 	bind_data->prompt = RequiredRecordStringInput(input, 0, "prompt");
 	bind_data->response_schema = RequiredRecordStringInput(input, 1, "response_schema");
 	ValidateResponseSchemaValue(bind_data->response_schema, "ai_complete_record");
@@ -1407,7 +1436,7 @@ bool IsEmbeddingOption(const std::string &name) {
 unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarFunction &bound_function,
                                                  vector<unique_ptr<Expression>> &arguments, bool request_json) {
 	auto bind_data = make_uniq<AiCompletionBindData>(request_json);
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::EMBEDDING);
 	if (arguments.empty()) {
 		throw BinderException("%s requires an input argument", bound_function.name);
 	}
@@ -1460,7 +1489,7 @@ unique_ptr<FunctionData> AiEmbeddingRequestJsonBind(ClientContext &context, Scal
 unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction &bound_function,
                                           vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = make_uniq<AiCompletionBindData>(false);
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::EMBEDDING);
 	if (arguments.size() < 2) {
 		throw BinderException("%s requires two text arguments", bound_function.name);
 	}
@@ -1651,7 +1680,7 @@ unique_ptr<FunctionData> AiTaskBindInternal(ClientContext &context, ScalarFuncti
                                             vector<unique_ptr<Expression>> &arguments, AiTaskKind task,
                                             idx_t required_args) {
 	auto bind_data = make_uniq<AiTaskBindData>(task, required_args);
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::TASK);
 	if (arguments.size() < required_args) {
 		throw BinderException("%s requires %llu argument(s)", bound_function.name, required_args);
 	}
@@ -1727,7 +1756,7 @@ unique_ptr<FunctionData> AiFilterBind(ClientContext &context, ScalarFunction &bo
 unique_ptr<FunctionData> AiPromptSqlBind(ClientContext &context, ScalarFunction &bound_function,
                                          vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = make_uniq<AiPromptSqlBindData>();
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::SQL_ASSISTANT);
 	if (arguments.empty()) {
 		throw BinderException("%s requires a question argument", bound_function.name);
 	}
@@ -1797,7 +1826,7 @@ std::string EvaluateConstantString(ClientContext &context, Expression &expr, con
 unique_ptr<FunctionData> AiAggregateBindInternal(ClientContext &context, AggregateFunction &function,
                                                  vector<unique_ptr<Expression>> &arguments, AiAggregateKind kind) {
 	auto bind_data = make_uniq<AiAggregateBindData>(kind);
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::AGGREGATE);
 	if (arguments.empty()) {
 		throw BinderException("%s requires an input text argument", function.name);
 	}
@@ -2469,8 +2498,14 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto prompt = BuildTaskPrompt(bind_data.task, input, parameter);
-			auto output = duckdb_ai::Complete(prompt, options).text;
+			std::string output;
+			if (bind_data.task == AiTaskKind::MASK &&
+			    duckdb_ai::ResolveProvider(options).protocol == "privacy_filter") {
+				output = duckdb_ai::Redact(input, options).text;
+			} else {
+				auto prompt = BuildTaskPrompt(bind_data.task, input, parameter);
+				output = duckdb_ai::Complete(prompt, options).text;
+			}
 			result_data[row] = StringVector::AddString(result, output);
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
@@ -2772,7 +2807,7 @@ unique_ptr<TableRef> EmptyPromptQueryResult(const ParserOptions &options) {
 
 unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctionBindInput &input) {
 	auto options = duckdb_ai::CompletionOptions();
-	ApplySettings(context, options);
+	ApplySettings(context, options, AiModelSettingKind::SQL_ASSISTANT);
 	auto question = RequiredTableStringInput(input, 0, "question");
 	auto schema_context = OptionalTableStringInput(input, 1);
 	PromptSchemaOptions schema_options;
@@ -3022,7 +3057,7 @@ unique_ptr<FunctionData> PromptAssistantBindInternal(ClientContext &context, Tab
                                                      vector<LogicalType> &return_types, vector<string> &names,
                                                      PromptAssistantKind kind, const std::string &function_name) {
 	auto bind_data = make_uniq<PromptAssistantBindData>(kind);
-	ApplySettings(context, bind_data->options);
+	ApplySettings(context, bind_data->options, AiModelSettingKind::SQL_ASSISTANT);
 	auto max_positional_args = kind == PromptAssistantKind::FIX_LINE ? 2 : 1;
 	if (input.inputs.empty() || input.inputs.size() > max_positional_args) {
 		throw BinderException("%s expects %s", function_name,
@@ -3477,6 +3512,16 @@ void RegisterSettingsForPrefix(DBConfig &config, const std::string &prefix, cons
 void RegisterSettings(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	RegisterSettingsForPrefix(config, "duckdb_ai", "duckdb_ai");
+	AddSetting(config, "duckdb_ai_completion_model", "Default AI model for completion functions", LogicalType::VARCHAR,
+	           Value(""));
+	AddSetting(config, "duckdb_ai_task_model", "Default AI model for text task functions", LogicalType::VARCHAR,
+	           Value(""));
+	AddSetting(config, "duckdb_ai_aggregate_model", "Default AI model for aggregate functions", LogicalType::VARCHAR,
+	           Value(""));
+	AddSetting(config, "duckdb_ai_embedding_model", "Default AI model for embedding functions", LogicalType::VARCHAR,
+	           Value(""));
+	AddSetting(config, "duckdb_ai_sql_model", "Default AI model for SQL assistant functions", LogicalType::VARCHAR,
+	           Value(""));
 }
 
 void RegisterAiProviderSecretType(ExtensionLoader &loader, const std::string &type_name) {

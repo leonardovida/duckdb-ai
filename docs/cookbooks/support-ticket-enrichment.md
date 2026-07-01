@@ -109,7 +109,7 @@ WHERE language = 'en';
 After running provider calls, inspect recent usage events:
 
 ```sql
-SELECT provider, model, request_tokens_estimated, output_tokens_estimated, elapsed_ms
+SELECT provider, model, prompt_tokens, completion_tokens, total_tokens, elapsed_ms
 FROM ai_usage()
 ORDER BY event_id DESC
 LIMIT 10;

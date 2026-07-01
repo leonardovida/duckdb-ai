@@ -18,11 +18,15 @@ The local corpus is intentionally ignored by Git.
 - [x] Add a `libcurl` HTTP execution path.
 - [x] Support local Ollama chat requests.
 - [x] Support OpenAI-compatible chat-completions providers: OpenAI, Gemini,
-  Mistral, Zai, DeepSeek, and OpenRouter.
+  Mistral, Zai, DeepSeek, OpenRouter, Databricks Model Serving, and Snowflake
+  Cortex REST.
 - [x] Support Claude through Anthropic's messages API.
+- [x] Support OpenAI Privacy Filter through a dedicated redaction endpoint for
+  local or cloud-hosted PII masking.
 - [x] Keep API keys out of SQL by resolving them from environment variables.
 - [x] Add privacy-minimized usage logging to an optional HTTP endpoint.
-- [x] Add DuckDB settings for provider, model, base URL, timeout, and logging
+- [x] Add DuckDB settings for provider, global model, family-specific model
+  defaults, base URL, timeout, reliability controls, cost controls, and logging
   endpoint once the target DuckDB settings API is verified against the pinned
   submodule.
 - [x] Add DuckDB Secret support for provider credentials.
@@ -106,7 +110,8 @@ The local corpus is intentionally ignored by Git.
   resolution.
 - [x] Add a mock HTTP server smoke test for OpenAI-compatible completion and log
   endpoint paths.
-- [x] Add mock HTTP server tests for Ollama and Claude paths.
+- [x] Add mock HTTP server tests for Ollama, Claude, Databricks, Snowflake, and
+  OpenAI Privacy Filter paths.
 - [x] Add live smoke-test documentation for local Ollama and credentialed remote
   providers.
 - [x] Validate build and tests against the pinned DuckDB submodule on macOS.

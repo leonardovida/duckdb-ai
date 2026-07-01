@@ -17,8 +17,12 @@ SQL, usage logging, and local validation evidence.
 - [Cookbooks](cookbooks/index.md): practical workflows over local tables,
   including text enrichment, similarity, structured records, and SQL generation.
 - [Provider guides](provider-guides.md): end-to-end examples for Ollama, OpenAI,
-  Azure OpenAI, Claude, Gemini, Mistral, Z.ai, DeepSeek, OpenRouter, and local
+  Azure OpenAI, Claude, Gemini, Mistral, Z.ai, DeepSeek, OpenRouter,
+  Databricks, Snowflake Cortex REST, OpenAI Privacy Filter, and local
   OpenAI-compatible gateways.
+- [Best practices](best-practices.md): provider selection, secrets, model
+  defaults, structured output, SQL safety, redaction, logging, throughput, cost,
+  and release validation guidance.
 - [Validation](VALIDATION.md): local build, test, and smoke evidence for the
   pinned DuckDB extension build.
 - [Smoke testing](SMOKE_TESTING.md): deterministic mock-provider checks plus

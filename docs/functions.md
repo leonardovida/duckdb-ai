@@ -222,12 +222,20 @@ Result: `VARCHAR`
 #### `ai_redact(text[, model[, provider]])`
 
 Description: Masks direct personal data, credentials, secrets, and payment
-identifiers.
+identifiers. With provider `openai_privacy_filter`, sends the raw input text to
+a local or cloud-hosted OpenAI Privacy Filter service instead of wrapping it in a
+chat prompt.
 
 Example:
 
 ```sql
 SELECT ai_redact('email alice@example.com');
+
+SELECT ai_redact(
+    'email alice@example.com token fake-token',
+    provider := 'openai_privacy_filter',
+    base_url := 'http://localhost:8080'
+);
 ```
 
 Result: `VARCHAR`
@@ -579,8 +587,8 @@ not from direct API key arguments.
 | `log_format` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | `generic_json` or `otlp_json`. |
 | `log_tags` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Comma-separated tags copied into usage log payloads. |
 | `log_sample_rate` | `DOUBLE` | Completion, embedding, SQL assistant, aggregate | Stable sampling rate from 0 to 1. |
-| `log_include_text` | `BOOLEAN` | `ai_complete_record` | Include prompt/output text in outbound usage logs. Defaults to false. |
-| `log_strict` | `BOOLEAN` | `ai_complete_record` | Fail the SQL query when outbound usage logging fails. |
+| `log_include_text` | `BOOLEAN` | `ai_complete_record`; all families through `duckdb_ai_log_include_text` or `DUCKDB_AI_LOG_INCLUDE_TEXT` | Include prompt/output text in outbound usage logs. Defaults to false. |
+| `log_strict` | `BOOLEAN` | `ai_complete_record`; all families through `duckdb_ai_log_strict` or `DUCKDB_AI_LOG_STRICT` | Fail the SQL query when outbound usage logging fails. |
 
 SQL assistant table functions also accept:
 
@@ -602,14 +610,52 @@ Aggregate functions also accept:
 
 ## Provider settings and secrets
 
+Supported provider names and aliases are:
+
+| Provider | Aliases | Completion support | Embedding support | Default completion model |
+| --- | --- | --- | --- | --- |
+| `ollama` | none | Yes | Yes | `llama3.2` |
+| `openai` | none | Yes | Yes | `gpt-4o-mini` |
+| `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
+| `claude` | `anthropic` | Yes | No | `claude-3-5-haiku-latest` |
+| `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-2.5-flash` |
+| `mistral` | none | Yes | Yes | `mistral-small-latest` |
+| `zai` | `zhipu` | Yes | Yes | `glm-4-flash` |
+| `deepseek` | none | Yes | No | `deepseek-chat` |
+| `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
+| `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-llama-4-maverick` |
+| `snowflake` | none | Yes | No | `snowflake-llama-3.3-70b` |
+| `openai_privacy_filter` | `privacy_filter`, `pii_filter`, `opf` | Redaction only | No | `openai/privacy-filter` |
+| `openai_compatible` | `local`, `openai-compatible`, `local_openai`, `local-models`, `local_models` | Yes | Yes | `gpt-4o-mini` |
+
 Session defaults can be configured with DuckDB settings:
 
 ```sql
 SET duckdb_ai_provider = 'openai';
 SET duckdb_ai_model = 'gpt-4o-mini';
+SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 SET duckdb_ai_base_url = 'https://api.openai.com/v1';
 SET duckdb_ai_timeout_seconds = 120;
 ```
+
+`duckdb_ai_model` is the global model fallback. Family-specific model settings
+override it for their function groups, while per-call `model := ...` still takes
+highest precedence:
+
+| Setting | Applies to |
+| --- | --- |
+| `duckdb_ai_completion_model` | `ai_complete`, `ai_complete_json`, `ai_complete_record`, `ai_request_json` |
+| `duckdb_ai_task_model` | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_extract`, `ai_filter` |
+| `duckdb_ai_aggregate_model` | `ai_agg`, `ai_summarize_agg` |
+| `duckdb_ai_sql_model` | `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql`, `ai_fix_sql_line` |
+| `duckdb_ai_embedding_model` | `ai_embed`, `ai_embedding_request_json`, `ai_similarity` |
+
+Model resolution order is:
+
+1. Per-call `model := ...`
+2. Matching function-family setting
+3. `duckdb_ai_model`
+4. Provider default model
 
 Credentials should use environment variables or DuckDB secrets:
 

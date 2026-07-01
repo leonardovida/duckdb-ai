@@ -13,7 +13,8 @@ python3 test/smoke/mock_provider_smoke.py
 ```
 
 The mock smoke covers OpenAI-compatible chat and embeddings, Ollama chat,
-Claude messages, usage logging, retries, and provider-error redaction without
+Claude messages, Databricks chat, Snowflake Cortex REST chat, OpenAI Privacy
+Filter redaction, usage logging, retries, and provider-error redaction without
 external network calls.
 
 ## Local Ollama
@@ -65,8 +66,63 @@ SELECT ai_embed('DuckDB vector smoke', secret := 'openai_ai')[1];
 "
 ```
 
-For OpenRouter, Gemini, Mistral, Zai, or DeepSeek, change `PROVIDER`,
-`MODEL`, and the corresponding environment variable.
+For OpenRouter, Gemini, Mistral, Zai, DeepSeek, Databricks, or Snowflake,
+change `PROVIDER`, `MODEL`, and the corresponding environment variable.
+
+## Databricks
+
+```sh
+DATABRICKS_TOKEN='...' \
+DATABRICKS_HOST='https://<workspace>.cloud.databricks.com' \
+./build/release/duckdb -c "
+LOAD duckdb_ai;
+CREATE OR REPLACE SECRET databricks_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'databricks',
+    MODEL 'databricks-llama-4-maverick'
+);
+SELECT ai_complete('Say hello from Databricks Model Serving.', secret := 'databricks_ai');
+"
+```
+
+Use the serving endpoint name as the model. Set `BASE_URL` or
+`DATABRICKS_BASE_URL` when you need a full `/serving-endpoints`,
+`/ai-gateway/mlflow/v1`, or `/chat/completions` URL.
+
+## Snowflake Cortex REST
+
+```sh
+SNOWFLAKE_PAT='...' \
+SNOWFLAKE_ACCOUNT_URL='https://<account-identifier>.snowflakecomputing.com' \
+./build/release/duckdb -c "
+LOAD duckdb_ai;
+CREATE OR REPLACE SECRET snowflake_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'snowflake',
+    MODEL 'snowflake-llama-3.3-70b'
+);
+SELECT ai_complete('Say hello from Snowflake Cortex REST.', secret := 'snowflake_ai');
+"
+```
+
+The authenticated user default role must be allowed to call Cortex REST.
+
+## OpenAI Privacy Filter
+
+Start a local wrapper around the OpenAI Privacy Filter package that exposes
+`POST /redact`, then run:
+
+```sh
+./build/release/duckdb -c "
+LOAD duckdb_ai;
+CREATE OR REPLACE SECRET privacy_filter_local (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'openai_privacy_filter',
+    BASE_URL 'http://localhost:8080'
+);
+SELECT ai_redact('email alice@example.com token fake-token', secret := 'privacy_filter_local');
+"
+```
 
 ## Claude
 
