@@ -1,10 +1,14 @@
 #
 # Fast CI for the DuckDB AI extension.
 #
-# Pull requests run focused validation: formatting, clang-tidy, a Linux release
-# build, SQLLogicTests, and the mock-provider smoke test. The heavier DuckDB
-# extension distribution build remains available manually through workflow
-# dispatch when release artifacts are needed.
+# Pull requests run focused validation: formatting and clang-tidy. Tidy
+# configures the DuckDB extension build and type-checks the extension sources
+# without doing a full cold DuckDB compile on every PR update.
+#
+# Main branch pushes and manual runs also execute the release build,
+# SQLLogicTests, and mock-provider smoke test. The heavier DuckDB extension
+# distribution build remains available manually through workflow dispatch when
+# release artifacts are needed.
 #
 name: CI
 
@@ -115,6 +119,7 @@ jobs:
 
   build-test:
     name: Build and test
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     env:
       CC: gcc
