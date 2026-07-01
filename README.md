@@ -1,21 +1,32 @@
+<p align="center">
+  <img src="docs/assets/duckdb-ai-logo.svg" alt="duckdb_ai logo proposal" width="520">
+</p>
+
 # duckdb_ai
 
-Run AI workflows directly inside DuckDB SQL.
+`duckdb_ai` is a DuckDB extension for model-backed analytical workflows inside
+SQL. It adds functions for completions, structured JSON extraction, embeddings,
+natural-language filters, read-only SQL generation, and usage tracking.
 
-`duckdb_ai` adds SQL functions for completions, structured JSON extraction,
-embeddings, natural-language filters, SQL generation, and usage tracking. Use it
-when you want to enrich local DuckDB analytics with models while keeping the
-workflow in SQL.
+The extension is intended for local analytics work where data already lives in
+DuckDB. You can enrich table columns with model output, project JSON responses
+into typed DuckDB values, compare text with embeddings, and ask questions over a
+bounded schema prompt without moving the workflow into a separate application.
 
 ```sql
+INSTALL duckdb_ai FROM community;
 LOAD duckdb_ai;
 
 SELECT ai_summarize(
     'DuckDB is an analytical database built for fast local queries.',
     provider := 'ollama',
-    model := 'llama3.2'
+    model := 'gemma4:e4b'
 );
 ```
+
+The public API keeps provider credentials out of SQL arguments, supports DuckDB
+`TYPE duckdb_ai` secrets, and validates generated SQL as a single read-only
+DuckDB `SELECT` before returning or executing it.
 
 ## What You Can Do
 
@@ -33,25 +44,22 @@ SELECT ai_summarize(
 
 ## Status
 
-This is a preview extension. The current repository is source-first: public
-binary installation is not configured yet. See
-[`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) for the current distribution
-stance.
+This is a preview extension available through the DuckDB community extension
+repository. The SQL surface is still expected to evolve while the extension
+settles.
 
 ## Quick Start
 
-Build the extension once, then run the bundled DuckDB shell:
-
-```sh
-git submodule update --init --recursive
-GEN=ninja make release
-./build/release/duckdb
-```
-
-Inside DuckDB:
+Install and load the extension from DuckDB:
 
 ```sql
+INSTALL duckdb_ai FROM community;
 LOAD duckdb_ai;
+```
+
+Confirm that the extension loaded:
+
+```sql
 SELECT ai_provider_protocol('openai');
 ```
 
@@ -59,14 +67,15 @@ For a local model with Ollama:
 
 ```sh
 ollama serve
-ollama pull llama3.2
+ollama pull gemma4:e4b
 ```
 
 ```sql
+INSTALL duckdb_ai FROM community;
 LOAD duckdb_ai;
 
 SET duckdb_ai_provider = 'ollama';
-SET duckdb_ai_model = 'llama3.2';
+SET duckdb_ai_model = 'gemma4:e4b';
 
 SELECT ai_complete('Write one sentence about DuckDB.');
 ```
@@ -74,6 +83,7 @@ SELECT ai_complete('Write one sentence about DuckDB.');
 For OpenAI, store the API key in a DuckDB secret:
 
 ```sql
+INSTALL duckdb_ai FROM community;
 LOAD duckdb_ai;
 
 CREATE OR REPLACE SECRET openai_ai (
@@ -94,61 +104,115 @@ listed.
 
 ## Everyday Examples
 
+The examples below use ordinary table columns. For pasteable end-to-end
+walkthroughs, use the docs cookbooks:
+
+- [Create the sample support tickets table](docs/cookbooks/support-ticket-data.md)
+- [Enrich support tickets with AI text functions](docs/cookbooks/support-ticket-enrichment.md)
+- [Compare support tickets with embeddings](docs/cookbooks/support-ticket-similarity.md)
+- [Extract typed records from model output](docs/cookbooks/structured-triage-records.md)
+- [Generate read-only SQL over local tables](docs/cookbooks/sql-assistant.md)
+
 Summarize support notes by customer:
 
 ```sql
 SELECT
     customer_id,
-    ai_summarize_agg(note ORDER BY created_at) AS summary
-FROM support_notes
+    ai_summarize_agg(subject || ': ' || body ORDER BY created_at) AS summary
+FROM support_tickets
 GROUP BY customer_id;
 ```
 
-Classify messages:
+Classify tickets using their subject and body:
 
 ```sql
 SELECT
-    message_id,
-    ai_classify(body, 'billing, support, sales, other') AS category
-FROM inbox;
+    ticket_id,
+    ai_classify(
+        subject || chr(10) || body,
+        'billing, performance, integration, documentation, other'
+    ) AS category
+FROM support_tickets;
 ```
 
-Filter rows with a natural-language predicate:
+Filter rows with a natural-language predicate over multiple text columns:
 
 ```sql
 SELECT *
-FROM tickets
-WHERE ai_filter(description, 'mentions an urgent billing problem');
-```
-
-Extract structured data as typed columns:
-
-```sql
-SELECT *
-FROM ai_complete_record(
-    'Extract a company profile for DuckDB.',
-    '{
-      "type": "object",
-      "properties": {
-        "name": {"type": "string"},
-        "category": {"type": "string"},
-        "confidence": {"type": "number"}
-      },
-      "required": ["name", "category"]
-    }',
-    provider := 'openai',
-    model := 'gpt-4o-mini'
+FROM support_tickets
+WHERE ai_filter(
+    subject || chr(10) || body || chr(10) || internal_note,
+    'mentions urgent production impact or needs engineering follow-up'
 );
+```
+
+Extract compact JSON from a body column:
+
+```sql
+SELECT
+    ticket_id,
+    ai_extract(
+        body,
+        'Return compact JSON with product_area, customer_request, and urgency'
+    ) AS extracted_json
+FROM support_tickets;
+```
+
+Redact internal notes before sharing them:
+
+```sql
+SELECT
+    ticket_id,
+    ai_redact(internal_note) AS redacted_internal_note
+FROM support_tickets;
+```
+
+Translate customer-facing text stored in columns:
+
+```sql
+SELECT
+    ticket_id,
+    ai_translate(subject || ': ' || body, 'Dutch') AS dutch_update
+FROM support_tickets
+WHERE language = 'en';
 ```
 
 Create embeddings and compare text:
 
 ```sql
-SELECT ai_similarity(
-    'DuckDB analytics',
-    'analytical SQL database',
+SELECT
+    left_ticket.ticket_id AS left_ticket_id,
+    right_ticket.ticket_id AS right_ticket_id,
+    ai_similarity(
+        left_ticket.subject || chr(10) || left_ticket.body,
+        right_ticket.subject || chr(10) || right_ticket.body,
+        provider := 'openai',
+        model := 'text-embedding-3-small'
+    ) AS similarity
+FROM support_tickets AS left_ticket
+JOIN support_tickets AS right_ticket
+    ON left_ticket.ticket_id < right_ticket.ticket_id
+ORDER BY similarity DESC;
+```
+
+Create typed columns from one prompt:
+
+```sql
+SELECT *
+FROM ai_complete_record(
+    'Extract a support triage profile for the query regression ticket.',
+    '{
+      "type": "object",
+      "properties": {
+        "product_area": {"type": "string"},
+        "needs_engineering": {"type": "boolean"},
+        "urgency_score": {"type": "integer"},
+        "recommended_owner": {"type": "string"}
+      },
+      "required": ["product_area", "needs_engineering", "urgency_score"]
+    }',
     provider := 'openai',
-    model := 'text-embedding-3-small'
+    model := 'gpt-4o-mini'
 );
 ```
 
@@ -156,28 +220,44 @@ Generate and run read-only SQL over local tables:
 
 ```sql
 SELECT summary
-FROM ai_schema_prompt(include_tables := ['main.orders']);
+FROM ai_schema_prompt(
+    include_tables := ['main.support_tickets'],
+    sample_rows := 3
+);
 
 SELECT ai_sql(
-    'count orders by status',
-    schema_context := (
-        SELECT summary
-        FROM ai_schema_prompt(include_tables := ['main.orders'])
-    )
+    'Which high-priority customers have the lowest satisfaction scores?',
+    include_tables := ['main.support_tickets'],
+    sample_rows := 3
 );
 
 SELECT *
 FROM ai_query_data(
-    'count orders by status',
-    schema_context := (
-        SELECT summary
-        FROM ai_schema_prompt(include_tables := ['main.orders'])
-    )
+    'Count tickets by priority and customer tier',
+    include_tables := ['main.support_tickets'],
+    sample_rows := 3
 );
 ```
 
 `ai_sql` and `ai_query_data` only accept one parser-valid read-only DuckDB
 `SELECT` statement before returning or executing generated SQL.
+
+## Highlighted Functions
+
+These are the main functions most users should start with:
+
+| Function | Use it for |
+| --- | --- |
+| `ai_complete` | General prompt-to-text completions from SQL. |
+| `ai_summarize` / `ai_summarize_agg` | Summarizing one text value or a grouped set of rows. |
+| `ai_classify` | Assigning one label from a controlled list. |
+| `ai_filter` | Filtering rows with a natural-language predicate. |
+| `ai_extract` | Pulling compact structured facts from text. |
+| `ai_complete_record` | Returning model output as typed DuckDB columns from a JSON Schema. |
+| `ai_embed` / `ai_similarity` | Creating embeddings and comparing text semantically. |
+| `ai_schema_prompt` | Building deterministic local table context for SQL generation. |
+| `ai_sql` / `ai_query_data` | Generating, validating, and optionally running read-only DuckDB `SELECT` statements. |
+| `ai_usage` | Inspecting recent model calls, latency, token estimates, and status. |
 
 ## Function Map
 
@@ -235,7 +315,7 @@ CREATE OR REPLACE SECRET local_llm (
     TYPE duckdb_ai,
     AI_PROVIDER 'local',
     BASE_URL 'http://localhost:11434/v1',
-    MODEL 'llama3.2'
+    MODEL 'gemma4:e4b'
 );
 
 SELECT ai_complete('hello', secret := 'local_llm');
@@ -353,6 +433,5 @@ These controls apply to completion and embedding calls.
   every supported provider.
 - [`docs/SMOKE_TESTING.md`](docs/SMOKE_TESTING.md): local mock-provider, Ollama,
   and remote-provider smoke checks.
-- [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md): current install and release
-  stance.
+- [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md): release and distribution notes.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): development workflow for contributors.
