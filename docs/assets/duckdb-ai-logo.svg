@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" role="img" aria-labelledby="title desc">
+  <title id="title">duckdb_ai logo proposal</title>
+  <desc id="desc">A lemon yellow badge with black AI sparkle marks and the duckdb_ai wordmark.</desc>
+  <rect width="720" height="180" fill="#ffffff"/>
+  <g transform="translate(32 20)">
+    <circle cx="70" cy="70" r="70" fill="#fff100"/>
+    <path d="M67 22C78 51 89 62 118 73C89 84 78 95 67 124C56 95 45 84 16 73C45 62 56 51 67 22Z" fill="#0d0d0d"/>
+    <path d="M108 18C113 33 119 39 134 44C119 49 113 55 108 70C103 55 97 49 82 44C97 39 103 33 108 18Z" fill="#0d0d0d"/>
+  </g>
+  <g transform="translate(205 49)" fill="#0d0d0d">
+    <text x="0" y="55" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="64" font-weight="760" letter-spacing="0">duckdb_ai</text>
+    <text x="3" y="91" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" font-weight="600" fill="#626262">model-backed analytics in DuckDB SQL</text>
+  </g>
+</svg>

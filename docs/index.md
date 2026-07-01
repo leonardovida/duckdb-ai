@@ -14,6 +14,8 @@ SQL, usage logging, and local validation evidence.
 
 - [SQL function reference](functions.md): every scalar, aggregate, and table
   function exposed by the extension, with examples and result shapes.
+- [Cookbooks](cookbooks/index.md): practical workflows over local tables,
+  including text enrichment, similarity, structured records, and SQL generation.
 - [Provider guides](provider-guides.md): end-to-end examples for Ollama, OpenAI,
   Azure OpenAI, Claude, Gemini, Mistral, Z.ai, DeepSeek, OpenRouter, and local
   OpenAI-compatible gateways.

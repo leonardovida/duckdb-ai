@@ -15,6 +15,21 @@ import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 const sidebars: SidebarsConfig = {
   docsSidebar: [
     'index',
+    {
+      type: 'category',
+      label: 'Cookbooks',
+      link: {
+        type: 'doc',
+        id: 'cookbooks/index',
+      },
+      items: [
+        'cookbooks/support-ticket-data',
+        'cookbooks/support-ticket-enrichment',
+        'cookbooks/support-ticket-similarity',
+        'cookbooks/structured-triage-records',
+        'cookbooks/sql-assistant',
+      ],
+    },
     'functions',
     'provider-guides',
     'VALIDATION',
