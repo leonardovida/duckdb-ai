@@ -1,0 +1,70 @@
+.hero {
+  padding: 5rem 0 4rem;
+  background:
+    linear-gradient(120deg, rgba(255, 219, 77, 0.16), transparent 34%),
+    linear-gradient(160deg, #111827 0%, #182235 58%, #243045 100%);
+  color: #f8fafc;
+}
+
+.title {
+  max-width: 760px;
+  margin: 0;
+  color: #ffffff;
+  font-size: 4rem;
+}
+
+.subtitle {
+  max-width: 720px;
+  margin: 1rem 0 0;
+  color: #dbeafe;
+  font-size: 1.35rem;
+  line-height: 1.5;
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+.summary {
+  padding: 3.5rem 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3rem;
+}
+
+.grid article {
+  min-width: 0;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.linkList {
+  margin: 1.25rem 0 0;
+  padding-left: 1.2rem;
+}
+
+@media screen and (max-width: 996px) {
+  .hero {
+    padding: 3rem 0;
+  }
+
+  .title {
+    font-size: 2.7rem;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+}
