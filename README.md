@@ -57,7 +57,9 @@ Confirm that the extension loaded:
 SELECT ai_provider_protocol('openai');
 ```
 
-For a local model with Ollama:
+For a local model with [Ollama](https://ollama.com/download), install Ollama
+first. Then start the local Ollama server and download the Gemma model used by
+the example:
 
 ```sh
 ollama serve
