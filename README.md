@@ -42,12 +42,6 @@ DuckDB `SELECT` before returning or executing it.
 - Inspect local usage events and optionally send privacy-minimized usage logs to
   your own collector.
 
-## Status
-
-This is a preview extension available through the DuckDB community extension
-repository. The SQL surface is still expected to evolve while the extension
-settles.
-
 ## Quick Start
 
 Install and load the extension from DuckDB:
