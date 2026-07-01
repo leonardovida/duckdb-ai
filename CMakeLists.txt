@@ -34,6 +34,9 @@ else()
   target_link_libraries(${LOADABLE_EXTENSION_NAME} ${CURL_LIBRARIES})
 endif()
 
+target_link_libraries(${EXTENSION_NAME} duckdb_yyjson)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} duckdb_yyjson)
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"

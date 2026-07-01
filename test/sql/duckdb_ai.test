@@ -18,6 +18,11 @@ SELECT * FROM ai_clear_usage();
 true
 
 query I
+SELECT * FROM ai_clear_cache();
+----
+true
+
+query I
 SELECT count(*) FROM ai_usage();
 ----
 0
@@ -200,6 +205,28 @@ query I
 SELECT contains(ai_request_json('hello', provider := 'openai', model := 'gpt-test', use_builtin_model_prices := true), '"model":"gpt-test"');
 ----
 true
+
+query I
+SELECT contains(ai_request_json('hello', provider := 'openai', model := 'gpt-test', cache := true, allowed_hosts := 'api.openai.com:443'), '"model":"gpt-test"');
+----
+true
+
+statement ok
+SET duckdb_ai_cache = true;
+
+statement ok
+SET duckdb_ai_allowed_hosts = 'https://api.openai.com/v1';
+
+query I
+SELECT contains(ai_request_json('hello from guarded settings', provider := 'openai', model := 'gpt-test'), '"model":"gpt-test"');
+----
+true
+
+statement ok
+RESET duckdb_ai_cache;
+
+statement ok
+RESET duckdb_ai_allowed_hosts;
 
 query I
 SELECT contains(ai_request_json('json please', provider := 'openai', model := 'gpt-test', response_format := 'json_object'), '"response_format":{"type":"json_object"}');

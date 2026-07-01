@@ -93,6 +93,25 @@ Precedence is:
 For repeatable jobs, prefer secrets and explicit per-job settings over relying
 on ambient environment variables.
 
+## Restrict provider egress
+
+Use an allowlist when the extension should only call approved providers or an
+internal AI gateway:
+
+```sql
+SET duckdb_ai_allowed_hosts = 'ai-gateway.internal,api.openai.com';
+
+SELECT ai_complete(
+    'Summarize this.',
+    provider := 'openai',
+    allowed_hosts := 'api.openai.com'
+);
+```
+
+Allowlist entries match the URL host. Entries may be hostnames, `host:port`,
+full URLs, `*.example.com`, or `*`. The same control applies to outbound usage
+log endpoints.
+
 ## Preview requests before calling providers
 
 Use request-preview functions in tests, reviews, and provider debugging:
@@ -199,12 +218,27 @@ cost and latency by:
 - Persisting embeddings instead of recomputing pairwise similarity.
 - Setting lower `max_tokens` values for classification and extraction tasks.
 
-For batch workloads, set process-local concurrency and pacing:
+For batch workloads, set per-database concurrency and pacing:
 
 ```sql
 SET duckdb_ai_max_concurrent_requests = 4;
 SET duckdb_ai_min_request_interval_ms = 100;
 SET duckdb_ai_token_limit_per_minute = 200000;
+```
+
+Row-wise provider scalar functions can run provider work concurrently within a
+DuckDB vector chunk while still respecting the per-database request and token
+pacing controls. See [Runtime behavior](runtime-behavior.md) for the exact
+function coverage and worker limits.
+
+Response caching is opt-in and in-memory for the current DuckDB database
+instance. Enable it when repeated prompts or embeddings should not repay the
+same provider call:
+
+```sql
+SET duckdb_ai_cache = true;
+SELECT ai_complete('Summarize this repeated prompt.');
+SELECT * FROM ai_clear_cache();
 ```
 
 Use `ai_count_tokens` and `ai_recommended_batch_size` before large jobs. Keep
@@ -243,6 +277,9 @@ SELECT ai_complete(
     retry_backoff_ms := 1000
 );
 ```
+
+Retry sleeps are interruptible and provider `Retry-After` headers take
+precedence over the configured backoff. Provider redirects are not followed.
 
 Use `fail_on_error := false` for exploratory enrichment where a missing output
 is acceptable:
@@ -315,6 +352,14 @@ SET duckdb_ai_log_include_text = true;
 Use `duckdb_ai_log_strict = true` only when losing a usage log must fail the SQL
 query. For most analytics workflows, keep strict logging off so the collector
 does not become a query dependency.
+
+## Corporate proxy and TLS
+
+Provider HTTP calls use libcurl. Standard proxy and CA environment variables
+such as `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, and
+`CURL_CA_BUNDLE` are honored by libcurl in typical deployments. Prefer an
+internal gateway plus `duckdb_ai_allowed_hosts` when company policy requires all
+model traffic to pass through managed egress.
 
 ## Estimate cost carefully
 

@@ -50,8 +50,9 @@ FROM ai_usage();
 | `ai_recommended_batch_size(input_tokens_per_row, max_output_tokens_per_row, token_limit_per_minute[, request_limit_per_minute[, safety_factor]])` | Scalar | Returns a conservative row batch size for rate-limited AI jobs. |
 | `ai_provider_base_url(provider)` | Scalar | Returns the default base URL for a supported provider. |
 | `ai_provider_protocol(provider)` | Scalar | Returns the internal provider protocol. |
-| `ai_usage()` | Table | Returns recent in-process AI usage events. |
-| `ai_clear_usage()` | Table | Clears the in-process usage event buffer. |
+| `ai_usage()` | Table | Returns recent per-database AI usage events. |
+| `ai_clear_usage()` | Table | Clears the per-database usage event buffer. |
+| `ai_clear_cache()` | Table | Clears the per-database in-memory response cache. |
 | `ai_secrets()` | Table | Lists configured `duckdb_ai` secrets with credentials redacted. |
 | `ai_models()` | Table | Returns the built-in provider/model pricing catalog. |
 
@@ -537,8 +538,8 @@ Result: `VARCHAR`
 
 #### `ai_usage()`
 
-Description: Returns recent in-process completion, embedding, and local usage
-events. The buffer keeps the latest 1,024 events.
+Description: Returns recent completion, embedding, and local usage events for
+the current DuckDB database instance. The buffer keeps the latest 1,024 events.
 
 Example:
 
@@ -554,14 +555,28 @@ estimated cost.
 
 #### `ai_clear_usage()`
 
-Description: Clears the in-process usage event buffer and returns one
-confirmation row.
+Description: Clears the current DuckDB database instance's usage event buffer
+and returns one confirmation row.
 
 Example:
 
 ```sql
 SELECT *
 FROM ai_clear_usage();
+```
+
+Result: one `cleared BOOLEAN` column
+
+#### `ai_clear_cache()`
+
+Description: Clears the current DuckDB database instance's opt-in in-memory
+response cache and returns one confirmation row.
+
+Example:
+
+```sql
+SELECT *
+FROM ai_clear_cache();
 ```
 
 Result: one `cleared BOOLEAN` column
@@ -613,11 +628,13 @@ not from direct API key arguments.
 | `max_tokens` | `BIGINT` | Completion, SQL assistant, aggregate | Maximum provider output tokens. Must be greater than 0. |
 | `base_url` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Provider or gateway base URL override. |
 | `timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP timeout. Must be greater than 0. |
-| `retry_count` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Retry count from 0 to 10 for curl failures and retryable HTTP status codes. |
-| `retry_backoff_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Base retry backoff from 0 to 60000 milliseconds. |
-| `max_concurrent_requests` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Process-local request concurrency cap from 0 to 1024. |
-| `min_request_interval_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Process-local minimum interval between provider request starts. |
-| `token_limit_per_minute` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Process-local estimated token cap per rolling minute. `0` disables the token cap. |
+| `retry_count` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Retry count from 0 to 10 for curl failures and retryable HTTP status codes. Retries honor `Retry-After` on 429/5xx responses when present. |
+| `retry_backoff_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Base retry backoff from 0 to 60000 milliseconds; exponential jitter is added per retry. |
+| `max_concurrent_requests` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database request concurrency cap from 0 to 1024. |
+| `min_request_interval_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database minimum interval between provider request starts. |
+| `token_limit_per_minute` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database estimated token cap per rolling minute. `0` disables the token cap. |
+| `cache` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables the current database instance's in-memory response cache for successful provider responses. |
+| `allowed_hosts` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Comma-separated provider/logging host allowlist. Entries may be hostnames, `host:port`, full URLs, `*.example.com`, or `*`. |
 | `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | If false, supported functions return `NULL` or an empty result instead of raising provider errors. |
 | `response_format` | `VARCHAR` | Completion and SQL assistant | `text`, `json_object`, or `json_schema`. |
 | `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for structured output hints and validation. |
@@ -629,6 +646,10 @@ not from direct API key arguments.
 | `log_sample_rate` | `DOUBLE` | Completion, embedding, SQL assistant, aggregate | Stable sampling rate from 0 to 1. |
 | `log_include_text` | `BOOLEAN` | `ai_complete_record`; all families through `duckdb_ai_log_include_text` or `DUCKDB_AI_LOG_INCLUDE_TEXT` | Include prompt/output text in outbound usage logs. Defaults to false. |
 | `log_strict` | `BOOLEAN` | `ai_complete_record`; all families through `duckdb_ai_log_strict` or `DUCKDB_AI_LOG_STRICT` | Fail the SQL query when outbound usage logging fails. |
+
+See [Runtime behavior](runtime-behavior.md) for the execution semantics behind
+volatility, per-database state, concurrency, cancellation, retries, response
+caching, and egress allowlisting.
 
 SQL assistant table functions also accept:
 
@@ -676,6 +697,8 @@ SET duckdb_ai_model = 'gpt-4o-mini';
 SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 SET duckdb_ai_base_url = 'https://api.openai.com/v1';
 SET duckdb_ai_timeout_seconds = 120;
+SET duckdb_ai_allowed_hosts = 'api.openai.com,collector.example';
+SET duckdb_ai_cache = true;
 ```
 
 `duckdb_ai_model` is the global model fallback. Family-specific model settings

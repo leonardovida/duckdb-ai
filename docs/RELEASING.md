@@ -90,7 +90,7 @@ Do not tag `1.0.0` until all of these are true:
 
 1. The public SQL surface in `README.md` has had an API review against
    `test/sql/duckdb_ai.test` and `test/smoke/mock_provider_smoke.py`.
-2. `docs/WORKPLAN.md` has no incomplete items that affect the public SQL API,
+2. `WORKPLAN.md` has no incomplete items that affect the public SQL API,
    provider semantics, logging/cost contract, distribution, or release process.
 3. macOS and Linux validation evidence in `docs/VALIDATION.md` matches the
    DuckDB submodule and `extension-ci-tools` versions used for the tag.
@@ -104,16 +104,16 @@ Do not tag `1.0.0` until all of these are true:
 
 ## Preview release checklist
 
-1. Confirm `docs/WORKPLAN.md` accurately marks any incomplete API or platform
+1. Confirm `WORKPLAN.md` accurately marks any incomplete API or platform
    work.
 2. Update `extension_config.cmake` from `0.0.0-dev` to the preview version.
 3. Run the required gates.
 4. Build release artifacts from the same DuckDB submodule revision used by CI.
-5. Record whether artifacts are signed. If they are unsigned, label them as
-   unsigned in release notes and install instructions.
+5. Record community-extension platform coverage, including any explicit target
+   exclusions such as WASM.
 6. Tag the release.
-7. Publish binaries only through the selected custom unsigned extension
-   repository flow described in `docs/DISTRIBUTION.md`.
+7. Publish binaries only through the documented distribution path after the
+   manual community-extension submission is accepted.
 
 ## Stable release checklist
 

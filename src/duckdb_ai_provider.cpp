@@ -1,6 +1,9 @@
 #include "duckdb_ai_provider.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/storage/object_cache.hpp"
+#include "yyjson.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -12,13 +15,18 @@
 #include <curl/curl.h>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <initializer_list>
 #include <iomanip>
+#include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -28,24 +36,67 @@ namespace duckdb_ai {
 namespace {
 
 struct HttpResponse {
+	HttpResponse() : status(0), elapsed_ms(0), retry_after_ms(-1) {
+	}
+
+	HttpResponse(std::string body_p, long status_p, int64_t elapsed_ms_p, long retry_after_ms_p)
+	    : body(std::move(body_p)), status(status_p), elapsed_ms(elapsed_ms_p), retry_after_ms(retry_after_ms_p) {
+	}
+
 	std::string body;
 	long status;
 	int64_t elapsed_ms;
+	long retry_after_ms;
 };
 
-std::mutex usage_mutex;
-std::vector<UsageEvent> usage_events;
-uint64_t next_usage_event_id = 1;
 const size_t MAX_USAGE_EVENTS = 1024;
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr int64_t DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE = 512;
-std::mutex provider_control_mutex;
-std::condition_variable provider_control_cv;
-int64_t active_provider_requests = 0;
-bool has_last_provider_request_start = false;
-std::chrono::steady_clock::time_point last_provider_request_start;
-std::deque<std::pair<std::chrono::steady_clock::time_point, int64_t>> provider_token_window;
-int64_t provider_token_window_tokens = 0;
+std::once_flag curl_global_init_once;
+const size_t DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 1024;
+
+struct ProviderRuntimeState : public ObjectCacheEntry {
+	static std::string ObjectType() {
+		return "duckdb_ai_runtime_state";
+	}
+
+	std::string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	std::mutex usage_mutex;
+	std::vector<UsageEvent> usage_events;
+	uint64_t next_usage_event_id = 1;
+
+	std::mutex provider_control_mutex;
+	std::condition_variable provider_control_cv;
+	int64_t active_provider_requests = 0;
+	bool has_last_provider_request_start = false;
+	std::chrono::steady_clock::time_point last_provider_request_start;
+	std::deque<std::pair<std::chrono::steady_clock::time_point, int64_t>> provider_token_window;
+	int64_t provider_token_window_tokens = 0;
+
+	std::mutex response_cache_mutex;
+	std::unordered_map<std::string, HttpResponse> response_cache;
+	std::deque<std::string> response_cache_order;
+};
+
+ProviderRuntimeState fallback_runtime_state;
+
+ProviderRuntimeState &RuntimeState(ClientContext &context) {
+	return *ObjectCache::GetObjectCache(context).GetOrCreate<ProviderRuntimeState>(ProviderRuntimeState::ObjectType());
+}
+
+ProviderRuntimeState &RuntimeState(const CompletionOptions &options) {
+	if (options.runtime_state) {
+		return *reinterpret_cast<ProviderRuntimeState *>(options.runtime_state);
+	}
+	return options.client_context ? RuntimeState(*options.client_context) : fallback_runtime_state;
+}
 
 std::string LowerAscii(std::string input) {
 	std::transform(input.begin(), input.end(), input.begin(),
@@ -86,11 +137,164 @@ std::string GetEnv(const std::string &name) {
 	return value ? std::string(value) : std::string();
 }
 
+bool EnvFlagEnabled(const std::string &name) {
+	auto value = LowerAscii(GetEnv(name));
+	return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
 std::string TrimTrailingSlash(std::string value) {
 	while (value.size() > 1 && value.back() == '/') {
 		value.pop_back();
 	}
 	return value;
+}
+
+std::string TrimAscii(const std::string &value) {
+	size_t start = 0;
+	while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+		start++;
+	}
+	size_t end = value.size();
+	while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+		end--;
+	}
+	return value.substr(start, end - start);
+}
+
+std::string UrlHost(const std::string &url) {
+	auto scheme_end = url.find("://");
+	if (scheme_end == std::string::npos) {
+		throw InvalidInputException("AI provider URL must include a scheme: %s", url);
+	}
+	auto host_start = scheme_end + 3;
+	auto path_start = url.find('/', host_start);
+	auto authority =
+	    url.substr(host_start, path_start == std::string::npos ? std::string::npos : path_start - host_start);
+	auto at_pos = authority.rfind('@');
+	if (at_pos != std::string::npos) {
+		authority = authority.substr(at_pos + 1);
+	}
+	if (authority.empty()) {
+		throw InvalidInputException("AI provider URL must include a host: %s", url);
+	}
+	if (authority.front() == '[') {
+		auto bracket_end = authority.find(']');
+		if (bracket_end == std::string::npos) {
+			throw InvalidInputException("AI provider URL has an invalid IPv6 host: %s", url);
+		}
+		return LowerAscii(authority.substr(1, bracket_end - 1));
+	}
+	auto colon_pos = authority.find(':');
+	auto host = colon_pos == std::string::npos ? authority : authority.substr(0, colon_pos);
+	if (host.empty()) {
+		throw InvalidInputException("AI provider URL must include a host: %s", url);
+	}
+	return LowerAscii(host);
+}
+
+bool HostMatchesAllowedPattern(const std::string &host, const std::string &pattern) {
+	if (pattern.empty()) {
+		return false;
+	}
+	if (pattern == "*") {
+		return true;
+	}
+	if (pattern.size() > 2 && pattern[0] == '*' && pattern[1] == '.') {
+		auto suffix = pattern.substr(1);
+		return host.size() > suffix.size() && host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0;
+	}
+	return host == pattern;
+}
+
+std::string NormalizeAllowedHostPattern(std::string token) {
+	token = LowerAscii(std::move(token));
+	if (token == "*" || (token.size() > 2 && token[0] == '*' && token[1] == '.')) {
+		return token;
+	}
+	if (token.find("://") != std::string::npos) {
+		return UrlHost(token);
+	}
+	auto slash = token.find('/');
+	if (slash != std::string::npos) {
+		token = token.substr(0, slash);
+	}
+	if (!token.empty() && token.front() == '[') {
+		auto bracket_end = token.find(']');
+		if (bracket_end != std::string::npos) {
+			return token.substr(1, bracket_end - 1);
+		}
+	}
+	auto colon = token.find(':');
+	if (colon != std::string::npos && token.find(':', colon + 1) == std::string::npos) {
+		token = token.substr(0, colon);
+	}
+	return token;
+}
+
+std::vector<std::string> SplitCommaList(const std::string &input) {
+	std::vector<std::string> values;
+	size_t pos = 0;
+	while (pos <= input.size()) {
+		auto comma = input.find(',', pos);
+		auto token = TrimAscii(input.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
+		if (!token.empty()) {
+			values.push_back(NormalizeAllowedHostPattern(std::move(token)));
+		}
+		if (comma == std::string::npos) {
+			break;
+		}
+		pos = comma + 1;
+	}
+	return values;
+}
+
+std::string AllowedHosts(const CompletionOptions &options) {
+	if (!options.allowed_hosts.empty()) {
+		return options.allowed_hosts;
+	}
+	return GetEnv("DUCKDB_AI_ALLOWED_HOSTS");
+}
+
+void EnforceAllowedHost(const std::string &url, const CompletionOptions &options) {
+	auto allowed_hosts = SplitCommaList(AllowedHosts(options));
+	if (allowed_hosts.empty()) {
+		return;
+	}
+	auto host = UrlHost(url);
+	for (auto &allowed_host : allowed_hosts) {
+		if (HostMatchesAllowedPattern(host, allowed_host)) {
+			return;
+		}
+	}
+	throw InvalidInputException("AI provider host \"%s\" is not allowed by duckdb_ai_allowed_hosts", host);
+}
+
+void EnsureCurlGlobalInit() {
+	std::call_once(curl_global_init_once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+
+struct CurlEasyHandle {
+	CurlEasyHandle() {
+		EnsureCurlGlobalInit();
+		handle = curl_easy_init();
+		if (!handle) {
+			throw IOException("Could not initialize libcurl for AI request");
+		}
+	}
+
+	~CurlEasyHandle() {
+		if (handle) {
+			curl_easy_cleanup(handle);
+		}
+	}
+
+	CURL *handle;
+};
+
+CURL *ThreadLocalCurlHandle() {
+	thread_local CurlEasyHandle handle;
+	curl_easy_reset(handle.handle);
+	return handle.handle;
 }
 
 bool EndsWith(const std::string &value, const std::string &suffix) {
@@ -284,311 +488,65 @@ bool BuiltinModelPricingEnabled(const CompletionOptions &options) {
 	return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
-class JsonDocumentValidator {
-public:
-	explicit JsonDocumentValidator(const std::string &input_p) : input(input_p) {
+bool ResponseCacheEnabled(const CompletionOptions &options) {
+	if (options.has_cache) {
+		return options.cache;
 	}
+	return EnvFlagEnabled("DUCKDB_AI_CACHE");
+}
 
-	bool Validate(std::string &error) {
-		SkipWhitespace();
-		if (pos == input.size()) {
-			error = "empty JSON document";
-			return false;
-		}
-		if (!ParseValue(error)) {
-			return false;
-		}
-		SkipWhitespace();
-		if (pos != input.size()) {
-			error = "unexpected trailing content at byte " + std::to_string(pos);
-			return false;
-		}
-		return true;
+size_t MaxResponseCacheEntries() {
+	auto configured = GetEnv("DUCKDB_AI_CACHE_MAX_ENTRIES");
+	if (configured.empty()) {
+		return DEFAULT_MAX_RESPONSE_CACHE_ENTRIES;
 	}
-
-private:
-	const std::string &input;
-	size_t pos = 0;
-
-	void SkipWhitespace() {
-		while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos]))) {
-			pos++;
+	try {
+		auto value = std::stoll(configured);
+		if (value < 0 || value > 1000000) {
+			throw InvalidInputException("DUCKDB_AI_CACHE_MAX_ENTRIES must be between 0 and 1000000");
 		}
+		return static_cast<size_t>(value);
+	} catch (InvalidInputException &) {
+		throw;
+	} catch (...) {
+		throw InvalidInputException("DUCKDB_AI_CACHE_MAX_ENTRIES must be an integer between 0 and 1000000");
 	}
+}
 
-	bool ConsumeLiteral(const std::string &literal) {
-		if (input.compare(pos, literal.size(), literal) != 0) {
-			return false;
-		}
-		pos += literal.size();
-		return true;
-	}
+std::string ResponseCacheKey(const std::string &operation, const ProviderConfig &config, const std::string &endpoint,
+                             const std::string &payload) {
+	auto api_key_hash =
+	    config.api_key.empty() ? std::string() : std::to_string(std::hash<std::string> {}(config.api_key));
+	return operation + "\n" + config.provider + "\n" + config.protocol + "\n" + config.model + "\n" + endpoint + "\n" +
+	       api_key_hash + "\n" + payload;
+}
 
-	bool ParseValue(std::string &error) {
-		SkipWhitespace();
-		if (pos >= input.size()) {
-			error = "expected JSON value";
-			return false;
-		}
-		switch (input[pos]) {
-		case '{':
-			return ParseObject(error);
-		case '[':
-			return ParseArray(error);
-		case '"':
-			return ParseString(error);
-		case 't':
-			if (ConsumeLiteral("true")) {
-				return true;
-			}
-			break;
-		case 'f':
-			if (ConsumeLiteral("false")) {
-				return true;
-			}
-			break;
-		case 'n':
-			if (ConsumeLiteral("null")) {
-				return true;
-			}
-			break;
-		default:
-			if (input[pos] == '-' || std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				return ParseNumber(error);
-			}
-			break;
-		}
-		error = "invalid JSON value at byte " + std::to_string(pos);
+bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, HttpResponse &response) {
+	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	auto entry = state.response_cache.find(cache_key);
+	if (entry == state.response_cache.end()) {
 		return false;
 	}
+	response = entry->second;
+	response.elapsed_ms = 0;
+	return true;
+}
 
-	bool ParseObject(std::string &error) {
-		pos++;
-		SkipWhitespace();
-		if (pos < input.size() && input[pos] == '}') {
-			pos++;
-			return true;
-		}
-		while (pos < input.size()) {
-			if (pos >= input.size() || input[pos] != '"') {
-				error = "expected JSON object key at byte " + std::to_string(pos);
-				return false;
-			}
-			if (!ParseString(error)) {
-				return false;
-			}
-			SkipWhitespace();
-			if (pos >= input.size() || input[pos] != ':') {
-				error = "expected ':' after JSON object key at byte " + std::to_string(pos);
-				return false;
-			}
-			pos++;
-			if (!ParseValue(error)) {
-				return false;
-			}
-			SkipWhitespace();
-			if (pos < input.size() && input[pos] == ',') {
-				pos++;
-				SkipWhitespace();
-				continue;
-			}
-			if (pos < input.size() && input[pos] == '}') {
-				pos++;
-				return true;
-			}
-			error = "expected ',' or '}' in JSON object at byte " + std::to_string(pos);
-			return false;
-		}
-		error = "unterminated JSON object";
-		return false;
+void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const HttpResponse &response) {
+	auto max_entries = MaxResponseCacheEntries();
+	if (max_entries == 0) {
+		return;
 	}
-
-	bool ParseArray(std::string &error) {
-		pos++;
-		SkipWhitespace();
-		if (pos < input.size() && input[pos] == ']') {
-			pos++;
-			return true;
-		}
-		while (pos < input.size()) {
-			if (!ParseValue(error)) {
-				return false;
-			}
-			SkipWhitespace();
-			if (pos < input.size() && input[pos] == ',') {
-				pos++;
-				SkipWhitespace();
-				continue;
-			}
-			if (pos < input.size() && input[pos] == ']') {
-				pos++;
-				return true;
-			}
-			error = "expected ',' or ']' in JSON array at byte " + std::to_string(pos);
-			return false;
-		}
-		error = "unterminated JSON array";
-		return false;
+	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	if (state.response_cache.find(cache_key) == state.response_cache.end()) {
+		state.response_cache_order.push_back(cache_key);
 	}
-
-	bool ParseString(std::string &error) {
-		if (pos >= input.size() || input[pos] != '"') {
-			error = "expected JSON string at byte " + std::to_string(pos);
-			return false;
-		}
-		pos++;
-		while (pos < input.size()) {
-			auto c = input[pos++];
-			if (c == '"') {
-				return true;
-			}
-			if (static_cast<unsigned char>(c) < 0x20) {
-				error = "unescaped control character in JSON string at byte " + std::to_string(pos - 1);
-				return false;
-			}
-			if (c != '\\') {
-				continue;
-			}
-			if (pos >= input.size()) {
-				error = "unterminated JSON escape";
-				return false;
-			}
-			auto esc = input[pos++];
-			switch (esc) {
-			case '"':
-			case '\\':
-			case '/':
-			case 'b':
-			case 'f':
-			case 'n':
-			case 'r':
-			case 't':
-				break;
-			case 'u':
-				if (pos + 4 > input.size()) {
-					error = "invalid JSON unicode escape at byte " + std::to_string(pos - 2);
-					return false;
-				}
-				for (size_t i = 0; i < 4; i++) {
-					if (!std::isxdigit(static_cast<unsigned char>(input[pos + i]))) {
-						error = "invalid JSON unicode escape at byte " + std::to_string(pos - 2);
-						return false;
-					}
-				}
-				pos += 4;
-				break;
-			default:
-				error = "invalid JSON escape at byte " + std::to_string(pos - 1);
-				return false;
-			}
-		}
-		error = "unterminated JSON string";
-		return false;
+	state.response_cache[cache_key] = response;
+	while (state.response_cache.size() > max_entries && !state.response_cache_order.empty()) {
+		auto oldest = std::move(state.response_cache_order.front());
+		state.response_cache_order.pop_front();
+		state.response_cache.erase(oldest);
 	}
-
-	bool ParseNumber(std::string &error) {
-		auto start = pos;
-		if (input[pos] == '-') {
-			pos++;
-		}
-		if (pos >= input.size()) {
-			error = "invalid JSON number at byte " + std::to_string(start);
-			return false;
-		}
-		if (input[pos] == '0') {
-			pos++;
-		} else if (std::isdigit(static_cast<unsigned char>(input[pos]))) {
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-		} else {
-			error = "invalid JSON number at byte " + std::to_string(start);
-			return false;
-		}
-		if (pos < input.size() && input[pos] == '.') {
-			pos++;
-			auto fraction_start = pos;
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-			if (fraction_start == pos) {
-				error = "invalid JSON number fraction at byte " + std::to_string(start);
-				return false;
-			}
-		}
-		if (pos < input.size() && (input[pos] == 'e' || input[pos] == 'E')) {
-			pos++;
-			if (pos < input.size() && (input[pos] == '+' || input[pos] == '-')) {
-				pos++;
-			}
-			auto exponent_start = pos;
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-			if (exponent_start == pos) {
-				error = "invalid JSON number exponent at byte " + std::to_string(start);
-				return false;
-			}
-		}
-		return true;
-	}
-};
-
-std::string DecodeJsonString(const std::string &input, size_t &pos) {
-	if (pos >= input.size() || input[pos] != '"') {
-		throw InvalidInputException("Expected JSON string while parsing AI provider response");
-	}
-	pos++;
-	std::string result;
-	while (pos < input.size()) {
-		auto c = input[pos++];
-		if (c == '"') {
-			return result;
-		}
-		if (c != '\\') {
-			result.push_back(c);
-			continue;
-		}
-		if (pos >= input.size()) {
-			throw InvalidInputException("Invalid JSON escape while parsing AI provider response");
-		}
-		auto esc = input[pos++];
-		switch (esc) {
-		case '"':
-		case '\\':
-		case '/':
-			result.push_back(esc);
-			break;
-		case 'b':
-			result.push_back('\b');
-			break;
-		case 'f':
-			result.push_back('\f');
-			break;
-		case 'n':
-			result.push_back('\n');
-			break;
-		case 'r':
-			result.push_back('\r');
-			break;
-		case 't':
-			result.push_back('\t');
-			break;
-		case 'u':
-			if (pos + 4 > input.size()) {
-				throw InvalidInputException("Invalid JSON unicode escape while parsing AI provider response");
-			}
-			// Keep non-ASCII escapes escaped for now. This avoids lossy transcoding in
-			// the minimal parser while preserving the response text deterministically.
-			result += "\\u" + input.substr(pos, 4);
-			pos += 4;
-			break;
-		default:
-			result.push_back(esc);
-			break;
-		}
-	}
-	throw InvalidInputException("Unterminated JSON string while parsing AI provider response");
 }
 
 enum class JsonValueType { NULL_VALUE, BOOLEAN, NUMBER, STRING, ARRAY, OBJECT };
@@ -603,238 +561,252 @@ struct JsonValue {
 	std::map<std::string, JsonValue> object_value;
 };
 
-class JsonValueParser {
-public:
-	explicit JsonValueParser(const std::string &input_p) : input(input_p) {
-	}
+using YyjsonDocPtr = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>;
 
-	bool Parse(JsonValue &value, std::string &error) {
-		SkipWhitespace();
-		if (pos == input.size()) {
-			error = "empty JSON document";
-			return false;
-		}
-		if (!ParseValue(value, error)) {
-			return false;
-		}
-		SkipWhitespace();
-		if (pos != input.size()) {
-			error = "unexpected trailing content at byte " + std::to_string(pos);
-			return false;
+std::string YyjsonParseError(const duckdb_yyjson::yyjson_read_err &read_error) {
+	if (read_error.code == duckdb_yyjson::YYJSON_READ_SUCCESS) {
+		return "";
+	}
+	return "malformed JSON at byte " + std::to_string(read_error.pos) + ": " + read_error.msg;
+}
+
+YyjsonDocPtr ReadYyjsonDocument(const std::string &input, std::string &error) {
+	duckdb_yyjson::yyjson_read_err read_error;
+	auto doc = duckdb_yyjson::yyjson_read_opts(const_cast<char *>(input.data()), input.size(),
+	                                           duckdb_yyjson::YYJSON_READ_NOFLAG, nullptr, &read_error);
+	if (!doc) {
+		error = YyjsonParseError(read_error);
+		return YyjsonDocPtr(nullptr, duckdb_yyjson::yyjson_doc_free);
+	}
+	return YyjsonDocPtr(doc, duckdb_yyjson::yyjson_doc_free);
+}
+
+std::string YyjsonString(duckdb_yyjson::yyjson_val *value) {
+	return std::string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value));
+}
+
+bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, std::string &error) {
+	if (!source || duckdb_yyjson::yyjson_is_null(source)) {
+		target.type = JsonValueType::NULL_VALUE;
+		return true;
+	}
+	if (duckdb_yyjson::yyjson_is_bool(source)) {
+		target.type = JsonValueType::BOOLEAN;
+		target.boolean_value = duckdb_yyjson::yyjson_get_bool(source);
+		return true;
+	}
+	if (duckdb_yyjson::yyjson_is_num(source)) {
+		target.type = JsonValueType::NUMBER;
+		target.number_value = duckdb_yyjson::yyjson_get_num(source);
+		target.number_is_integer = duckdb_yyjson::yyjson_is_int(source);
+		return true;
+	}
+	if (duckdb_yyjson::yyjson_is_str(source)) {
+		target.type = JsonValueType::STRING;
+		target.string_value = YyjsonString(source);
+		return true;
+	}
+	if (duckdb_yyjson::yyjson_is_arr(source)) {
+		target.type = JsonValueType::ARRAY;
+		duckdb_yyjson::yyjson_val *entry;
+		size_t index;
+		size_t max;
+		yyjson_arr_foreach(source, index, max, entry) {
+			JsonValue child;
+			if (!ConvertYyjsonValue(entry, child, error)) {
+				return false;
+			}
+			target.array_value.push_back(std::move(child));
 		}
 		return true;
 	}
-
-private:
-	const std::string &input;
-	size_t pos = 0;
-
-	void SkipWhitespace() {
-		while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos]))) {
-			pos++;
-		}
-	}
-
-	bool ConsumeLiteral(const std::string &literal) {
-		if (input.compare(pos, literal.size(), literal) != 0) {
-			return false;
-		}
-		pos += literal.size();
-		return true;
-	}
-
-	bool ParseValue(JsonValue &value, std::string &error) {
-		SkipWhitespace();
-		if (pos >= input.size()) {
-			error = "expected JSON value";
-			return false;
-		}
-		switch (input[pos]) {
-		case '{':
-			return ParseObject(value, error);
-		case '[':
-			return ParseArray(value, error);
-		case '"':
-			return ParseString(value, error);
-		case 't':
-			if (ConsumeLiteral("true")) {
-				value.type = JsonValueType::BOOLEAN;
-				value.boolean_value = true;
-				return true;
-			}
-			break;
-		case 'f':
-			if (ConsumeLiteral("false")) {
-				value.type = JsonValueType::BOOLEAN;
-				value.boolean_value = false;
-				return true;
-			}
-			break;
-		case 'n':
-			if (ConsumeLiteral("null")) {
-				value.type = JsonValueType::NULL_VALUE;
-				return true;
-			}
-			break;
-		default:
-			if (input[pos] == '-' || std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				return ParseNumber(value, error);
-			}
-			break;
-		}
-		error = "invalid JSON value at byte " + std::to_string(pos);
-		return false;
-	}
-
-	bool ParseObject(JsonValue &value, std::string &error) {
-		value.type = JsonValueType::OBJECT;
-		pos++;
-		SkipWhitespace();
-		if (pos < input.size() && input[pos] == '}') {
-			pos++;
-			return true;
-		}
-		while (pos < input.size()) {
-			std::string key;
-			if (!ParseStringValue(key, error)) {
+	if (duckdb_yyjson::yyjson_is_obj(source)) {
+		target.type = JsonValueType::OBJECT;
+		duckdb_yyjson::yyjson_val *key;
+		duckdb_yyjson::yyjson_val *value;
+		size_t index;
+		size_t max;
+		yyjson_obj_foreach(source, index, max, key, value) {
+			JsonValue child;
+			if (!ConvertYyjsonValue(value, child, error)) {
 				return false;
 			}
-			SkipWhitespace();
-			if (pos >= input.size() || input[pos] != ':') {
-				error = "expected ':' after JSON object key at byte " + std::to_string(pos);
-				return false;
-			}
-			pos++;
-			JsonValue member;
-			if (!ParseValue(member, error)) {
-				return false;
-			}
-			value.object_value[key] = std::move(member);
-			SkipWhitespace();
-			if (pos < input.size() && input[pos] == ',') {
-				pos++;
-				SkipWhitespace();
-				continue;
-			}
-			if (pos < input.size() && input[pos] == '}') {
-				pos++;
-				return true;
-			}
-			error = "expected ',' or '}' in JSON object at byte " + std::to_string(pos);
-			return false;
-		}
-		error = "unterminated JSON object";
-		return false;
-	}
-
-	bool ParseArray(JsonValue &value, std::string &error) {
-		value.type = JsonValueType::ARRAY;
-		pos++;
-		SkipWhitespace();
-		if (pos < input.size() && input[pos] == ']') {
-			pos++;
-			return true;
-		}
-		while (pos < input.size()) {
-			JsonValue element;
-			if (!ParseValue(element, error)) {
-				return false;
-			}
-			value.array_value.push_back(std::move(element));
-			SkipWhitespace();
-			if (pos < input.size() && input[pos] == ',') {
-				pos++;
-				SkipWhitespace();
-				continue;
-			}
-			if (pos < input.size() && input[pos] == ']') {
-				pos++;
-				return true;
-			}
-			error = "expected ',' or ']' in JSON array at byte " + std::to_string(pos);
-			return false;
-		}
-		error = "unterminated JSON array";
-		return false;
-	}
-
-	bool ParseString(JsonValue &value, std::string &error) {
-		value.type = JsonValueType::STRING;
-		return ParseStringValue(value.string_value, error);
-	}
-
-	bool ParseStringValue(std::string &value, std::string &error) {
-		try {
-			value = DecodeJsonString(input, pos);
-			return true;
-		} catch (std::exception &ex) {
-			error = ex.what();
-			return false;
-		}
-	}
-
-	bool ParseNumber(JsonValue &value, std::string &error) {
-		auto start = pos;
-		if (input[pos] == '-') {
-			pos++;
-		}
-		if (pos >= input.size()) {
-			error = "invalid JSON number at byte " + std::to_string(start);
-			return false;
-		}
-		if (input[pos] == '0') {
-			pos++;
-		} else if (std::isdigit(static_cast<unsigned char>(input[pos]))) {
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-		} else {
-			error = "invalid JSON number at byte " + std::to_string(start);
-			return false;
-		}
-		auto is_integer = true;
-		if (pos < input.size() && input[pos] == '.') {
-			is_integer = false;
-			pos++;
-			auto fraction_start = pos;
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-			if (fraction_start == pos) {
-				error = "invalid JSON number fraction at byte " + std::to_string(start);
-				return false;
-			}
-		}
-		if (pos < input.size() && (input[pos] == 'e' || input[pos] == 'E')) {
-			is_integer = false;
-			pos++;
-			if (pos < input.size() && (input[pos] == '+' || input[pos] == '-')) {
-				pos++;
-			}
-			auto exponent_start = pos;
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-			if (exponent_start == pos) {
-				error = "invalid JSON number exponent at byte " + std::to_string(start);
-				return false;
-			}
-		}
-		value.type = JsonValueType::NUMBER;
-		value.number_is_integer = is_integer;
-		try {
-			value.number_value = std::stod(input.substr(start, pos - start));
-		} catch (...) {
-			error = "invalid JSON number at byte " + std::to_string(start);
-			return false;
+			target.object_value[YyjsonString(key)] = std::move(child);
 		}
 		return true;
 	}
-};
+	error = "unsupported JSON value type";
+	return false;
+}
+
+bool FindYyjsonStringField(duckdb_yyjson::yyjson_val *value, const std::string &field, std::string &result) {
+	if (!value) {
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_obj(value)) {
+		duckdb_yyjson::yyjson_val *key;
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_obj_foreach(value, index, max, key, child) {
+			if (YyjsonString(key) == field && duckdb_yyjson::yyjson_is_str(child)) {
+				result = YyjsonString(child);
+				return true;
+			}
+			if (FindYyjsonStringField(child, field, result)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_arr(value)) {
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_arr_foreach(value, index, max, child) {
+			if (FindYyjsonStringField(child, field, result)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool FindYyjsonIntegerField(duckdb_yyjson::yyjson_val *value, const std::string &field, int64_t &result) {
+	if (!value) {
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_obj(value)) {
+		duckdb_yyjson::yyjson_val *key;
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_obj_foreach(value, index, max, key, child) {
+			if (YyjsonString(key) == field && duckdb_yyjson::yyjson_is_int(child)) {
+				if (duckdb_yyjson::yyjson_is_uint(child)) {
+					auto unsigned_value = duckdb_yyjson::yyjson_get_uint(child);
+					if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+						return false;
+					}
+					result = static_cast<int64_t>(unsigned_value);
+				} else {
+					result = duckdb_yyjson::yyjson_get_sint(child);
+				}
+				return true;
+			}
+			if (FindYyjsonIntegerField(child, field, result)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_arr(value)) {
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_arr_foreach(value, index, max, child) {
+			if (FindYyjsonIntegerField(child, field, result)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool YyjsonNumericArray(duckdb_yyjson::yyjson_val *value, std::vector<double> &result) {
+	if (!duckdb_yyjson::yyjson_is_arr(value)) {
+		return false;
+	}
+	duckdb_yyjson::yyjson_val *child;
+	size_t index;
+	size_t max;
+	yyjson_arr_foreach(value, index, max, child) {
+		if (!duckdb_yyjson::yyjson_is_num(child)) {
+			return false;
+		}
+		result.push_back(duckdb_yyjson::yyjson_get_num(child));
+	}
+	return true;
+}
+
+bool FindFirstYyjsonNumberArray(duckdb_yyjson::yyjson_val *value, std::vector<double> &result) {
+	if (!value) {
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_arr(value)) {
+		std::vector<double> candidate;
+		if (YyjsonNumericArray(value, candidate)) {
+			result = std::move(candidate);
+			return true;
+		}
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_arr_foreach(value, index, max, child) {
+			if (FindFirstYyjsonNumberArray(child, result)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_obj(value)) {
+		duckdb_yyjson::yyjson_val *key;
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_obj_foreach(value, index, max, key, child) {
+			if (FindFirstYyjsonNumberArray(child, result)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool FindYyjsonNumberArrayField(duckdb_yyjson::yyjson_val *value, const std::string &field,
+                                std::vector<double> &result) {
+	if (!value) {
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_obj(value)) {
+		duckdb_yyjson::yyjson_val *key;
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_obj_foreach(value, index, max, key, child) {
+			if (YyjsonString(key) == field && FindFirstYyjsonNumberArray(child, result)) {
+				return true;
+			}
+			if (FindYyjsonNumberArrayField(child, field, result)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_arr(value)) {
+		duckdb_yyjson::yyjson_val *child;
+		size_t index;
+		size_t max;
+		yyjson_arr_foreach(value, index, max, child) {
+			if (FindYyjsonNumberArrayField(child, field, result)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
 
 bool ParseJsonValueDocument(const std::string &input, JsonValue &value, std::string &error) {
-	JsonValueParser parser(input);
-	return parser.Parse(value, error);
+	auto doc = ReadYyjsonDocument(input, error);
+	if (!doc) {
+		return false;
+	}
+	auto root = duckdb_yyjson::yyjson_doc_get_root(doc.get());
+	if (!root) {
+		error = "empty JSON document";
+		return false;
+	}
+	return ConvertYyjsonValue(root, value, error);
 }
 
 const JsonValue *ObjectField(const JsonValue &value, const std::string &field) {
@@ -1389,52 +1361,85 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 }
 
 bool FindJsonStringValue(const std::string &body, const std::string &key, std::string &value) {
-	auto needle = "\"" + key + "\"";
-	size_t pos = 0;
-	while ((pos = body.find(needle, pos)) != std::string::npos) {
-		pos += needle.size();
-		while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) {
-			pos++;
-		}
-		if (pos >= body.size() || body[pos] != ':') {
-			continue;
-		}
-		pos++;
-		while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) {
-			pos++;
-		}
-		if (pos < body.size() && body[pos] == '"') {
-			value = DecodeJsonString(body, pos);
-			return true;
-		}
+	std::string error;
+	auto doc = ReadYyjsonDocument(body, error);
+	if (!doc) {
+		return false;
 	}
-	return false;
+	return FindYyjsonStringField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, value);
 }
 
 int64_t FindJsonIntegerValue(const std::string &body, const std::string &key) {
-	auto needle = "\"" + key + "\"";
-	auto pos = body.find(needle);
-	if (pos == std::string::npos) {
+	std::string error;
+	auto doc = ReadYyjsonDocument(body, error);
+	if (!doc) {
 		return -1;
 	}
-	pos += needle.size();
-	while (pos < body.size() && (std::isspace(static_cast<unsigned char>(body[pos])) || body[pos] == ':')) {
-		pos++;
+	int64_t value = -1;
+	if (FindYyjsonIntegerField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, value)) {
+		return value;
 	}
-	auto start = pos;
-	while (pos < body.size() && std::isdigit(static_cast<unsigned char>(body[pos]))) {
-		pos++;
-	}
-	if (start == pos) {
-		return -1;
-	}
-	return std::stoll(body.substr(start, pos - start));
+	return -1;
 }
 
 size_t WriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
 	auto response = reinterpret_cast<std::string *>(userdata);
 	response->append(ptr, size * nmemb);
 	return size * nmemb;
+}
+
+bool ClientInterrupted(ClientContext *context) {
+	return context && context->IsInterrupted();
+}
+
+struct CurlHeaderCapture {
+	long retry_after_ms = -1;
+};
+
+long ParseRetryAfterMs(const std::string &value) {
+	auto trimmed = TrimAscii(value);
+	if (trimmed.empty()) {
+		return -1;
+	}
+	try {
+		size_t parsed = 0;
+		auto seconds = std::stol(trimmed, &parsed);
+		if (parsed == trimmed.size() && seconds >= 0) {
+			return seconds > 3600 ? 3600000 : seconds * 1000;
+		}
+	} catch (...) {
+	}
+	auto retry_time = curl_getdate(trimmed.c_str(), nullptr);
+	if (retry_time < 0) {
+		return -1;
+	}
+	auto now = std::time(nullptr);
+	if (retry_time <= now) {
+		return 0;
+	}
+	auto seconds = retry_time - now;
+	return seconds > 3600 ? 3600000 : static_cast<long>(seconds * 1000);
+}
+
+size_t HeaderCallback(char *buffer, size_t size, size_t nitems, void *userdata) {
+	auto total = size * nitems;
+	auto capture = reinterpret_cast<CurlHeaderCapture *>(userdata);
+	std::string header(buffer, total);
+	auto lower_header = LowerAscii(header);
+	const std::string prefix = "retry-after:";
+	if (lower_header.compare(0, prefix.size(), prefix) == 0) {
+		capture->retry_after_ms = ParseRetryAfterMs(header.substr(prefix.size()));
+	}
+	return total;
+}
+
+struct CurlProgressState {
+	ClientContext *client_context;
+};
+
+int CurlProgressCallback(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+	auto state = reinterpret_cast<CurlProgressState *>(clientp);
+	return ClientInterrupted(state ? state->client_context : nullptr) ? 1 : 0;
 }
 
 long TimeoutSeconds() {
@@ -1567,14 +1572,14 @@ int64_t TokenLimitPerMinute(const CompletionOptions &options) {
 	}
 }
 
-void PruneProviderTokenWindow(std::chrono::steady_clock::time_point now) {
+void PruneProviderTokenWindow(ProviderRuntimeState &state, std::chrono::steady_clock::time_point now) {
 	auto cutoff = now - std::chrono::minutes(1);
-	while (!provider_token_window.empty() && provider_token_window.front().first <= cutoff) {
-		provider_token_window_tokens -= provider_token_window.front().second;
-		provider_token_window.pop_front();
+	while (!state.provider_token_window.empty() && state.provider_token_window.front().first <= cutoff) {
+		state.provider_token_window_tokens -= state.provider_token_window.front().second;
+		state.provider_token_window.pop_front();
 	}
-	if (provider_token_window_tokens < 0) {
-		provider_token_window_tokens = 0;
+	if (state.provider_token_window_tokens < 0) {
+		state.provider_token_window_tokens = 0;
 	}
 }
 
@@ -1593,27 +1598,33 @@ int64_t TokenReservation(int64_t estimated_tokens, int64_t token_limit_per_minut
 class ProviderRequestGuard {
 public:
 	explicit ProviderRequestGuard(const CompletionOptions &options, int64_t estimated_tokens)
-	    : max_concurrent_requests(MaxConcurrentRequests(options)),
+	    : state(RuntimeState(options)), max_concurrent_requests(MaxConcurrentRequests(options)),
 	      min_request_interval_ms(MinRequestIntervalMs(options)), token_limit_per_minute(TokenLimitPerMinute(options)),
-	      request_tokens(TokenReservation(estimated_tokens, token_limit_per_minute)) {
+	      request_tokens(TokenReservation(estimated_tokens, token_limit_per_minute)),
+	      client_context(options.client_context) {
 		if (max_concurrent_requests <= 0 && min_request_interval_ms <= 0 && token_limit_per_minute <= 0) {
 			return;
 		}
 
-		std::unique_lock<std::mutex> lock(provider_control_mutex);
+		std::unique_lock<std::mutex> lock(state.provider_control_mutex);
 		while (true) {
+			if (ClientInterrupted(client_context)) {
+				throw InterruptException();
+			}
 			auto now = std::chrono::steady_clock::now();
-			PruneProviderTokenWindow(now);
-			auto concurrency_ready = max_concurrent_requests <= 0 || active_provider_requests < max_concurrent_requests;
-			auto rate_ready = min_request_interval_ms <= 0 || !has_last_provider_request_start ||
-			                  now >= last_provider_request_start + std::chrono::milliseconds(min_request_interval_ms);
-			auto token_ready =
-			    token_limit_per_minute <= 0 || provider_token_window_tokens + request_tokens <= token_limit_per_minute;
+			PruneProviderTokenWindow(state, now);
+			auto concurrency_ready =
+			    max_concurrent_requests <= 0 || state.active_provider_requests < max_concurrent_requests;
+			auto rate_ready =
+			    min_request_interval_ms <= 0 || !state.has_last_provider_request_start ||
+			    now >= state.last_provider_request_start + std::chrono::milliseconds(min_request_interval_ms);
+			auto token_ready = token_limit_per_minute <= 0 ||
+			                   state.provider_token_window_tokens + request_tokens <= token_limit_per_minute;
 			if (concurrency_ready && rate_ready && token_ready) {
 				break;
 			}
 			if (!concurrency_ready) {
-				provider_control_cv.wait(lock);
+				state.provider_control_cv.wait_for(lock, std::chrono::milliseconds(100));
 			} else {
 				std::chrono::steady_clock::time_point wake_at;
 				bool has_wake_at = false;
@@ -1624,27 +1635,27 @@ public:
 					}
 				};
 				if (!rate_ready) {
-					set_wake_at(last_provider_request_start + std::chrono::milliseconds(min_request_interval_ms));
+					set_wake_at(state.last_provider_request_start + std::chrono::milliseconds(min_request_interval_ms));
 				}
-				if (!token_ready && !provider_token_window.empty()) {
-					set_wake_at(provider_token_window.front().first + std::chrono::minutes(1));
+				if (!token_ready && !state.provider_token_window.empty()) {
+					set_wake_at(state.provider_token_window.front().first + std::chrono::minutes(1));
 				}
 				if (has_wake_at) {
-					provider_control_cv.wait_until(lock, wake_at);
+					state.provider_control_cv.wait_until(lock, std::min(wake_at, now + std::chrono::milliseconds(100)));
 				} else {
-					provider_control_cv.wait(lock);
+					state.provider_control_cv.wait_for(lock, std::chrono::milliseconds(100));
 				}
 			}
 		}
-		active_provider_requests++;
+		state.active_provider_requests++;
 		auto request_start = std::chrono::steady_clock::now();
 		if (min_request_interval_ms > 0) {
-			last_provider_request_start = request_start;
-			has_last_provider_request_start = true;
+			state.last_provider_request_start = request_start;
+			state.has_last_provider_request_start = true;
 		}
 		if (token_limit_per_minute > 0 && request_tokens > 0) {
-			provider_token_window.emplace_back(request_start, request_tokens);
-			provider_token_window_tokens += request_tokens;
+			state.provider_token_window.emplace_back(request_start, request_tokens);
+			state.provider_token_window_tokens += request_tokens;
 		}
 		acquired = true;
 	}
@@ -1653,16 +1664,18 @@ public:
 		if (!acquired) {
 			return;
 		}
-		std::lock_guard<std::mutex> lock(provider_control_mutex);
-		active_provider_requests--;
-		provider_control_cv.notify_all();
+		std::lock_guard<std::mutex> lock(state.provider_control_mutex);
+		state.active_provider_requests--;
+		state.provider_control_cv.notify_all();
 	}
 
 private:
+	ProviderRuntimeState &state;
 	int64_t max_concurrent_requests;
 	int64_t min_request_interval_ms;
 	int64_t token_limit_per_minute;
 	int64_t request_tokens;
+	ClientContext *client_context;
 	bool acquired = false;
 };
 
@@ -1670,25 +1683,53 @@ bool IsRetryableHttpStatus(long status) {
 	return status == 429 || status >= 500;
 }
 
-void SleepBeforeRetry(long retry_backoff_ms) {
-	if (retry_backoff_ms <= 0) {
+long RetryDelayMs(long base_backoff_ms, long attempt, long retry_after_ms) {
+	if (retry_after_ms >= 0) {
+		return retry_after_ms;
+	}
+	if (base_backoff_ms <= 0) {
+		return 0;
+	}
+	auto capped_attempt = std::min<long>(attempt, 10);
+	auto exponential = base_backoff_ms;
+	for (long i = 0; i < capped_attempt; i++) {
+		if (exponential >= 60000) {
+			exponential = 60000;
+			break;
+		}
+		exponential *= 2;
+	}
+	exponential = std::min<long>(exponential, 60000);
+	static thread_local std::mt19937 generator(std::random_device {}());
+	std::uniform_int_distribution<long> jitter(0, std::max<long>(1, exponential / 4));
+	return std::min<long>(60000, exponential + jitter(generator));
+}
+
+void SleepBeforeRetry(long retry_delay_ms, ClientContext *client_context) {
+	if (retry_delay_ms <= 0) {
 		return;
 	}
-	std::this_thread::sleep_for(std::chrono::milliseconds(retry_backoff_ms));
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(retry_delay_ms);
+	while (std::chrono::steady_clock::now() < deadline) {
+		if (ClientInterrupted(client_context)) {
+			throw InterruptException();
+		}
+		auto remaining =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+		std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(remaining, std::chrono::milliseconds(100)));
+	}
 }
 
 HttpResponse HttpPost(const std::string &url, const std::string &payload, const std::vector<std::string> &headers,
                       long timeout_seconds, bool throw_http_errors = true, long retry_count = 0,
-                      long retry_backoff_ms = 1000) {
-	curl_global_init(CURL_GLOBAL_DEFAULT);
+                      long retry_backoff_ms = 1000, ClientContext *client_context = nullptr) {
+	EnsureCurlGlobalInit();
 	int64_t total_elapsed_ms = 0;
 	for (long attempt = 0; attempt <= retry_count; attempt++) {
-		auto curl = curl_easy_init();
-		if (!curl) {
-			throw IOException("Could not initialize libcurl for AI request");
-		}
-
+		auto curl = ThreadLocalCurlHandle();
 		std::string response_body;
+		CurlHeaderCapture header_capture;
+		CurlProgressState progress_state {client_context};
 		struct curl_slist *header_list = nullptr;
 		for (auto &header : headers) {
 			header_list = curl_slist_append(header_list, header.c_str());
@@ -1701,8 +1742,15 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+		curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
+		curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_capture);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
-		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+		curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+		curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L);
+		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+		curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlProgressCallback);
+		curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress_state);
 
 		auto start = std::chrono::steady_clock::now();
 		auto result = curl_easy_perform(curl);
@@ -1711,12 +1759,17 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 
 		curl_slist_free_all(header_list);
-		curl_easy_cleanup(curl);
 
 		total_elapsed_ms += std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 		if (attempt < retry_count && (result != CURLE_OK || IsRetryableHttpStatus(status))) {
-			SleepBeforeRetry(retry_backoff_ms);
+			if (result == CURLE_ABORTED_BY_CALLBACK && ClientInterrupted(client_context)) {
+				throw InterruptException();
+			}
+			SleepBeforeRetry(RetryDelayMs(retry_backoff_ms, attempt, header_capture.retry_after_ms), client_context);
 			continue;
+		}
+		if (result == CURLE_ABORTED_BY_CALLBACK && ClientInterrupted(client_context)) {
+			throw InterruptException();
 		}
 		if (result != CURLE_OK) {
 			throw IOException("AI provider request failed: %s", curl_easy_strerror(result));
@@ -1724,7 +1777,7 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		if (throw_http_errors && (status < 200 || status >= 300)) {
 			throw IOException("AI provider returned HTTP %ld: %s", status, response_body);
 		}
-		return {response_body, status, total_elapsed_ms};
+		return HttpResponse(response_body, status, total_elapsed_ms, header_capture.retry_after_ms);
 	}
 	throw InternalException("AI provider retry loop exited unexpectedly");
 }
@@ -2054,8 +2107,8 @@ std::string ChatMessagesJson(const std::string &prompt, const std::string &syste
 }
 
 bool ValidateJsonDocumentInternal(const std::string &input, std::string &error) {
-	JsonDocumentValidator validator(input);
-	return validator.Validate(error);
+	JsonValue value;
+	return ParseJsonValueDocument(input, value, error);
 }
 
 size_t FirstNonWhitespace(const std::string &input) {
@@ -2245,81 +2298,17 @@ std::string EmbeddingPayload(const ProviderConfig &config, const std::string &in
 	return "{\"model\":\"" + JsonEscape(config.model) + "\",\"input\":\"" + JsonEscape(input) + "\"}";
 }
 
-void SkipWhitespace(const std::string &body, size_t &pos) {
-	while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) {
-		pos++;
-	}
-}
-
-bool IsJsonNumberStart(char c) {
-	return c == '-' || c == '+' || c == '.' || std::isdigit(static_cast<unsigned char>(c));
-}
-
-std::vector<double> ParseJsonNumberArray(const std::string &body, size_t pos) {
-	if (pos >= body.size() || body[pos] != '[') {
-		throw InvalidInputException("Expected JSON number array while parsing AI embedding response");
-	}
-	pos++;
-	std::vector<double> values;
-	while (pos < body.size()) {
-		SkipWhitespace(body, pos);
-		if (pos < body.size() && body[pos] == ']') {
-			return values;
-		}
-		if (pos >= body.size() || !IsJsonNumberStart(body[pos])) {
-			throw InvalidInputException("Expected JSON number while parsing AI embedding response");
-		}
-		char *end_ptr = nullptr;
-		auto value = std::strtod(body.c_str() + pos, &end_ptr);
-		if (end_ptr == body.c_str() + pos) {
-			throw InvalidInputException("Invalid JSON number while parsing AI embedding response");
-		}
-		values.push_back(value);
-		pos = static_cast<size_t>(end_ptr - body.c_str());
-		SkipWhitespace(body, pos);
-		if (pos < body.size() && body[pos] == ',') {
-			pos++;
-			continue;
-		}
-		if (pos < body.size() && body[pos] == ']') {
-			return values;
-		}
-		throw InvalidInputException("Expected comma or closing bracket while parsing AI embedding response");
-	}
-	throw InvalidInputException("Unterminated JSON number array while parsing AI embedding response");
-}
-
-std::vector<double> FindFirstJsonNumberArray(const std::string &body, size_t pos) {
-	while (pos < body.size()) {
-		if (body[pos] != '[') {
-			pos++;
-			continue;
-		}
-		auto candidate = pos + 1;
-		SkipWhitespace(body, candidate);
-		if (candidate < body.size() && body[candidate] == '[') {
-			pos = candidate;
-			continue;
-		}
-		if (candidate < body.size() && (body[candidate] == ']' || IsJsonNumberStart(body[candidate]))) {
-			return ParseJsonNumberArray(body, pos);
-		}
-		pos++;
-	}
-	throw IOException("AI provider embedding response did not contain a numeric embedding array: %s", body);
-}
-
 std::vector<double> FindEmbeddingArray(const std::string &body, const std::string &key) {
-	auto needle = "\"" + key + "\"";
-	auto pos = body.find(needle);
-	if (pos == std::string::npos) {
+	std::string error;
+	auto doc = ReadYyjsonDocument(body, error);
+	if (!doc) {
 		return {};
 	}
-	pos = body.find('[', pos + needle.size());
-	if (pos == std::string::npos) {
-		return {};
+	std::vector<double> values;
+	if (FindYyjsonNumberArrayField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, values)) {
+		return values;
 	}
-	return FindFirstJsonNumberArray(body, pos);
+	return {};
 }
 
 EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response) {
@@ -2458,6 +2447,16 @@ double EstimateEmbeddingCostUsd(const ProviderConfig &config, const CompletionOp
 	return HasEstimatedCost(cost) ? cost : -1;
 }
 
+void PushUsageEvent(ProviderRuntimeState &state, UsageEvent event) {
+	std::lock_guard<std::mutex> lock(state.usage_mutex);
+	event.event_id = state.next_usage_event_id++;
+	state.usage_events.push_back(std::move(event));
+	if (state.usage_events.size() > MAX_USAGE_EVENTS) {
+		state.usage_events.erase(state.usage_events.begin(),
+		                         state.usage_events.begin() + (state.usage_events.size() - MAX_USAGE_EVENTS));
+	}
+}
+
 void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionResult &result,
                       const CompletionOptions &options) {
 	UsageEvent event;
@@ -2476,13 +2475,7 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 	event.elapsed_ms = result.elapsed_ms;
 	event.http_status = result.http_status;
 	event.estimated_cost_usd = EstimateCompletionCostUsd(config, options, result);
-
-	std::lock_guard<std::mutex> lock(usage_mutex);
-	event.event_id = next_usage_event_id++;
-	usage_events.push_back(std::move(event));
-	if (usage_events.size() > MAX_USAGE_EVENTS) {
-		usage_events.erase(usage_events.begin(), usage_events.begin() + (usage_events.size() - MAX_USAGE_EVENTS));
-	}
+	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
 void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input, const EmbeddingResult &result,
@@ -2503,27 +2496,7 @@ void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &
 	event.elapsed_ms = result.elapsed_ms;
 	event.http_status = result.http_status;
 	event.estimated_cost_usd = EstimateEmbeddingCostUsd(config, options, result);
-
-	std::lock_guard<std::mutex> lock(usage_mutex);
-	event.event_id = next_usage_event_id++;
-	usage_events.push_back(std::move(event));
-	if (usage_events.size() > MAX_USAGE_EVENTS) {
-		usage_events.erase(usage_events.begin(), usage_events.begin() + (usage_events.size() - MAX_USAGE_EVENTS));
-	}
-}
-
-void PushUsageEvent(UsageEvent event) {
-	std::lock_guard<std::mutex> lock(usage_mutex);
-	event.event_id = next_usage_event_id++;
-	usage_events.push_back(std::move(event));
-	if (usage_events.size() > MAX_USAGE_EVENTS) {
-		usage_events.erase(usage_events.begin(), usage_events.begin() + (usage_events.size() - MAX_USAGE_EVENTS));
-	}
-}
-
-bool EnvFlagEnabled(const std::string &name) {
-	auto value = LowerAscii(GetEnv(name));
-	return value == "1" || value == "true" || value == "yes" || value == "on";
+	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
 double LogSampleRate(const CompletionOptions &options) {
@@ -2690,8 +2663,9 @@ void MaybePostUsageLog(const ProviderConfig &config, const std::string &prompt, 
 	}
 
 	try {
+		EnforceAllowedHost(log_endpoint, options);
 		HttpPost(log_endpoint, payload, {"Content-Type: application/json"}, TimeoutSeconds(options), true,
-		         RetryCount(options), RetryBackoffMs(options));
+		         RetryCount(options), RetryBackoffMs(options), options.client_context);
 	} catch (std::exception &ex) {
 		auto log_strict = options.has_log_strict ? options.log_strict : EnvFlagEnabled("DUCKDB_AI_LOG_STRICT");
 		if (log_strict) {
@@ -2750,8 +2724,9 @@ void MaybePostEmbeddingLog(const ProviderConfig &config, const std::string &inpu
 	}
 
 	try {
+		EnforceAllowedHost(log_endpoint, options);
 		HttpPost(log_endpoint, payload, {"Content-Type: application/json"}, TimeoutSeconds(options), true,
-		         RetryCount(options), RetryBackoffMs(options));
+		         RetryCount(options), RetryBackoffMs(options), options.client_context);
 	} catch (std::exception &ex) {
 		auto log_strict = options.has_log_strict ? options.log_strict : EnvFlagEnabled("DUCKDB_AI_LOG_STRICT");
 		if (log_strict) {
@@ -2816,10 +2791,28 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		throw InvalidInputException("ai_complete prompt must not be empty");
 	}
 	auto config = ResolveProvider(options);
+	auto endpoint = RequestEndpoint(config);
+	auto payload = RequestPayload(config, prompt, options);
+	EnforceAllowedHost(endpoint, options);
 	auto response = [&]() {
+		if (ResponseCacheEnabled(options)) {
+			auto &runtime_state = RuntimeState(options);
+			auto cache_key = ResponseCacheKey("completion", config, endpoint, payload);
+			HttpResponse cached_response;
+			if (TryGetCachedResponse(runtime_state, cache_key, cached_response)) {
+				return cached_response;
+			}
+			ProviderRequestGuard request_guard(options, EstimatedCompletionTokens(prompt, options));
+			auto fresh_response = HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false,
+			                               RetryCount(options), RetryBackoffMs(options), options.client_context);
+			if (fresh_response.status >= 200 && fresh_response.status < 300) {
+				StoreCachedResponse(runtime_state, cache_key, fresh_response);
+			}
+			return fresh_response;
+		}
 		ProviderRequestGuard request_guard(options, EstimatedCompletionTokens(prompt, options));
-		return HttpPost(RequestEndpoint(config), RequestPayload(config, prompt, options), RequestHeaders(config),
-		                TimeoutSeconds(options), false, RetryCount(options), RetryBackoffMs(options));
+		return HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false, RetryCount(options),
+		                RetryBackoffMs(options), options.client_context);
 	}();
 	ThrowIfProviderHttpError(config, response);
 	auto result = ParseCompletionResult(config, response);
@@ -2837,10 +2830,28 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 		throw InvalidInputException("AI provider \"%s\" does not support dedicated Privacy Filter redaction.",
 		                            config.provider);
 	}
+	auto endpoint = RequestEndpoint(config);
+	auto payload = RequestPayload(config, text, options);
+	EnforceAllowedHost(endpoint, options);
 	auto response = [&]() {
+		if (ResponseCacheEnabled(options)) {
+			auto &runtime_state = RuntimeState(options);
+			auto cache_key = ResponseCacheKey("redaction", config, endpoint, payload);
+			HttpResponse cached_response;
+			if (TryGetCachedResponse(runtime_state, cache_key, cached_response)) {
+				return cached_response;
+			}
+			ProviderRequestGuard request_guard(options, EstimateTokenCount(text));
+			auto fresh_response = HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false,
+			                               RetryCount(options), RetryBackoffMs(options), options.client_context);
+			if (fresh_response.status >= 200 && fresh_response.status < 300) {
+				StoreCachedResponse(runtime_state, cache_key, fresh_response);
+			}
+			return fresh_response;
+		}
 		ProviderRequestGuard request_guard(options, EstimateTokenCount(text));
-		return HttpPost(RequestEndpoint(config), RequestPayload(config, text, options), RequestHeaders(config),
-		                TimeoutSeconds(options), false, RetryCount(options), RetryBackoffMs(options));
+		return HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false, RetryCount(options),
+		                RetryBackoffMs(options), options.client_context);
 	}();
 	ThrowIfProviderHttpError(config, response);
 	auto result = ParseCompletionResult(config, response);
@@ -2873,10 +2884,28 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 		throw InvalidInputException("ai_embed input must not be empty");
 	}
 	auto config = ResolveEmbeddingProviderConfig(options, true);
+	auto endpoint = EmbeddingEndpoint(config);
+	auto payload = EmbeddingPayload(config, input);
+	EnforceAllowedHost(endpoint, options);
 	auto response = [&]() {
+		if (ResponseCacheEnabled(options)) {
+			auto &runtime_state = RuntimeState(options);
+			auto cache_key = ResponseCacheKey("embedding", config, endpoint, payload);
+			HttpResponse cached_response;
+			if (TryGetCachedResponse(runtime_state, cache_key, cached_response)) {
+				return cached_response;
+			}
+			ProviderRequestGuard request_guard(options, EstimateTokenCount(input));
+			auto fresh_response = HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false,
+			                               RetryCount(options), RetryBackoffMs(options), options.client_context);
+			if (fresh_response.status >= 200 && fresh_response.status < 300) {
+				StoreCachedResponse(runtime_state, cache_key, fresh_response);
+			}
+			return fresh_response;
+		}
 		ProviderRequestGuard request_guard(options, EstimateTokenCount(input));
-		return HttpPost(EmbeddingEndpoint(config), EmbeddingPayload(config, input), RequestHeaders(config),
-		                TimeoutSeconds(options), false, RetryCount(options), RetryBackoffMs(options));
+		return HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false, RetryCount(options),
+		                RetryBackoffMs(options), options.client_context);
 	}();
 	ThrowIfProviderHttpError(config, response);
 	auto result = ParseEmbeddingResult(config, response);
@@ -2885,21 +2914,60 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	return result;
 }
 
+void InitializeProviderRuntime() {
+	EnsureCurlGlobalInit();
+}
+
+void AttachProviderRuntimeState(CompletionOptions &options, ClientContext &context) {
+	options.client_context = &context;
+	options.runtime_state = &RuntimeState(context);
+}
+
+int64_t EffectiveMaxConcurrentRequests(const CompletionOptions &options) {
+	return MaxConcurrentRequests(options);
+}
+
 std::vector<UsageEvent> UsageEvents() {
-	std::lock_guard<std::mutex> lock(usage_mutex);
-	return usage_events;
+	std::lock_guard<std::mutex> lock(fallback_runtime_state.usage_mutex);
+	return fallback_runtime_state.usage_events;
+}
+
+std::vector<UsageEvent> UsageEvents(ClientContext &context) {
+	auto &state = RuntimeState(context);
+	std::lock_guard<std::mutex> lock(state.usage_mutex);
+	return state.usage_events;
 }
 
 void ClearUsageEvents() {
-	std::lock_guard<std::mutex> lock(usage_mutex);
-	usage_events.clear();
+	std::lock_guard<std::mutex> lock(fallback_runtime_state.usage_mutex);
+	fallback_runtime_state.usage_events.clear();
+}
+
+void ClearUsageEvents(ClientContext &context) {
+	auto &state = RuntimeState(context);
+	std::lock_guard<std::mutex> lock(state.usage_mutex);
+	state.usage_events.clear();
+}
+
+void ClearResponseCache() {
+	std::lock_guard<std::mutex> lock(fallback_runtime_state.response_cache_mutex);
+	fallback_runtime_state.response_cache.clear();
+	fallback_runtime_state.response_cache_order.clear();
+}
+
+void ClearResponseCache(ClientContext &context) {
+	auto &state = RuntimeState(context);
+	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	state.response_cache.clear();
+	state.response_cache_order.clear();
 }
 
 std::vector<ModelPrice> ModelPrices() {
 	return BuiltinModelPrices();
 }
 
-void RecordLocalUsageEvent(const std::string &event_name, int64_t input_chars, int64_t response_chars) {
+void RecordLocalUsageEvent(ClientContext *context, const std::string &event_name, int64_t input_chars,
+                           int64_t response_chars) {
 	UsageEvent event;
 	event.created_at = CurrentTimestamp();
 	event.event = event_name;
@@ -2916,7 +2984,12 @@ void RecordLocalUsageEvent(const std::string &event_name, int64_t input_chars, i
 	event.elapsed_ms = 0;
 	event.http_status = 0;
 	event.estimated_cost_usd = -1;
-	PushUsageEvent(std::move(event));
+	auto &state = context ? RuntimeState(*context) : fallback_runtime_state;
+	PushUsageEvent(state, std::move(event));
+}
+
+void RecordLocalUsageEvent(const std::string &event_name, int64_t input_chars, int64_t response_chars) {
+	RecordLocalUsageEvent(nullptr, event_name, input_chars, response_chars);
 }
 
 bool ValidateJsonDocument(const std::string &input, std::string &error) {

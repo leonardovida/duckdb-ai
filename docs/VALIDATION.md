@@ -33,14 +33,18 @@ Result:
 - Docusaurus typecheck and production build passed.
 - Release build passed and linked `extension/duckdb_ai/duckdb_ai.duckdb_extension`.
 - CMake loaded `duckdb_ai` from this repository at `0.1.0`.
-- SQLLogic tests passed with 147 assertions.
+- SQLLogic tests passed with 154 assertions.
 - Mock provider smoke passed.
 - Clang-tidy check passed.
 
 Release notes:
 
-- This is a source-first preview release. Public binary distribution, signing,
-  and custom extension repository publishing are not configured for `0.1.0`.
+- This is a pre-community preview source build. Public binary distribution is
+  not configured for `0.1.0`.
+- This validation includes the production-hardening changes for per-database
+  runtime state, response caching, egress allowlisting, cancellation-aware
+  provider calls, retry backoff, yyjson-backed response parsing, and bounded
+  intra-chunk provider fan-out.
 - No live Ollama or remote-provider smoke was run for this release candidate
   because no binaries are being published.
 
