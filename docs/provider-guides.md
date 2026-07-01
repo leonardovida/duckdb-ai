@@ -27,6 +27,27 @@ ORDER BY event_id DESC
 LIMIT 1;
 ```
 
+## Provider matrix
+
+| Provider | Protocol | Default model | Credentials | Base URL behavior |
+| --- | --- | --- | --- | --- |
+| `ollama` | Ollama chat and embeddings | `llama3.2`; embeddings use `nomic-embed-text` | Optional `OLLAMA_API_KEY` | Defaults to `http://localhost:11434`; `OLLAMA_HOST` overrides it. |
+| `openai` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
+| `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
+| `claude` / `anthropic` | Anthropic Messages | `claude-3-5-haiku-latest` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
+| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-2.5-flash`; embeddings use `text-embedding-004` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
+| `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
+| `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://open.bigmodel.cn/api/paas/v4`. |
+| `deepseek` | OpenAI-compatible chat | `deepseek-chat` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
+| `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
+| `databricks` | OpenAI-compatible chat | `databricks-llama-4-maverick` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
+| `snowflake` | OpenAI-compatible chat | `snowflake-llama-3.3-70b` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
+| `openai_privacy_filter` | Dedicated redaction endpoint | `openai/privacy-filter` | Optional `OPENAI_PRIVACY_FILTER_API_KEY` | Defaults to `http://localhost:8080` and calls `POST /redact`. |
+| `openai_compatible` / `local` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | Optional `OPENAI_COMPATIBLE_API_KEY` | Requires `BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL`. |
+
+For guidance on choosing providers, credentials, logging, cost, throughput, and
+PII workflows, see [Best practices](best-practices.md).
+
 ## Ollama
 
 Use Ollama for local models without a hosted API key.
@@ -322,6 +343,148 @@ SELECT ai_embed(
 
 OpenRouter model names include the upstream provider prefix, for example
 `openai/gpt-4o-mini`.
+
+## Databricks
+
+Databricks Model Serving exposes chat endpoints through an OpenAI-compatible
+API. Use a Databricks personal access token or service-principal token, and set
+the model to the serving endpoint name.
+
+```sh
+export DATABRICKS_TOKEN='...'
+export DATABRICKS_HOST='https://<workspace>.cloud.databricks.com'
+./build/release/duckdb
+```
+
+```sql
+LOAD duckdb_ai;
+
+CREATE OR REPLACE SECRET databricks_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'databricks',
+    MODEL 'databricks-llama-4-maverick'
+);
+
+SELECT ai_complete(
+    'Explain Delta Lake in one sentence.',
+    secret := 'databricks_ai'
+) AS answer;
+```
+
+If `BASE_URL` is omitted, set `DATABRICKS_HOST`; the extension derives
+`https://<workspace>/serving-endpoints`. You can also set a secret `BASE_URL`,
+`DATABRICKS_BASE_URL`, or per-call `base_url := ...` to use a full
+`/serving-endpoints`, `/ai-gateway/mlflow/v1`, or `/chat/completions` endpoint.
+Aliases `mosaic`, `mosaic_ai`, and `databricks_ai` resolve to `databricks`.
+
+## Snowflake Cortex REST
+
+Snowflake Cortex REST exposes a Chat Completions API compatible with the OpenAI
+request shape. Use a Snowflake Programmatic Access Token, OAuth token, or JWT
+with a role that can call Cortex REST.
+
+```sh
+export SNOWFLAKE_PAT='...'
+export SNOWFLAKE_ACCOUNT_URL='https://<account-identifier>.snowflakecomputing.com'
+./build/release/duckdb
+```
+
+```sql
+LOAD duckdb_ai;
+
+CREATE OR REPLACE SECRET snowflake_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'snowflake',
+    MODEL 'snowflake-llama-3.3-70b'
+);
+
+SELECT ai_complete(
+    'Summarize why governed model inference matters.',
+    secret := 'snowflake_ai'
+) AS answer;
+```
+
+If `BASE_URL` is omitted, set `SNOWFLAKE_ACCOUNT_URL`, `SNOWFLAKE_HOST`, or
+`SNOWFLAKE_ACCOUNT`; the extension derives
+`https://<account>.snowflakecomputing.com/api/v2/cortex/v1`. You can also set a
+secret `BASE_URL`, `SNOWFLAKE_BASE_URL`, or per-call `base_url := ...` to use a
+full `/api/v2/cortex/v1` or `/chat/completions` endpoint. Snowflake model IDs
+include values such as `snowflake-llama-3.3-70b`, `llama4-maverick`, and
+`openai-gpt-5.1`, depending on region and model access.
+
+## OpenAI Privacy Filter
+
+OpenAI Privacy Filter is an open-weight PII detection and masking model. The
+extension calls it through a small HTTP service so the model can run either on
+the same machine as DuckDB or in your own cloud deployment.
+
+Use local hosting when unredacted PII should not leave the machine running
+DuckDB:
+
+```sh
+# Host a wrapper around the openai/privacy-filter Python package.
+# The wrapper should expose POST /redact.
+export OPF_CHECKPOINT="$HOME/.opf/privacy_filter"
+./serve-privacy-filter --host 127.0.0.1 --port 8080
+./build/release/duckdb
+```
+
+```sql
+LOAD duckdb_ai;
+
+CREATE OR REPLACE SECRET privacy_filter_local (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'openai_privacy_filter',
+    BASE_URL 'http://localhost:8080'
+);
+
+SELECT ai_redact(
+    'email alice@example.com token fake-token',
+    secret := 'privacy_filter_local'
+) AS redacted_text;
+```
+
+Use cloud hosting when multiple DuckDB clients should share one managed Privacy
+Filter deployment:
+
+```sql
+CREATE OR REPLACE SECRET privacy_filter_cloud (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'openai_privacy_filter',
+    BASE_URL 'https://privacy-filter.example.com',
+    API_KEY '...'
+);
+
+SELECT ai_redact(
+    internal_note,
+    secret := 'privacy_filter_cloud'
+) AS redacted_note
+FROM support_tickets;
+```
+
+The service contract is intentionally small:
+
+```http
+POST /redact
+Content-Type: application/json
+Authorization: Bearer ...    # optional
+
+{"text":"email alice@example.com","model":"openai/privacy-filter"}
+```
+
+The response should include one of `redacted_text`, `masked_text`, `text`, or
+`output`:
+
+```json
+{"redacted_text":"email [PRIVATE_EMAIL]"}
+```
+
+Aliases `privacy_filter`, `pii_filter`, and `opf` resolve to
+`openai_privacy_filter`. The default base URL is `http://localhost:8080`; set
+`OPENAI_PRIVACY_FILTER_BASE_URL`, `DUCKDB_AI_BASE_URL`, a secret `BASE_URL`, or a
+per-call `base_url := ...` to point at a different local or cloud service. For
+cloud auth, use a secret `API_KEY`, `OPENAI_PRIVACY_FILTER_API_KEY`, or
+`DUCKDB_AI_API_KEY`.
 
 ## OpenAI-compatible / Local gateway
 

@@ -32,6 +32,7 @@ const sidebars: SidebarsConfig = {
     },
     'functions',
     'provider-guides',
+    'best-practices',
     'VALIDATION',
     'SMOKE_TESTING',
     'DISTRIBUTION',

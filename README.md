@@ -161,6 +161,10 @@ FROM support_tickets;
 Redact internal notes before sharing them:
 
 ```sql
+-- Run OpenAI Privacy Filter locally, or point BASE_URL at a cloud-hosted wrapper.
+SET duckdb_ai_provider = 'openai_privacy_filter';
+SET duckdb_ai_base_url = 'http://localhost:8080';
+
 SELECT
     ticket_id,
     ai_redact(internal_note) AS redacted_internal_note
@@ -291,6 +295,9 @@ End-to-end setup examples for each provider are in
 | `zai` | Z.ai / BigModel chat models | `https://open.bigmodel.cn/api/paas/v4`; `ZAI_API_KEY` |
 | `deepseek` | DeepSeek chat models | `https://api.deepseek.com`; `DEEPSEEK_API_KEY` |
 | `openrouter` | OpenRouter model routing | `https://openrouter.ai/api/v1`; `OPENROUTER_API_KEY` |
+| `databricks` | Databricks Model Serving and Unity AI Gateway chat endpoints | Set `BASE_URL` or `DATABRICKS_HOST`; `DATABRICKS_TOKEN` |
+| `snowflake` | Snowflake Cortex REST Chat Completions API | Set `BASE_URL`, `SNOWFLAKE_ACCOUNT_URL`, or `SNOWFLAKE_ACCOUNT`; `SNOWFLAKE_PAT` |
+| `openai_privacy_filter` | OpenAI Privacy Filter PII redaction service | `http://localhost:8080`; optional `OPENAI_PRIVACY_FILTER_API_KEY` |
 | `openai_compatible` / `local` | vLLM, LM Studio, LiteLLM, Ollama `/v1`, or another gateway | Set `BASE_URL`; optional `OPENAI_COMPATIBLE_API_KEY` |
 
 You can configure providers three ways:
@@ -299,6 +306,7 @@ You can configure providers three ways:
 -- Session defaults.
 SET duckdb_ai_provider = 'openai';
 SET duckdb_ai_model = 'gpt-4o-mini';
+SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 SET duckdb_ai_timeout_seconds = 120;
 
 -- Per-call overrides.
@@ -322,9 +330,22 @@ SELECT ai_complete('hello', secret := 'local_llm');
 ```
 
 Provider-specific environment variables such as `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, and `GEMINI_API_KEY` are also supported. Generic overrides
-include `DUCKDB_AI_PROVIDER`, `DUCKDB_AI_MODEL`, `DUCKDB_AI_BASE_URL`, and
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DATABRICKS_TOKEN`, `SNOWFLAKE_PAT`, and
+`OPENAI_PRIVACY_FILTER_API_KEY` are also supported. Generic overrides include
+`DUCKDB_AI_PROVIDER`, `DUCKDB_AI_MODEL`, `DUCKDB_AI_BASE_URL`, and
 `DUCKDB_AI_API_KEY`.
+
+Use family-specific model settings when different function groups should default
+to different models. These override `duckdb_ai_model`, and per-call `model := ...`
+still overrides both:
+
+```sql
+SET duckdb_ai_completion_model = 'gpt-4o-mini';
+SET duckdb_ai_task_model = 'gpt-4o-mini';
+SET duckdb_ai_aggregate_model = 'gpt-4o-mini';
+SET duckdb_ai_sql_model = 'gpt-4o';
+SET duckdb_ai_embedding_model = 'text-embedding-3-small';
+```
 
 ## Structured Output
 
@@ -431,6 +452,8 @@ These controls apply to completion and embedding calls.
 - [`docs/functions.md`](docs/functions.md): complete SQL function reference.
 - [`docs/provider-guides.md`](docs/provider-guides.md): end-to-end examples for
   every supported provider.
+- [`docs/best-practices.md`](docs/best-practices.md): provider selection,
+  secrets, defaults, privacy, logging, throughput, and validation guidance.
 - [`docs/SMOKE_TESTING.md`](docs/SMOKE_TESTING.md): local mock-provider, Ollama,
   and remote-provider smoke checks.
 - [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md): release and distribution notes.

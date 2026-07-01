@@ -53,6 +53,16 @@ SELECT ai_provider_protocol('anthropic'), ai_provider_protocol('gcp'), ai_provid
 anthropic_messages	openai_chat	openai_chat	openai_chat
 
 query I
+SELECT ai_provider_protocol('openai_privacy_filter');
+----
+privacy_filter
+
+query II
+SELECT ai_provider_protocol('databricks'), ai_provider_protocol('snowflake');
+----
+openai_chat	openai_chat
+
+query I
 SELECT ai_provider_protocol('gemini') || '@' || ai_provider_base_url('gemini') || '|' || ai_provider_protocol('mistral') || '@' || ai_provider_base_url('mistral') || '|' || ai_provider_protocol('zai') || '@' || ai_provider_base_url('zai') || '|' || ai_provider_protocol('deepseek') || '@' || ai_provider_base_url('deepseek') || '|' || ai_provider_protocol('openrouter') || '@' || ai_provider_base_url('openrouter');
 ----
 openai_chat@https://generativelanguage.googleapis.com/v1beta/openai|openai_chat@https://api.mistral.ai/v1|openai_chat@https://open.bigmodel.cn/api/paas/v4|openai_chat@https://api.deepseek.com|openai_chat@https://openrouter.ai/api/v1
@@ -191,6 +201,21 @@ SELECT contains(ai_request_json('json please', 'llama3', 'ollama', response_form
 ----
 true
 
+query I
+SELECT ai_request_json('redact email alice@example.com', provider := 'openai_privacy_filter');
+----
+{"text":"redact email alice@example.com","model":"openai/privacy-filter"}
+
+query I
+SELECT ai_request_json('hello databricks', provider := 'databricks');
+----
+{"model":"databricks-llama-4-maverick","messages":[{"role":"user","content":"hello databricks"}],"temperature":0.1}
+
+query I
+SELECT ai_request_json('hello snowflake', provider := 'snowflake');
+----
+{"model":"snowflake-llama-3.3-70b","messages":[{"role":"user","content":"hello snowflake"}],"temperature":0.1}
+
 statement ok
 SET duckdb_ai_provider = 'openai';
 
@@ -203,10 +228,42 @@ SELECT contains(ai_request_json('hello from settings'), '"model":"settings-model
 true
 
 statement ok
+SET duckdb_ai_completion_model = 'completion-settings-model';
+
+query I
+SELECT contains(ai_request_json('hello from completion settings'), '"model":"completion-settings-model"');
+----
+true
+
+query I
+SELECT contains(ai_request_json('hello with explicit model', model := 'explicit-model'), '"model":"explicit-model"');
+----
+true
+
+statement ok
+SET duckdb_ai_embedding_model = 'embedding-settings-model';
+
+query I
+SELECT ai_embedding_request_json('duck', provider := 'openai') = '{"model":"embedding-settings-model","input":"duck"}';
+----
+true
+
+query I
+SELECT ai_embedding_request_json('duck', provider := 'openai', model := 'explicit-embedding-model') = '{"model":"explicit-embedding-model","input":"duck"}';
+----
+true
+
+statement ok
 RESET duckdb_ai_provider;
 
 statement ok
 RESET duckdb_ai_model;
+
+statement ok
+RESET duckdb_ai_completion_model;
+
+statement ok
+RESET duckdb_ai_embedding_model;
 
 statement ok
 CREATE OR REPLACE SECRET ai_test_openai (TYPE duckdb_ai, AI_PROVIDER 'openai', API_KEY 'secret-key', MODEL 'secret-model');

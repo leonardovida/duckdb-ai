@@ -27,7 +27,7 @@ Result:
 
 - Release build passed and linked `extension/duckdb_ai/duckdb_ai.duckdb_extension`.
 - Format check passed after running the repository formatter.
-- SQLLogic tests passed with 122 assertions.
+- SQLLogic tests passed with 136 assertions.
 - Mock provider smoke passed.
 
 Coverage:
@@ -36,10 +36,17 @@ Coverage:
   SQLLogic load path.
 - Canonical `TYPE duckdb_ai` secret support through the common `AI_PROVIDER`
   secret parameter, redacted discovery through `ai_secrets()`, and aliases for
-  Anthropic, GCP/Gemini, Azure, and local/OpenAI-compatible providers.
+  Anthropic, GCP/Gemini, Azure, Databricks, OpenAI Privacy Filter, and
+  local/OpenAI-compatible providers.
 - The existing broad SQL function catalog, including request builders, provider
   metadata helpers, task wrappers, SQL-assistant helpers, embeddings,
   aggregates, usage, and model metadata.
+- Family-specific default model settings for completion, task, aggregate, SQL
+  assistant, and embedding function groups.
+- Mock HTTP coverage for OpenAI-compatible completions/embeddings/logging,
+  Ollama chat, Claude messages, Databricks chat, Snowflake Cortex REST chat,
+  OpenAI Privacy Filter redaction, retries, usage events, and provider error
+  redaction.
 
 Not covered:
 

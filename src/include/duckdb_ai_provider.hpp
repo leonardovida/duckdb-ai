@@ -158,6 +158,8 @@ std::string BuildRequestJson(const std::string &prompt, const CompletionOptions 
 CompletionResult Complete(const std::string &prompt, const std::string &model, const std::string &provider);
 //! Execute a completion request from a full option set.
 CompletionResult Complete(const std::string &prompt, const CompletionOptions &options);
+//! Execute a dedicated PII redaction request from a full option set.
+CompletionResult Redact(const std::string &text, const CompletionOptions &options);
 //! Build an embedding request payload without making a network call.
 std::string BuildEmbeddingRequestJson(const std::string &input, const std::string &model, const std::string &provider);
 //! Build an embedding request payload from a full option set.

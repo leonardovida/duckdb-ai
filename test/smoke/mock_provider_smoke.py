@@ -11,6 +11,7 @@ from pathlib import Path
 class MockProviderHandler(BaseHTTPRequestHandler):
     completion_requests = []
     embedding_requests = []
+    privacy_filter_requests = []
     ollama_requests = []
     claude_requests = []
     log_requests = []
@@ -23,7 +24,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         body = self.rfile.read(length).decode("utf-8")
 
-        if self.path == "/chat/completions":
+        if self.path.endswith("/chat/completions"):
             self.authorization_headers.append(self.headers.get("authorization"))
             request = json.loads(body)
             self.completion_requests.append(request)
@@ -109,6 +110,13 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        if self.path == "/redact":
+            self.authorization_headers.append(self.headers.get("authorization"))
+            request = json.loads(body)
+            self.privacy_filter_requests.append(request)
+            self._send_json({"redacted_text": "email [PRIVATE_EMAIL] token [SECRET]"})
+            return
+
         if self.path == "/api/chat":
             self.ollama_requests.append(json.loads(body))
             payload = {
@@ -162,6 +170,11 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SELECT * FROM ai_clear_usage();
         SET duckdb_ai_provider = 'openai';
         SET duckdb_ai_model = 'mock-model';
+        SET duckdb_ai_completion_model = 'mock-completion-model';
+        SET duckdb_ai_task_model = 'mock-task-model';
+        SET duckdb_ai_aggregate_model = 'mock-aggregate-model';
+        SET duckdb_ai_embedding_model = 'mock-embedding-default';
+        SET duckdb_ai_sql_model = 'mock-sql-model';
         SET duckdb_ai_base_url = '{base_url}';
         SET duckdb_ai_log_endpoint = '{base_url}/log';
         SET duckdb_ai_timeout_seconds = 5;
@@ -169,6 +182,27 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             TYPE duckdb_ai,
             API_KEY 'test-key',
             AI_PROVIDER 'openai'
+        );
+        CREATE OR REPLACE SECRET smoke_privacy_filter_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai_privacy_filter',
+            BASE_URL '{base_url}',
+            MODEL 'openai/privacy-filter'
+        );
+        CREATE OR REPLACE SECRET smoke_databricks_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'databricks',
+            BASE_URL '{base_url}',
+            MODEL 'databricks-llama-4-maverick'
+        );
+        CREATE OR REPLACE SECRET smoke_snowflake_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'snowflake',
+            BASE_URL '{base_url}',
+            MODEL 'snowflake-llama-3.3-70b'
         );
         SELECT ai_complete(
             'hello from smoke',
@@ -279,8 +313,26 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             model := 'gpt-5.4-mini',
             use_builtin_model_prices := true
         ) AS builtin_priced_completion;
-        SELECT ai_embed('embed smoke', model := 'mock-embedding-model')[1] AS first_embedding_value;
-        SELECT round(ai_similarity('same left', 'same right', model := 'mock-embedding-model'), 6) AS similarity;
+        SELECT ai_complete(
+            'hello databricks',
+            secret := 'smoke_databricks_ai',
+            provider := 'databricks',
+            model := 'databricks-llama-4-maverick'
+        ) AS databricks_completion;
+        SELECT ai_complete(
+            'hello snowflake',
+            secret := 'smoke_snowflake_ai',
+            provider := 'snowflake',
+            model := 'snowflake-llama-3.3-70b'
+        ) AS snowflake_completion;
+        SELECT ai_redact(
+            'email alice@example.com token fake-token',
+            secret := 'smoke_privacy_filter_ai',
+            provider := 'openai_privacy_filter',
+            model := 'openai/privacy-filter'
+        ) AS privacy_filter_redaction;
+        SELECT ai_embed('embed smoke')[1] AS first_embedding_value;
+        SELECT round(ai_similarity('same left', 'same right'), 6) AS similarity;
         SELECT event, provider, protocol, model, prompt_chars, response_chars, input_chars,
                dimensions, prompt_tokens, completion_tokens, total_tokens, http_status,
                estimated_cost_usd
@@ -374,7 +426,18 @@ def assert_smoke_result(output: str):
         "openai",
         "openai_chat",
         "openai_embeddings",
-        "mock-model",
+        "mock-completion-model",
+        "mock-task-model",
+        "mock-sql-model",
+        "mock-aggregate-model",
+        "mock-embedding-default",
+        "openai_privacy_filter",
+        "privacy_filter",
+        "databricks",
+        "snowflake",
+        "databricks-llama-4-maverick",
+        "snowflake-llama-3.3-70b",
+        "email [PRIVATE_EMAIL] token [SECRET]",
         "0.25",
         "1.0",
         "16",
@@ -388,16 +451,28 @@ def assert_smoke_result(output: str):
     if missing:
         raise AssertionError(f"duckdb output missing {missing}\n{output}")
 
-    if len(MockProviderHandler.completion_requests) != 28:
-        raise AssertionError(f"expected 28 completion requests, got {len(MockProviderHandler.completion_requests)}")
-    if len(MockProviderHandler.authorization_headers) != 31:
-        raise AssertionError(f"expected 31 auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if len(MockProviderHandler.completion_requests) != 30:
+        raise AssertionError(f"expected 30 completion requests, got {len(MockProviderHandler.completion_requests)}")
+    if len(MockProviderHandler.authorization_headers) != 34:
+        raise AssertionError(f"expected 34 auth headers, got {len(MockProviderHandler.authorization_headers)}")
     for header in MockProviderHandler.authorization_headers:
         if header != "Bearer test-key":
             raise AssertionError(f"unexpected authorization header: {header}")
 
+    completion_models = [request["model"] for request in MockProviderHandler.completion_requests]
+    if completion_models[0:9] != ["mock-completion-model"] * 9:
+        raise AssertionError(f"unexpected completion default models: {completion_models[0:9]}")
+    if completion_models[9:16] != ["mock-task-model"] * 7:
+        raise AssertionError(f"unexpected task default models: {completion_models[9:16]}")
+    if completion_models[16:21] != ["mock-sql-model"] * 5:
+        raise AssertionError(f"unexpected SQL assistant default models: {completion_models[16:21]}")
+    if completion_models[21:23] != ["mock-aggregate-model"] * 2:
+        raise AssertionError(f"unexpected aggregate default models: {completion_models[21:23]}")
+    if completion_models[23:27] != ["mock-completion-model"] * 4:
+        raise AssertionError(f"unexpected later completion default models: {completion_models[23:27]}")
+
     completion_request = MockProviderHandler.completion_requests[0]
-    if completion_request["model"] != "mock-model":
+    if completion_request["model"] != "mock-completion-model":
         raise AssertionError(f"unexpected completion model: {completion_request}")
     if completion_request["messages"][0] != {"role": "system", "content": "answer briefly"}:
         raise AssertionError(f"unexpected completion system prompt: {completion_request}")
@@ -506,6 +581,26 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected builtin pricing model: {builtin_price_request}")
     if builtin_price_request["messages"][-1]["content"] != "builtin pricing smoke":
         raise AssertionError(f"unexpected builtin pricing prompt: {builtin_price_request}")
+    databricks_request = MockProviderHandler.completion_requests[28]
+    if databricks_request.get("model") != "databricks-llama-4-maverick":
+        raise AssertionError(f"unexpected Databricks model: {databricks_request}")
+    if databricks_request["messages"][-1]["content"] != "hello databricks":
+        raise AssertionError(f"unexpected Databricks prompt: {databricks_request}")
+    snowflake_request = MockProviderHandler.completion_requests[29]
+    if snowflake_request.get("model") != "snowflake-llama-3.3-70b":
+        raise AssertionError(f"unexpected Snowflake model: {snowflake_request}")
+    if snowflake_request["messages"][-1]["content"] != "hello snowflake":
+        raise AssertionError(f"unexpected Snowflake prompt: {snowflake_request}")
+    if len(MockProviderHandler.privacy_filter_requests) != 1:
+        raise AssertionError(
+            f"expected 1 Privacy Filter request, got {len(MockProviderHandler.privacy_filter_requests)}"
+        )
+    privacy_filter_request = MockProviderHandler.privacy_filter_requests[0]
+    if privacy_filter_request != {
+        "text": "email alice@example.com token fake-token",
+        "model": "openai/privacy-filter",
+    }:
+        raise AssertionError(f"unexpected Privacy Filter request: {privacy_filter_request}")
 
     if len(MockProviderHandler.ollama_requests) != 1:
         raise AssertionError(f"expected 1 Ollama request, got {len(MockProviderHandler.ollama_requests)}")
@@ -540,27 +635,32 @@ def assert_smoke_result(output: str):
     if len(MockProviderHandler.embedding_requests) != 3:
         raise AssertionError(f"expected 3 embedding requests, got {len(MockProviderHandler.embedding_requests)}")
     embedding_request = MockProviderHandler.embedding_requests[0]
-    if embedding_request["model"] != "mock-embedding-model":
+    if embedding_request["model"] != "mock-embedding-default":
         raise AssertionError(f"unexpected embedding model: {embedding_request}")
     if embedding_request["input"] != "embed smoke":
         raise AssertionError(f"unexpected embedding input: {embedding_request}")
     similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[1:]]
     if similarity_inputs != ["same left", "same right"]:
         raise AssertionError(f"unexpected similarity embedding inputs: {similarity_inputs}")
+    similarity_models = [request["model"] for request in MockProviderHandler.embedding_requests[1:]]
+    if similarity_models != ["mock-embedding-default", "mock-embedding-default"]:
+        raise AssertionError(f"unexpected similarity embedding models: {similarity_models}")
 
-    if len(MockProviderHandler.log_requests) != 31:
-        raise AssertionError(f"expected 31 log requests, got {len(MockProviderHandler.log_requests)}")
+    if len(MockProviderHandler.log_requests) != 34:
+        raise AssertionError(f"expected 34 log requests, got {len(MockProviderHandler.log_requests)}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 27 or len(embedding_logs) != 3:
+    if len(completion_logs) != 30 or len(embedding_logs) != 3:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")
     logged_providers = {request.get("provider") for request in completion_logs}
-    if not {"openai", "ollama", "claude"}.issubset(logged_providers):
+    if not {"openai", "ollama", "claude", "databricks", "snowflake", "openai_privacy_filter"}.issubset(
+        logged_providers
+    ):
         raise AssertionError(f"missing provider logs: {completion_logs}")
 
     otlp_log = otlp_logs[0]
@@ -582,7 +682,7 @@ def assert_smoke_result(output: str):
         "ai.event": "ai_completion",
         "ai.provider": "openai",
         "ai.protocol": "openai_chat",
-        "ai.model": "mock-model",
+        "ai.model": "mock-completion-model",
         "ai.tags": "otlp-smoke",
         "ai.prompt_chars": "14",
         "ai.response_chars": "15",
@@ -601,7 +701,7 @@ def assert_smoke_result(output: str):
         "event": "ai_completion",
         "provider": "openai",
         "protocol": "openai_chat",
-        "model": "mock-model",
+        "model": "mock-completion-model",
         "tags": "smoke-run",
         "prompt_chars": 16,
         "response_chars": 15,
@@ -623,6 +723,21 @@ def assert_smoke_result(output: str):
     builtin_estimated_cost = builtin_price_log.get("estimated_cost_usd")
     if builtin_estimated_cost is None or abs(builtin_estimated_cost - 0.00001875) > 0.000000001:
         raise AssertionError(f"unexpected builtin pricing cost: {builtin_price_log}")
+    databricks_log = next(
+        (request for request in completion_logs if request.get("model") == "databricks-llama-4-maverick"), None
+    )
+    if databricks_log is None or databricks_log.get("provider") != "databricks":
+        raise AssertionError(f"missing Databricks completion log: {completion_logs}")
+    snowflake_log = next(
+        (request for request in completion_logs if request.get("model") == "snowflake-llama-3.3-70b"), None
+    )
+    if snowflake_log is None or snowflake_log.get("provider") != "snowflake":
+        raise AssertionError(f"missing Snowflake completion log: {completion_logs}")
+    privacy_filter_log = next(
+        (request for request in completion_logs if request.get("model") == "openai/privacy-filter"), None
+    )
+    if privacy_filter_log is None or privacy_filter_log.get("provider") != "openai_privacy_filter":
+        raise AssertionError(f"missing Privacy Filter redaction log: {completion_logs}")
     for completion_log in completion_logs:
         if "prompt" in completion_log or "response" in completion_log:
             raise AssertionError(f"log request unexpectedly included prompt/response text: {completion_log}")
@@ -633,7 +748,7 @@ def assert_smoke_result(output: str):
         "event": "ai_embedding",
         "provider": "openai",
         "protocol": "openai_embeddings",
-        "model": "mock-embedding-model",
+        "model": "mock-embedding-default",
         "input_chars": 11,
         "dimensions": 3,
         "prompt_tokens": 2,

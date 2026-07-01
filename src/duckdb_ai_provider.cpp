@@ -62,6 +62,13 @@ std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	if (provider == "azure_openai" || provider == "azure-openai") {
 		return "azure";
 	}
+	if (provider == "mosaic" || provider == "mosaic_ai" || provider == "databricks_ai") {
+		return "databricks";
+	}
+	if (provider == "privacy_filter" || provider == "openai_privacy_filter" || provider == "pii_filter" ||
+	    provider == "opf") {
+		return "openai_privacy_filter";
+	}
 	if (provider == "openai-compatible" || provider == "openai_compatible" || provider == "local" ||
 	    provider == "local_openai" || provider == "local-models" || provider == "local_models") {
 		return "openai_compatible";
@@ -85,12 +92,60 @@ bool EndsWith(const std::string &value, const std::string &suffix) {
 	return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+bool StartsWith(const std::string &value, const std::string &prefix) {
+	return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool HasHttpScheme(const std::string &value) {
+	return StartsWith(value, "https://") || StartsWith(value, "http://");
+}
+
 std::string AzureOpenAIBaseUrl(std::string value) {
 	value = TrimTrailingSlash(std::move(value));
 	if (value.empty() || EndsWith(value, "/openai/v1")) {
 		return value;
 	}
 	return value + "/openai/v1";
+}
+
+std::string DatabricksBaseUrl(std::string value) {
+	value = TrimTrailingSlash(std::move(value));
+	if (value.empty()) {
+		return value;
+	}
+	if (!HasHttpScheme(value)) {
+		value = "https://" + value;
+	}
+	if (EndsWith(value, "/serving-endpoints") || EndsWith(value, "/ai-gateway/mlflow/v1") ||
+	    EndsWith(value, "/chat/completions")) {
+		return value;
+	}
+	return value + "/serving-endpoints";
+}
+
+std::string SnowflakeCortexBaseUrl(std::string value) {
+	value = TrimTrailingSlash(std::move(value));
+	if (value.empty()) {
+		return value;
+	}
+	if (!HasHttpScheme(value)) {
+		value = "https://" + value;
+	}
+	if (EndsWith(value, "/api/v2/cortex/v1") || EndsWith(value, "/chat/completions")) {
+		return value;
+	}
+	return value + "/api/v2/cortex/v1";
+}
+
+std::string SnowflakeAccountBaseUrl(std::string account) {
+	account = TrimTrailingSlash(std::move(account));
+	if (account.empty()) {
+		return account;
+	}
+	if (HasHttpScheme(account) || account.find(".snowflakecomputing.") != std::string::npos) {
+		return SnowflakeCortexBaseUrl(account);
+	}
+	return SnowflakeCortexBaseUrl(account + ".snowflakecomputing.com");
 }
 
 std::string CurrentTimestamp() {
@@ -1679,6 +1734,22 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 		return {provider, "openai_chat", "openai/gpt-4o-mini", "", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY",
 		        "",       true};
 	}
+	if (provider == "databricks") {
+		return {provider, "openai_chat", "databricks-llama-4-maverick", "", "", "DATABRICKS_TOKEN", "", true};
+	}
+	if (provider == "snowflake") {
+		return {provider, "openai_chat", "snowflake-llama-3.3-70b", "", "", "SNOWFLAKE_PAT", "", true};
+	}
+	if (provider == "openai_privacy_filter") {
+		return {provider,
+		        "privacy_filter",
+		        "openai/privacy-filter",
+		        "",
+		        "http://localhost:8080",
+		        "OPENAI_PRIVACY_FILTER_API_KEY",
+		        "",
+		        false};
+	}
 	if (provider == "openai_compatible") {
 		return {provider, "openai_chat", "gpt-4o-mini", "", "", "OPENAI_COMPATIBLE_API_KEY", "", false};
 	}
@@ -1721,7 +1792,8 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 	}
 
 	throw InvalidInputException("Unsupported AI provider \"%s\". Supported providers: ollama, openai, azure, claude, "
-	                            "anthropic, gemini, gcp, mistral, zai, deepseek, openrouter, openai_compatible, local",
+	                            "anthropic, databricks, gemini, gcp, mistral, snowflake, zai, deepseek, openrouter, "
+	                            "openai_privacy_filter, openai_compatible, local",
 	                            provider_input);
 }
 
@@ -1740,11 +1812,36 @@ std::string ResolveBaseUrl(const ProviderConfig &config) {
 		}
 	}
 	if (!provider_base_url.empty()) {
-		return config.provider == "azure" ? AzureOpenAIBaseUrl(provider_base_url)
-		                                  : TrimTrailingSlash(provider_base_url);
+		return config.provider == "azure"        ? AzureOpenAIBaseUrl(provider_base_url)
+		       : config.provider == "databricks" ? DatabricksBaseUrl(provider_base_url)
+		       : config.provider == "snowflake"  ? SnowflakeCortexBaseUrl(provider_base_url)
+		                                         : TrimTrailingSlash(provider_base_url);
 	}
 	if (!generic_base_url.empty()) {
-		return config.provider == "azure" ? AzureOpenAIBaseUrl(generic_base_url) : TrimTrailingSlash(generic_base_url);
+		return config.provider == "azure"        ? AzureOpenAIBaseUrl(generic_base_url)
+		       : config.provider == "databricks" ? DatabricksBaseUrl(generic_base_url)
+		       : config.provider == "snowflake"  ? SnowflakeCortexBaseUrl(generic_base_url)
+		                                         : TrimTrailingSlash(generic_base_url);
+	}
+	if (config.provider == "databricks") {
+		auto databricks_host = GetEnv("DATABRICKS_HOST");
+		if (!databricks_host.empty()) {
+			return DatabricksBaseUrl(databricks_host);
+		}
+	}
+	if (config.provider == "snowflake") {
+		auto snowflake_account_url = GetEnv("SNOWFLAKE_ACCOUNT_URL");
+		if (!snowflake_account_url.empty()) {
+			return SnowflakeCortexBaseUrl(snowflake_account_url);
+		}
+		auto snowflake_host = GetEnv("SNOWFLAKE_HOST");
+		if (!snowflake_host.empty()) {
+			return SnowflakeCortexBaseUrl(snowflake_host);
+		}
+		auto snowflake_account = GetEnv("SNOWFLAKE_ACCOUNT");
+		if (!snowflake_account.empty()) {
+			return SnowflakeAccountBaseUrl(snowflake_account);
+		}
 	}
 	if (config.provider == "ollama") {
 		auto ollama_host = GetEnv("OLLAMA_HOST");
@@ -1775,6 +1872,22 @@ std::string ResolveApiKey(const ProviderConfig &config) {
 		auto claude_key = GetEnv("CLAUDE_API_KEY");
 		if (!claude_key.empty()) {
 			return claude_key;
+		}
+	}
+	if (config.provider == "databricks") {
+		auto databricks_token = GetEnv("DATABRICKS_TOKEN");
+		if (!databricks_token.empty()) {
+			return databricks_token;
+		}
+	}
+	if (config.provider == "snowflake") {
+		auto snowflake_pat = GetEnv("SNOWFLAKE_PAT");
+		if (!snowflake_pat.empty()) {
+			return snowflake_pat;
+		}
+		auto snowflake_token = GetEnv("SNOWFLAKE_TOKEN");
+		if (!snowflake_token.empty()) {
+			return snowflake_token;
 		}
 	}
 	return GetEnv(config.api_key_env);
@@ -1808,24 +1921,45 @@ std::string ResolveModel(const ProviderConfig &config, const std::string &model_
 
 ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool require_api_key) {
 	auto config = ProviderDefaults(options.provider);
-	config.base_url = options.base_url.empty() ? ResolveBaseUrl(config)
-	                                           : (config.provider == "azure" ? AzureOpenAIBaseUrl(options.base_url)
-	                                                                         : TrimTrailingSlash(options.base_url));
+	config.base_url = options.base_url.empty()          ? ResolveBaseUrl(config)
+	                  : config.provider == "azure"      ? AzureOpenAIBaseUrl(options.base_url)
+	                  : config.provider == "databricks" ? DatabricksBaseUrl(options.base_url)
+	                  : config.provider == "snowflake"  ? SnowflakeCortexBaseUrl(options.base_url)
+	                                                    : TrimTrailingSlash(options.base_url);
 	config.api_key = options.api_key.empty() ? ResolveApiKey(config) : options.api_key;
 	config.model = ResolveModel(config, options.model);
 	if (require_api_key && config.requires_api_key && config.api_key.empty()) {
 		throw InvalidInputException("AI provider \"%s\" requires an API key. Set %s or DUCKDB_AI_API_KEY.",
 		                            config.provider, config.api_key_env);
 	}
+	if (require_api_key && config.provider == "databricks" && config.base_url.empty()) {
+		throw InvalidInputException(
+		    "AI provider \"databricks\" requires a base URL. Set duckdb_ai_base_url, DATABRICKS_BASE_URL, or "
+		    "DATABRICKS_HOST.");
+	}
+	if (require_api_key && config.provider == "snowflake" && config.base_url.empty()) {
+		throw InvalidInputException("AI provider \"snowflake\" requires a base URL. Set duckdb_ai_base_url, "
+		                            "SNOWFLAKE_BASE_URL, SNOWFLAKE_ACCOUNT_URL, SNOWFLAKE_HOST, or "
+		                            "SNOWFLAKE_ACCOUNT.");
+	}
 	return config;
 }
 
 std::string RequestEndpoint(const ProviderConfig &config) {
+	if (config.protocol == "privacy_filter") {
+		if (EndsWith(config.base_url, "/redact")) {
+			return config.base_url;
+		}
+		return config.base_url + "/redact";
+	}
 	if (config.protocol == "ollama_chat") {
 		return config.base_url + "/api/chat";
 	}
 	if (config.protocol == "anthropic_messages") {
 		return config.base_url + "/messages";
+	}
+	if (EndsWith(config.base_url, "/chat/completions")) {
+		return config.base_url;
 	}
 	return config.base_url + "/chat/completions";
 }
@@ -1914,6 +2048,9 @@ std::string OllamaFormatJson(const CompletionOptions &options) {
 
 std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
 	auto escaped_model = JsonEscape(config.model);
+	if (config.protocol == "privacy_filter") {
+		return "{\"text\":\"" + JsonEscape(prompt) + "\",\"model\":\"" + escaped_model + "\"}";
+	}
 	if (config.protocol == "anthropic_messages") {
 		ValidateResponseSchema(options);
 		auto format = NormalizeResponseFormat(options);
@@ -2006,9 +2143,9 @@ ProviderConfig ResolveEmbeddingProviderConfig(const CompletionOptions &options, 
 	auto config = ProviderDefaults(options.provider);
 	config.default_model = EmbeddingDefaultModel(config.provider);
 	config.protocol = config.provider == "ollama" ? "ollama_embed" : "openai_embeddings";
-	config.base_url = options.base_url.empty() ? ResolveBaseUrl(config)
-	                                           : (config.provider == "azure" ? AzureOpenAIBaseUrl(options.base_url)
-	                                                                         : TrimTrailingSlash(options.base_url));
+	config.base_url = options.base_url.empty()     ? ResolveBaseUrl(config)
+	                  : config.provider == "azure" ? AzureOpenAIBaseUrl(options.base_url)
+	                                               : TrimTrailingSlash(options.base_url);
 	config.api_key = options.api_key.empty() ? ResolveApiKey(config) : options.api_key;
 	config.model = ResolveModel(config, options.model);
 	if (require_api_key && config.requires_api_key && config.api_key.empty()) {
@@ -2154,7 +2291,12 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config) {
 
 std::string ExtractCompletionText(const ProviderConfig &config, const std::string &body) {
 	std::string value;
-	if (config.protocol == "anthropic_messages") {
+	if (config.protocol == "privacy_filter") {
+		if (FindJsonStringValue(body, "redacted_text", value) || FindJsonStringValue(body, "masked_text", value) ||
+		    FindJsonStringValue(body, "text", value) || FindJsonStringValue(body, "output", value)) {
+			return value;
+		}
+	} else if (config.protocol == "anthropic_messages") {
 		if (FindJsonStringValue(body, "text", value)) {
 			return value;
 		}
@@ -2597,6 +2739,27 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	auto result = ParseCompletionResult(config, response);
 	RecordUsageEvent(config, prompt, result, options);
 	MaybePostUsageLog(config, prompt, result, options);
+	return result;
+}
+
+CompletionResult Redact(const std::string &text, const CompletionOptions &options) {
+	if (text.empty()) {
+		throw InvalidInputException("ai_redact text must not be empty");
+	}
+	auto config = ResolveProvider(options);
+	if (config.protocol != "privacy_filter") {
+		throw InvalidInputException("AI provider \"%s\" does not support dedicated Privacy Filter redaction.",
+		                            config.provider);
+	}
+	auto response = [&]() {
+		ProviderRequestGuard request_guard(options);
+		return HttpPost(RequestEndpoint(config), RequestPayload(config, text, options), RequestHeaders(config),
+		                TimeoutSeconds(options), false, RetryCount(options), RetryBackoffMs(options));
+	}();
+	ThrowIfProviderHttpError(config, response);
+	auto result = ParseCompletionResult(config, response);
+	RecordUsageEvent(config, text, result, options);
+	MaybePostUsageLog(config, text, result, options);
 	return result;
 }
 

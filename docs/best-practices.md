@@ -1,0 +1,297 @@
+---
+sidebar_position: 4
+---
+
+# Best practices
+
+Use this page as the operating guide for running `duckdb_ai` in notebooks,
+batch jobs, local workflows, and managed environments.
+
+## Choose the right provider path
+
+Use the most constrained provider that fits the job:
+
+| Workload | Recommended path | Why |
+| --- | --- | --- |
+| Local development without hosted credentials | `ollama` | Keeps prompts local and avoids provider costs. |
+| Production chat, extraction, classification, and SQL assistant calls | A managed LLM provider such as `openai`, `azure`, `databricks`, `snowflake`, `claude`, `gemini`, `mistral`, `deepseek`, `zai`, or `openrouter` | Gives managed reliability, model access, and governance controls. |
+| OpenAI-compatible gateways, vLLM, LM Studio, LiteLLM, or local Ollama `/v1` | `openai_compatible` or `local` | Uses the common chat-completions request shape. |
+| PII redaction where raw text should stay local | `openai_privacy_filter` with local hosting | Sends raw text to a dedicated redaction service instead of a general chat model. |
+| PII redaction shared across teams | `openai_privacy_filter` with a private cloud service | Centralizes deployment, auth, scaling, and audit controls while preserving the dedicated redaction contract. |
+
+`ai_redact` behaves differently for `openai_privacy_filter`: it sends the raw
+input text to `POST /redact`. With other completion providers, it uses the
+general task prompt for masking.
+
+## Configure credentials safely
+
+Prefer environment variables or DuckDB secrets. Avoid embedding API keys in SQL
+files, notebooks, CI logs, or shell history.
+
+```sql
+CREATE OR REPLACE SECRET openai_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'openai',
+    MODEL 'gpt-4o-mini'
+);
+
+SELECT ai_complete('hello', secret := 'openai_ai');
+```
+
+When a secret includes `API_KEY`, `ai_secrets()` reports only whether a key is
+present. It does not print the key value.
+
+Use provider-specific environment variables for local development:
+
+| Provider | Credential env var | Base URL env var |
+| --- | --- | --- |
+| `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| `azure` | `AZURE_OPENAI_API_KEY` | `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_ENDPOINT` |
+| `claude` / `anthropic` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | `CLAUDE_BASE_URL` |
+| `gemini` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
+| `mistral` | `MISTRAL_API_KEY` | `MISTRAL_BASE_URL` |
+| `zai` | `ZAI_API_KEY` | `ZAI_BASE_URL` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `DEEPSEEK_BASE_URL` |
+| `openrouter` | `OPENROUTER_API_KEY` | `OPENROUTER_BASE_URL` |
+| `databricks` | `DATABRICKS_TOKEN` | `DATABRICKS_HOST` or `DATABRICKS_BASE_URL` |
+| `snowflake` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | `SNOWFLAKE_ACCOUNT_URL`, `SNOWFLAKE_HOST`, `SNOWFLAKE_ACCOUNT`, or `SNOWFLAKE_BASE_URL` |
+| `openai_privacy_filter` | `OPENAI_PRIVACY_FILTER_API_KEY` | `OPENAI_PRIVACY_FILTER_BASE_URL` |
+| `openai_compatible` / `local` | `OPENAI_COMPATIBLE_API_KEY` | `OPENAI_COMPATIBLE_BASE_URL` |
+
+`DUCKDB_AI_API_KEY`, `DUCKDB_AI_BASE_URL`, and `DUCKDB_AI_MODEL` are generic
+fallbacks. Use them only when one process talks to one provider; provider-
+specific variables are clearer in mixed-provider environments.
+
+## Set defaults deliberately
+
+Use global defaults for short interactive sessions:
+
+```sql
+SET duckdb_ai_provider = 'openai';
+SET duckdb_ai_model = 'gpt-4o-mini';
+SET duckdb_ai_timeout_seconds = 120;
+```
+
+Use family-specific model settings when different function groups need different
+models:
+
+```sql
+SET duckdb_ai_completion_model = 'gpt-4o-mini';
+SET duckdb_ai_task_model = 'gpt-4o-mini';
+SET duckdb_ai_sql_model = 'gpt-4o';
+SET duckdb_ai_aggregate_model = 'gpt-4o-mini';
+SET duckdb_ai_embedding_model = 'text-embedding-3-small';
+```
+
+Precedence is:
+
+1. Per-call `model := ...`
+2. Function-family setting such as `duckdb_ai_embedding_model`
+3. `duckdb_ai_model`
+4. Provider default model
+
+For repeatable jobs, prefer secrets and explicit per-job settings over relying
+on ambient environment variables.
+
+## Preview requests before calling providers
+
+Use request-preview functions in tests, reviews, and provider debugging:
+
+```sql
+SELECT ai_request_json(
+    'Summarize this.',
+    provider := 'snowflake',
+    model := 'snowflake-llama-3.3-70b'
+);
+
+SELECT ai_embedding_request_json(
+    'DuckDB vector search',
+    provider := 'openai',
+    model := 'text-embedding-3-small'
+);
+```
+
+These functions do not make network calls. They are the safest way to confirm
+model selection, message structure, response-format hints, and provider aliases.
+
+## Prefer structured output for data pipelines
+
+For pipelines, avoid parsing prose. Use `ai_complete_json` or
+`ai_complete_record` with a JSON Schema:
+
+```sql
+SELECT *
+FROM ai_complete_record(
+    'Extract name and urgency from: customer says checkout is down',
+    '{
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "urgency": {"type": "string"}
+      },
+      "required": ["urgency"],
+      "additionalProperties": false
+    }',
+    provider := 'openai'
+);
+```
+
+Keep schemas narrow. Add `required`, `additionalProperties: false`, bounded
+strings, enum-like labels, and typed arrays when you need stable downstream
+columns.
+
+## Keep generated SQL bounded
+
+Use `ai_schema_prompt` to inspect exactly what table context the SQL assistant
+will see:
+
+```sql
+SELECT summary
+FROM ai_schema_prompt(
+    include_tables := ['main.support_tickets'],
+    sample_rows := 3
+);
+```
+
+Use `include_tables` and `exclude_tables` aggressively. Avoid sending an entire
+database catalog when the question only needs one schema or table.
+
+Generated SQL is validated as one read-only DuckDB `SELECT`, but you should
+still inspect generated queries before using them in important workflows:
+
+```sql
+WITH generated AS (
+    SELECT ai_sql(
+        'Count open tickets by priority',
+        include_tables := ['main.support_tickets']
+    ) AS sql
+)
+SELECT ai_validate_read_only_sql(sql)
+FROM generated;
+```
+
+## Treat redaction as a privacy control, not a proof
+
+Use `openai_privacy_filter` for dedicated PII masking when raw text should not
+be sent to a general chat model. Host it locally for the strongest data-boundary
+story:
+
+```sql
+CREATE OR REPLACE SECRET privacy_filter_local (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'openai_privacy_filter',
+    BASE_URL 'http://localhost:8080'
+);
+```
+
+For high-sensitivity domains, evaluate redaction output on representative data,
+keep human review paths, and avoid treating model redaction as a compliance
+certificate.
+
+## Control cost and throughput
+
+Provider calls happen per row unless you aggregate or pre-filter first. Reduce
+cost and latency by:
+
+- Filtering rows before AI calls.
+- Deduplicating repeated input text.
+- Using `ai_agg` or `ai_summarize_agg` when one grouped call is enough.
+- Persisting embeddings instead of recomputing pairwise similarity.
+- Setting lower `max_tokens` values for classification and extraction tasks.
+
+For batch workloads, set process-local concurrency and pacing:
+
+```sql
+SET duckdb_ai_max_concurrent_requests = 4;
+SET duckdb_ai_min_request_interval_ms = 100;
+```
+
+Retries are disabled by default. Enable small retry counts only for transient
+provider failures:
+
+```sql
+SELECT ai_complete(
+    'Summarize this.',
+    retry_count := 2,
+    retry_backoff_ms := 1000
+);
+```
+
+Use `fail_on_error := false` for exploratory enrichment where a missing output
+is acceptable:
+
+```sql
+SELECT ai_classify(
+    subject,
+    'billing, support, sales, other',
+    fail_on_error := false
+)
+FROM support_tickets;
+```
+
+## Log usage without leaking text
+
+`ai_usage()` keeps recent events in process:
+
+```sql
+SELECT provider, model, elapsed_ms, http_status, estimated_cost_usd
+FROM ai_usage()
+ORDER BY event_id DESC;
+```
+
+Outbound usage logs omit prompt, input, and response text by default:
+
+```sql
+SET duckdb_ai_log_endpoint = 'https://collector.example/ai-usage';
+SET duckdb_ai_log_format = 'generic_json';
+SET duckdb_ai_log_tags = 'app=support-triage,env=prod';
+SET duckdb_ai_log_sample_rate = 0.25;
+```
+
+Only enable text logging when you have a documented retention and access-control
+reason:
+
+```sql
+SET duckdb_ai_log_include_text = true;
+```
+
+Use `duckdb_ai_log_strict = true` only when losing a usage log must fail the SQL
+query. For most analytics workflows, keep strict logging off so the collector
+does not become a query dependency.
+
+## Estimate cost carefully
+
+Cost estimates are optional. Use explicit prices for a job, or opt into the
+built-in catalog when it covers your model:
+
+```sql
+SET duckdb_ai_use_builtin_model_prices = true;
+SELECT * FROM ai_models();
+```
+
+Treat `ai_models()` as a convenience catalog, not a billing source of truth.
+Provider pricing and regional availability change; verify prices with the
+provider before using estimates for chargeback or budgeting.
+
+## Validate before release
+
+Run the local deterministic checks after changes to SQL functions, provider
+request shapes, logging, settings, or docs:
+
+```sh
+PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
+GEN=ninja make release
+GEN=ninja make test
+python3 test/smoke/mock_provider_smoke.py
+```
+
+For docs changes, also run:
+
+```sh
+cd website
+npm run typecheck
+npm run build
+```
+
+Run live provider smoke tests only when you intentionally want to validate real
+credentials, provider account configuration, or provider-specific model access.
