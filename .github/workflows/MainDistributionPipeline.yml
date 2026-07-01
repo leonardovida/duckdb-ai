@@ -5,10 +5,10 @@
 # configures the DuckDB extension build and type-checks the extension sources
 # without doing a full cold DuckDB compile on every PR update.
 #
-# Main branch pushes and manual runs also execute the release build,
-# SQLLogicTests, and mock-provider smoke test. The heavier DuckDB extension
-# distribution build remains available manually through workflow dispatch when
-# release artifacts are needed.
+# Manual and scheduled runs also execute the release build, SQLLogicTests, and
+# mock-provider smoke test. The heavier DuckDB extension distribution build
+# remains available manually through workflow dispatch when release artifacts
+# are needed.
 #
 name: CI
 
@@ -17,6 +17,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
     inputs:
       distribution:
@@ -119,8 +121,9 @@ jobs:
 
   build-test:
     name: Build and test
-    if: ${{ github.event_name != 'pull_request' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       CC: gcc
       CXX: g++
