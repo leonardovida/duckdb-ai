@@ -23,15 +23,19 @@ SQL, usage logging, and local validation evidence.
 - [Best practices](best-practices.md): provider selection, secrets, model
   defaults, structured output, SQL safety, redaction, logging, throughput, cost,
   and release validation guidance.
+- [Runtime behavior](runtime-behavior.md): function stability, per-database
+  runtime state, response caching, provider concurrency, cancellation, retries,
+  egress allowlisting, and JSON parsing.
+- [Security and data flow](security-data-flow.md): egress controls, per-function
+  data flow, logging defaults, proxy/TLS notes, and vulnerability reporting.
 - [Validation](VALIDATION.md): local build, test, and smoke evidence for the
   pinned DuckDB extension build.
 - [Smoke testing](SMOKE_TESTING.md): deterministic mock-provider checks plus
   optional live Ollama and remote provider commands.
-- [Distribution status](DISTRIBUTION.md): current source-first release stance
-  and the next publishing gaps.
+- [Distribution status](DISTRIBUTION.md): current source-build status,
+  community-preview target, and the next publishing gaps.
 - [Releasing](RELEASING.md): preview and stable release gates.
 - [Updating](UPDATING.md): DuckDB submodule update notes.
-- [Work plan](WORKPLAN.md): implemented phases and remaining context.
 
 ## Local site development
 

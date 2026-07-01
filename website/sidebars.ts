@@ -33,12 +33,13 @@ const sidebars: SidebarsConfig = {
     'functions',
     'provider-guides',
     'best-practices',
+    'runtime-behavior',
+    'security-data-flow',
     'VALIDATION',
     'SMOKE_TESTING',
     'DISTRIBUTION',
     'RELEASING',
     'UPDATING',
-    'WORKPLAN',
   ],
 };
 

@@ -28,19 +28,23 @@
 #include "duckdb/transaction/duck_transaction.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <future>
 #include <limits>
 #include <set>
 #include <sstream>
+#include <thread>
 
 namespace duckdb {
 
 namespace {
 
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
+constexpr idx_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 
 bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duckdb_ai::CompletionOptions &right) {
 	return left.model == right.model && left.provider == right.provider && left.secret_name == right.secret_name &&
@@ -62,17 +66,18 @@ bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duck
 	       left.has_output_token_price_per_million == right.has_output_token_price_per_million &&
 	       left.output_token_price_per_million == right.output_token_price_per_million &&
 	       left.has_use_builtin_model_prices == right.has_use_builtin_model_prices &&
-	       left.use_builtin_model_prices == right.use_builtin_model_prices && left.log_endpoint == right.log_endpoint &&
-	       left.log_format == right.log_format && left.log_tags == right.log_tags &&
-	       left.has_log_include_text == right.has_log_include_text && left.log_include_text == right.log_include_text &&
-	       left.has_log_strict == right.has_log_strict && left.log_strict == right.log_strict &&
-	       left.has_log_sample_rate == right.has_log_sample_rate && left.log_sample_rate == right.log_sample_rate &&
-	       left.fail_on_error == right.fail_on_error && left.response_format == right.response_format &&
-	       left.response_schema == right.response_schema;
+	       left.use_builtin_model_prices == right.use_builtin_model_prices && left.has_cache == right.has_cache &&
+	       left.cache == right.cache && left.allowed_hosts == right.allowed_hosts &&
+	       left.log_endpoint == right.log_endpoint && left.log_format == right.log_format &&
+	       left.log_tags == right.log_tags && left.has_log_include_text == right.has_log_include_text &&
+	       left.log_include_text == right.log_include_text && left.has_log_strict == right.has_log_strict &&
+	       left.log_strict == right.log_strict && left.has_log_sample_rate == right.has_log_sample_rate &&
+	       left.log_sample_rate == right.log_sample_rate && left.fail_on_error == right.fail_on_error &&
+	       left.response_format == right.response_format && left.response_schema == right.response_schema;
 }
 
 struct AiUsageScanData : public GlobalTableFunctionState {
-	AiUsageScanData() : offset(0), events(duckdb_ai::UsageEvents()) {
+	explicit AiUsageScanData(vector<duckdb_ai::UsageEvent> events_p) : offset(0), events(std::move(events_p)) {
 	}
 
 	idx_t offset;
@@ -340,6 +345,10 @@ struct AiAggregateBindData : public FunctionData {
 		       instruction == other.instruction && separator == other.separator &&
 		       max_context_chars == other.max_context_chars;
 	}
+
+	bool SupportStatementCache() const override {
+		return false;
+	}
 };
 
 struct AiAggregateState {
@@ -423,7 +432,7 @@ void ValidateResponseSchemaValue(const std::string &schema, const std::string &f
 bool TryGetOptionType(const std::string &name, LogicalType &type) {
 	if (name == "model" || name == "provider" || name == "profile" || name == "secret" || name == "secret_name" ||
 	    name == "system_prompt" || name == "base_url" || name == "response_format" || name == "response_schema" ||
-	    name == "json_schema" || name == "log_format" || name == "log_tags") {
+	    name == "json_schema" || name == "allowed_hosts" || name == "log_format" || name == "log_tags") {
 		type = LogicalType::VARCHAR;
 		return true;
 	}
@@ -441,7 +450,7 @@ bool TryGetOptionType(const std::string &name, LogicalType &type) {
 		type = LogicalType::BIGINT;
 		return true;
 	}
-	if (name == "fail_on_error" || name == "use_builtin_model_prices") {
+	if (name == "cache" || name == "fail_on_error" || name == "use_builtin_model_prices") {
 		type = LogicalType::BOOLEAN;
 		return true;
 	}
@@ -455,7 +464,8 @@ LogicalType OptionType(const std::string &name) {
 	}
 	throw BinderException("Unsupported AI option \"%s\". Supported options: model, provider, temperature, "
 	                      "system_prompt, max_tokens, base_url, timeout_seconds, retry_count, retry_backoff_ms, "
-	                      "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, "
+	                      "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, cache, "
+	                      "allowed_hosts, "
 	                      "input_token_price_per_million, output_token_price_per_million, use_builtin_model_prices, "
 	                      "fail_on_error, profile, secret, response_format, response_schema, json_schema, log_format, "
 	                      "log_tags, log_sample_rate",
@@ -543,6 +553,10 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 		options.base_url = OptionStringValue(value, function_name, name);
 		return true;
 	}
+	if (name == "allowed_hosts") {
+		options.allowed_hosts = OptionStringValue(value, function_name, name);
+		return true;
+	}
 	if (name == "log_tags") {
 		options.log_tags = OptionStringValue(value, function_name, name);
 		return true;
@@ -604,6 +618,11 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 	if (name == "use_builtin_model_prices") {
 		options.use_builtin_model_prices = OptionBoolValue(value, function_name, name);
 		options.has_use_builtin_model_prices = true;
+		return true;
+	}
+	if (name == "cache") {
+		options.cache = OptionBoolValue(value, function_name, name);
+		options.has_cache = true;
 		return true;
 	}
 	if (name == "max_tokens") {
@@ -850,6 +869,7 @@ void ApplySettingsWithPrefix(ClientContext &context, const std::string &prefix, 
 	ApplyStringSetting(context, prefix + "_provider", options.provider);
 	ApplyStringSetting(context, prefix + "_model", options.model);
 	ApplyStringSetting(context, prefix + "_base_url", options.base_url);
+	ApplyStringSetting(context, prefix + "_allowed_hosts", options.allowed_hosts);
 	ApplyStringSetting(context, prefix + "_response_format", options.response_format);
 	ApplyStringSetting(context, prefix + "_response_schema", options.response_schema);
 	ApplyStringSetting(context, prefix + "_log_endpoint", options.log_endpoint);
@@ -873,6 +893,7 @@ void ApplySettingsWithPrefix(ClientContext &context, const std::string &prefix, 
 	                              options.output_token_price_per_million, options.has_output_token_price_per_million);
 	ApplyBoolSetting(context, prefix + "_use_builtin_model_prices", options.use_builtin_model_prices,
 	                 options.has_use_builtin_model_prices);
+	ApplyBoolSetting(context, prefix + "_cache", options.cache, options.has_cache);
 	ApplyTimeoutSetting(context, prefix + "_timeout_seconds", options);
 }
 
@@ -1080,10 +1101,118 @@ unique_ptr<StringVectorReader> OptionalStringReader(DataChunk &args, bool enable
 	return enabled ? make_uniq<StringVectorReader>(args, column) : nullptr;
 }
 
-bool ReadRuntimeOptions(const duckdb_ai::CompletionOptions &base_options, bool has_model_arg,
+struct ProviderJobBase {
+	idx_t row = 0;
+	duckdb_ai::CompletionOptions options;
+	std::exception_ptr exception;
+	std::string error_message;
+	bool fail_on_error = true;
+	bool completed = false;
+};
+
+struct ProviderStringJob : public ProviderJobBase {
+	std::string input;
+	std::string parameter;
+	std::string output;
+};
+
+struct ProviderBoolJob : public ProviderJobBase {
+	std::string input;
+	std::string parameter;
+	bool output = false;
+};
+
+struct ProviderEmbeddingJob : public ProviderJobBase {
+	std::string input;
+	std::vector<double> output;
+};
+
+struct ProviderDoubleJob : public ProviderJobBase {
+	std::string left;
+	std::string right;
+	double output = 0;
+};
+
+template <class JOB>
+idx_t ProviderWorkerCount(const std::vector<JOB> &jobs) {
+	if (jobs.size() <= 1) {
+		return 1;
+	}
+	idx_t configured_workers = 0;
+	for (auto &job : jobs) {
+		auto cap = duckdb_ai::EffectiveMaxConcurrentRequests(job.options);
+		if (cap > 0) {
+			configured_workers = std::max<idx_t>(
+			    configured_workers, static_cast<idx_t>(std::min<int64_t>(cap, MAX_PROVIDER_CHUNK_WORKERS)));
+		}
+	}
+	idx_t worker_count = configured_workers;
+	if (worker_count == 0) {
+		auto hardware_workers = std::thread::hardware_concurrency();
+		worker_count = hardware_workers == 0 ? 4 : static_cast<idx_t>(hardware_workers);
+		worker_count = std::min<idx_t>(worker_count, 8);
+	}
+	worker_count = std::min<idx_t>(worker_count, jobs.size());
+	return std::max<idx_t>(1, std::min<idx_t>(worker_count, MAX_PROVIDER_CHUNK_WORKERS));
+}
+
+template <class JOB, class CALLBACK>
+void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
+	auto worker_count = ProviderWorkerCount(jobs);
+	std::atomic<bool> stop {false};
+	auto run_one = [&](JOB &job) {
+		try {
+			callback(job);
+			job.completed = true;
+		} catch (std::exception &ex) {
+			job.exception = std::current_exception();
+			job.error_message = ex.what();
+			if (job.fail_on_error) {
+				stop.store(true);
+			}
+		} catch (...) {
+			job.exception = std::current_exception();
+			job.error_message = "unknown AI provider error";
+			if (job.fail_on_error) {
+				stop.store(true);
+			}
+		}
+	};
+
+	if (worker_count <= 1) {
+		for (auto &job : jobs) {
+			if (stop.load()) {
+				return;
+			}
+			run_one(job);
+		}
+		return;
+	}
+
+	std::atomic<idx_t> next_job {0};
+	std::vector<std::future<void>> workers;
+	workers.reserve(worker_count);
+	for (idx_t worker = 0; worker < worker_count; worker++) {
+		workers.push_back(std::async(std::launch::async, [&]() {
+			while (!stop.load()) {
+				auto job_index = next_job.fetch_add(1);
+				if (job_index >= jobs.size()) {
+					return;
+				}
+				run_one(jobs[job_index]);
+			}
+		}));
+	}
+	for (auto &worker : workers) {
+		worker.get();
+	}
+}
+
+bool ReadRuntimeOptions(ClientContext &context, const duckdb_ai::CompletionOptions &base_options, bool has_model_arg,
                         const StringVectorReader *model_reader, bool has_provider_arg,
                         const StringVectorReader *provider_reader, idx_t row, duckdb_ai::CompletionOptions &options) {
 	options = base_options;
+	duckdb_ai::AttachProviderRuntimeState(options, context);
 	if (has_model_arg && !model_reader->Read(row, options.model)) {
 		return false;
 	}
@@ -1151,6 +1280,8 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderStringJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string prompt;
 		if (!prompt_reader.Read(row, prompt)) {
@@ -1159,7 +1290,7 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 		}
 
 		duckdb_ai::CompletionOptions options;
-		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -1167,23 +1298,45 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto request_prompt =
+			ProviderStringJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.input =
 			    bind_data.validate_json_output ? BuildJsonCompletionPrompt(prompt, options.response_schema) : prompt;
-			auto output = bind_data.request_json ? duckdb_ai::BuildRequestJson(request_prompt, options)
-			                                     : duckdb_ai::Complete(request_prompt, options).text;
-			if (bind_data.validate_json_output) {
-				std::string error;
-				if (!ValidateJsonCompletionOutput(output, options.response_schema, error)) {
-					throw InvalidInputException("ai_complete_json expected valid JSON output: %s", error);
-				}
-			}
-			result_data[row] = StringVector::AddString(result, output);
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
 			}
 			result_validity.SetInvalid(row);
 		}
+	}
+
+	RunProviderJobs(jobs, [&](ProviderStringJob &job) {
+		job.output = bind_data.request_json ? duckdb_ai::BuildRequestJson(job.input, job.options)
+		                                    : duckdb_ai::Complete(job.input, job.options).text;
+		if (bind_data.validate_json_output) {
+			std::string error;
+			if (!ValidateJsonCompletionOutput(job.output, job.options.response_schema, error)) {
+				throw InvalidInputException("ai_complete_json expected valid JSON output: %s", error);
+			}
+		}
+	});
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result_data[job.row] = StringVector::AddString(result, job.output);
 	}
 }
 
@@ -1226,6 +1379,8 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderStringJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string prompt;
 		if (!prompt_reader.Read(row, prompt)) {
@@ -1234,7 +1389,7 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 		}
 
 		duckdb_ai::CompletionOptions options;
-		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -1242,11 +1397,30 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto output = duckdb_ai::Complete(prompt, options).text;
-			result.SetValue(row, AiTryCompleteValue(result_type, output, false, ""));
+			ProviderStringJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = false;
+			job.input = prompt;
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			result.SetValue(row, AiTryCompleteValue(result_type, "", true, ex.what()));
 		}
+	}
+
+	RunProviderJobs(jobs,
+	                [&](ProviderStringJob &job) { job.output = duckdb_ai::Complete(job.input, job.options).text; });
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			result.SetValue(job.row, AiTryCompleteValue(result_type, "", true, job.error_message));
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result.SetValue(job.row, AiTryCompleteValue(result_type, job.output, false, ""));
 	}
 }
 
@@ -1471,6 +1645,7 @@ void AiRecordFunction(ClientContext &context, TableFunctionInput &input, DataChu
 	auto &bind_data = input.bind_data->Cast<AiRecordBindData>();
 	try {
 		auto options = bind_data.options;
+		duckdb_ai::AttachProviderRuntimeState(options, context);
 		ApplyAiProviderSecret(context, options);
 		auto request_prompt = BuildJsonCompletionPrompt(bind_data.prompt, bind_data.response_schema);
 		auto result = duckdb_ai::Complete(request_prompt, options).text;
@@ -1508,8 +1683,8 @@ bool IsEmbeddingOption(const std::string &name) {
 	       name == "base_url" || name == "timeout_seconds" || name == "retry_count" || name == "retry_backoff_ms" ||
 	       name == "max_concurrent_requests" || name == "min_request_interval_ms" || name == "token_limit_per_minute" ||
 	       name == "input_token_price_per_million" || name == "output_token_price_per_million" ||
-	       name == "use_builtin_model_prices" || name == "fail_on_error" || name == "log_format" ||
-	       name == "log_tags" || name == "log_sample_rate";
+	       name == "use_builtin_model_prices" || name == "cache" || name == "allowed_hosts" ||
+	       name == "fail_on_error" || name == "log_format" || name == "log_tags" || name == "log_sample_rate";
 }
 
 unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarFunction &bound_function,
@@ -1544,7 +1719,7 @@ unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarF
 			    "Unsupported AI embedding option \"%s\". Supported options: model, provider, "
 			    "profile, secret, base_url, timeout_seconds, retry_count, retry_backoff_ms, fail_on_error, "
 			    "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, "
-			    "input_token_price_per_million, output_token_price_per_million, "
+			    "cache, allowed_hosts, input_token_price_per_million, output_token_price_per_million, "
 			    "use_builtin_model_prices, log_format, log_tags, log_sample_rate",
 			    alias);
 		}
@@ -1596,7 +1771,7 @@ unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction
 			throw BinderException(
 			    "Unsupported AI similarity option \"%s\". Supported options: model, provider, "
 			    "profile, secret, base_url, timeout_seconds, retry_count, retry_backoff_ms, fail_on_error, "
-			    "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, "
+			    "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, cache, allowed_hosts, "
 			    "input_token_price_per_million, output_token_price_per_million, "
 			    "use_builtin_model_prices, log_format, log_tags, log_sample_rate",
 			    alias);
@@ -1608,15 +1783,16 @@ unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction
 	return std::move(bind_data);
 }
 
-void ReadEmbeddingInputs(const StringVectorReader &input_reader, const StringVectorReader *model_reader,
-                         const StringVectorReader *provider_reader, const AiCompletionBindData &bind_data, idx_t row,
-                         std::string &input, duckdb_ai::CompletionOptions &options, bool &is_null) {
+void ReadEmbeddingInputs(ClientContext &context, const StringVectorReader &input_reader,
+                         const StringVectorReader *model_reader, const StringVectorReader *provider_reader,
+                         const AiCompletionBindData &bind_data, idx_t row, std::string &input,
+                         duckdb_ai::CompletionOptions &options, bool &is_null) {
 	if (!input_reader.Read(row, input)) {
 		is_null = true;
 		return;
 	}
-	if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader, bind_data.has_provider_arg,
-	                        provider_reader, row, options)) {
+	if (!ReadRuntimeOptions(context, bind_data.options, bind_data.has_model_arg, model_reader,
+	                        bind_data.has_provider_arg, provider_reader, row, options)) {
 		is_null = true;
 	}
 }
@@ -1652,6 +1828,8 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderDoubleJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string left;
 		std::string right;
@@ -1661,7 +1839,7 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 		}
 
 		duckdb_ai::CompletionOptions options;
-		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -1669,15 +1847,40 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto left_embedding = duckdb_ai::Embed(left, options);
-			auto right_embedding = duckdb_ai::Embed(right, options);
-			result_data[row] = CosineSimilarity(left_embedding.values, right_embedding.values);
+			ProviderDoubleJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.left = std::move(left);
+			job.right = std::move(right);
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
 			}
 			result_validity.SetInvalid(row);
 		}
+	}
+
+	RunProviderJobs(jobs, [&](ProviderDoubleJob &job) {
+		auto left_embedding = duckdb_ai::Embed(job.left, job.options);
+		auto right_embedding = duckdb_ai::Embed(job.right, job.options);
+		job.output = CosineSimilarity(left_embedding.values, right_embedding.values);
+	});
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result_data[job.row] = job.output;
 	}
 }
 
@@ -1692,12 +1895,14 @@ void AiEmbeddingRequestJsonFunction(DataChunk &args, ExpressionState &state, Vec
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderStringJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		duckdb_ai::CompletionOptions options;
 		bool is_null = false;
-		ReadEmbeddingInputs(input_reader, model_reader.get(), provider_reader.get(), bind_data, row, input, options,
-		                    is_null);
+		ReadEmbeddingInputs(state.GetContext(), input_reader, model_reader.get(), provider_reader.get(), bind_data, row,
+		                    input, options, is_null);
 		if (is_null) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -1705,14 +1910,37 @@ void AiEmbeddingRequestJsonFunction(DataChunk &args, ExpressionState &state, Vec
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto output = duckdb_ai::BuildEmbeddingRequestJson(input, options);
-			result_data[row] = StringVector::AddString(result, output);
+			ProviderStringJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.input = std::move(input);
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
 			}
 			result_validity.SetInvalid(row);
 		}
+	}
+
+	RunProviderJobs(jobs, [&](ProviderStringJob &job) {
+		job.output = duckdb_ai::BuildEmbeddingRequestJson(job.input, job.options);
+	});
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result_data[job.row] = StringVector::AddString(result, job.output);
 	}
 }
 
@@ -1727,12 +1955,14 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderEmbeddingJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		duckdb_ai::CompletionOptions options;
 		bool is_null = false;
-		ReadEmbeddingInputs(input_reader, model_reader.get(), provider_reader.get(), bind_data, row, input, options,
-		                    is_null);
+		ReadEmbeddingInputs(state.GetContext(), input_reader, model_reader.get(), provider_reader.get(), bind_data, row,
+		                    input, options, is_null);
 		if (is_null) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -1740,17 +1970,39 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto embedding = duckdb_ai::Embed(input, options);
-			result_data[row].offset = ListVector::GetListSize(result);
-			result_data[row].length = embedding.values.size();
-			for (auto value : embedding.values) {
-				ListVector::PushBack(result, Value::DOUBLE(value));
-			}
+			ProviderEmbeddingJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.input = std::move(input);
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
 			}
 			result_validity.SetInvalid(row);
+		}
+	}
+
+	RunProviderJobs(jobs,
+	                [&](ProviderEmbeddingJob &job) { job.output = duckdb_ai::Embed(job.input, job.options).values; });
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result_data[job.row].offset = ListVector::GetListSize(result);
+		result_data[job.row].length = job.output.size();
+		for (auto value : job.output) {
+			ListVector::PushBack(result, Value::DOUBLE(value));
 		}
 	}
 }
@@ -1906,6 +2158,7 @@ unique_ptr<FunctionData> AiAggregateBindInternal(ClientContext &context, Aggrega
                                                  vector<unique_ptr<Expression>> &arguments, AiAggregateKind kind) {
 	auto bind_data = make_uniq<AiAggregateBindData>(kind);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::AGGREGATE);
+	duckdb_ai::AttachProviderRuntimeState(bind_data->options, context);
 	if (arguments.empty()) {
 		throw BinderException("%s requires an input text argument", function.name);
 	}
@@ -2556,6 +2809,8 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderStringJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		if (!input_reader.Read(row, input)) {
@@ -2569,7 +2824,7 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		}
 
 		duckdb_ai::CompletionOptions options;
-		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -2577,21 +2832,44 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			std::string output;
-			if (bind_data.task == AiTaskKind::MASK &&
-			    duckdb_ai::ResolveProvider(options).protocol == "privacy_filter") {
-				output = duckdb_ai::Redact(input, options).text;
-			} else {
-				auto prompt = BuildTaskPrompt(bind_data.task, input, parameter);
-				output = duckdb_ai::Complete(prompt, options).text;
-			}
-			result_data[row] = StringVector::AddString(result, output);
+			ProviderStringJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.input = std::move(input);
+			job.parameter = std::move(parameter);
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
 			}
 			result_validity.SetInvalid(row);
 		}
+	}
+
+	RunProviderJobs(jobs, [&](ProviderStringJob &job) {
+		if (bind_data.task == AiTaskKind::MASK &&
+		    duckdb_ai::ResolveProvider(job.options).protocol == "privacy_filter") {
+			job.output = duckdb_ai::Redact(job.input, job.options).text;
+			return;
+		}
+		auto prompt = BuildTaskPrompt(bind_data.task, job.input, job.parameter);
+		job.output = duckdb_ai::Complete(prompt, job.options).text;
+	});
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result_data[job.row] = StringVector::AddString(result, job.output);
 	}
 }
 
@@ -2623,6 +2901,8 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderBoolJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		std::string predicate;
@@ -2632,7 +2912,7 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		}
 
 		duckdb_ai::CompletionOptions options;
-		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -2640,19 +2920,44 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto prompt = BuildTaskPrompt(bind_data.task, input, predicate);
-			auto output = duckdb_ai::Complete(prompt, options).text;
-			bool parsed = false;
-			if (!ParseAiBooleanResult(output, parsed)) {
-				throw InvalidInputException("ai_filter expected true or false output, got: %s", output);
-			}
-			result_data[row] = parsed;
+			ProviderBoolJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.input = std::move(input);
+			job.parameter = std::move(predicate);
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
 			}
 			result_validity.SetInvalid(row);
 		}
+	}
+
+	RunProviderJobs(jobs, [&](ProviderBoolJob &job) {
+		auto prompt = BuildTaskPrompt(bind_data.task, job.input, job.parameter);
+		auto output = duckdb_ai::Complete(prompt, job.options).text;
+		bool parsed = false;
+		if (!ParseAiBooleanResult(output, parsed)) {
+			throw InvalidInputException("ai_filter expected true or false output, got: %s", output);
+		}
+		job.output = parsed;
+	});
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result_data[job.row] = job.output;
 	}
 }
 
@@ -2953,6 +3258,7 @@ unique_ptr<TableRef> EmptyPromptQueryResult(const ParserOptions &options) {
 unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctionBindInput &input) {
 	auto options = duckdb_ai::CompletionOptions();
 	ApplySettings(context, options, AiModelSettingKind::SQL_ASSISTANT);
+	duckdb_ai::AttachProviderRuntimeState(options, context);
 	auto question = RequiredTableStringInput(input, 0, "question");
 	auto schema_context = OptionalTableStringInput(input, 1);
 	PromptSchemaOptions schema_options;
@@ -2997,6 +3303,8 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
+	std::vector<ProviderStringJob> jobs;
+	jobs.reserve(args.size());
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string question;
 		if (!question_reader.Read(row, question)) {
@@ -3018,7 +3326,7 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 		}
 
 		duckdb_ai::CompletionOptions options;
-		if (!ReadRuntimeOptions(bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
 			result_validity.SetInvalid(row);
 			continue;
@@ -3026,14 +3334,37 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 
 		try {
 			ApplyAiProviderSecret(state.GetContext(), options);
-			auto generated_sql = GeneratePromptSql(question, schema_context, options);
-			result_data[row] = StringVector::AddString(result, generated_sql);
+			ProviderStringJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.input = std::move(question);
+			job.parameter = std::move(schema_context);
+			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
 			}
 			result_validity.SetInvalid(row);
 		}
+	}
+
+	RunProviderJobs(
+	    jobs, [&](ProviderStringJob &job) { job.output = GeneratePromptSql(job.input, job.parameter, job.options); });
+
+	for (auto &job : jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		if (!job.completed) {
+			result_validity.SetInvalid(job.row);
+			continue;
+		}
+		result_data[job.row] = StringVector::AddString(result, job.output);
 	}
 }
 
@@ -3128,7 +3459,7 @@ void PromptSchemaFunction(ClientContext &context, TableFunctionInput &input, Dat
 	output.SetValue(0, 0, Value(summary));
 	output.SetCardinality(1);
 	state.emitted = true;
-	duckdb_ai::RecordLocalUsageEvent("ai_schema_prompt", 0, static_cast<int64_t>(summary.size()));
+	duckdb_ai::RecordLocalUsageEvent(&context, "ai_schema_prompt", 0, static_cast<int64_t>(summary.size()));
 }
 
 std::string RequiredAssistantStringInput(const TableFunctionBindInput &input, idx_t index, const std::string &name,
@@ -3281,6 +3612,7 @@ void PromptAssistantFunction(ClientContext &context, TableFunctionInput &input, 
 	auto &bind_data = input.bind_data->Cast<PromptAssistantBindData>();
 	try {
 		auto options = bind_data.options;
+		duckdb_ai::AttachProviderRuntimeState(options, context);
 		ApplyAiProviderSecret(context, options);
 		if (bind_data.kind == PromptAssistantKind::EXPLAIN) {
 			RequireReadOnlySql(bind_data.sql, "ai_explain_sql");
@@ -3480,8 +3812,8 @@ unique_ptr<FunctionData> AiUsageBind(ClientContext &, TableFunctionBindInput &, 
 	return nullptr;
 }
 
-unique_ptr<GlobalTableFunctionState> AiUsageInit(ClientContext &, TableFunctionInitInput &) {
-	return make_uniq<AiUsageScanData>();
+unique_ptr<GlobalTableFunctionState> AiUsageInit(ClientContext &context, TableFunctionInitInput &) {
+	return make_uniq<AiUsageScanData>(duckdb_ai::UsageEvents(context));
 }
 
 void AiUsageFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
@@ -3530,12 +3862,23 @@ unique_ptr<GlobalTableFunctionState> AiClearUsageInit(ClientContext &, TableFunc
 	return make_uniq<AiClearUsageScanData>();
 }
 
-void AiClearUsageFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+void AiClearUsageFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.global_state->Cast<AiClearUsageScanData>();
 	if (data.emitted) {
 		return;
 	}
-	duckdb_ai::ClearUsageEvents();
+	duckdb_ai::ClearUsageEvents(context);
+	output.SetValue(0, 0, Value::BOOLEAN(true));
+	output.SetCardinality(1);
+	data.emitted = true;
+}
+
+void AiClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.global_state->Cast<AiClearUsageScanData>();
+	if (data.emitted) {
+		return;
+	}
+	duckdb_ai::ClearResponseCache(context);
 	output.SetValue(0, 0, Value::BOOLEAN(true));
 	output.SetCardinality(1);
 	data.emitted = true;
@@ -3614,6 +3957,11 @@ void RegisterSettingsForPrefix(DBConfig &config, const std::string &prefix, cons
 	AddSetting(config, prefix + "_model", "Default AI model for " + label, LogicalType::VARCHAR, Value(""));
 	AddSetting(config, prefix + "_base_url", "Default AI provider base URL override for " + label, LogicalType::VARCHAR,
 	           Value(""));
+	AddSetting(config, prefix + "_allowed_hosts",
+	           "Comma-separated AI provider host allowlist for " + label + "; empty allows all hosts",
+	           LogicalType::VARCHAR, Value(""));
+	AddSetting(config, prefix + "_cache", "Cache successful AI provider responses in the current DuckDB instance",
+	           LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN));
 	AddSetting(config, prefix + "_response_format", "Default AI response format: text, json_object, or json_schema",
 	           LogicalType::VARCHAR, Value(""));
 	AddSetting(config, prefix + "_response_schema", "Default AI JSON schema object for structured responses",
@@ -3802,6 +4150,8 @@ void AddCompletionNamedParameters(TableFunction &function, bool include_response
 	                                           "max_concurrent_requests",
 	                                           "min_request_interval_ms",
 	                                           "token_limit_per_minute",
+	                                           "cache",
+	                                           "allowed_hosts",
 	                                           "input_token_price_per_million",
 	                                           "output_token_price_per_million",
 	                                           "use_builtin_model_prices",
@@ -3926,6 +4276,7 @@ void RegisterPromptQueryFunction(ExtensionLoader &loader, const std::string &nam
 } // namespace
 
 static void LoadInternal(ExtensionLoader &loader) {
+	duckdb_ai::InitializeProviderRuntime();
 	RegisterSettings(loader);
 	RegisterAiProviderSecret(loader);
 
@@ -4012,6 +4363,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(TableFunction("ai_usage", {}, AiUsageFunction, AiUsageBind, AiUsageInit));
 	loader.RegisterFunction(
 	    TableFunction("ai_clear_usage", {}, AiClearUsageFunction, AiClearUsageBind, AiClearUsageInit));
+	loader.RegisterFunction(
+	    TableFunction("ai_clear_cache", {}, AiClearCacheFunction, AiClearUsageBind, AiClearUsageInit));
 	loader.RegisterFunction(TableFunction("ai_secrets", {}, AiSecretsFunction, AiSecretsBind, AiSecretsInit));
 	loader.RegisterFunction(
 	    TableFunction("ai_models", {}, AiModelPricesFunction, AiModelPricesBind, AiModelPricesInit));

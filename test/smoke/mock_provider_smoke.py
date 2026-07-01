@@ -20,6 +20,19 @@ class MockProviderHandler(BaseHTTPRequestHandler):
     claude_versions = []
     retry_completion_attempts = 0
 
+    @classmethod
+    def reset(cls):
+        cls.completion_requests.clear()
+        cls.embedding_requests.clear()
+        cls.privacy_filter_requests.clear()
+        cls.ollama_requests.clear()
+        cls.claude_requests.clear()
+        cls.log_requests.clear()
+        cls.authorization_headers.clear()
+        cls.claude_api_keys.clear()
+        cls.claude_versions.clear()
+        cls.retry_completion_attempts = 0
+
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
         body = self.rfile.read(length).decode("utf-8")
@@ -387,6 +400,70 @@ def run_duckdb_provider_error(duckdb_path: Path, base_url: str) -> str:
     return result.stdout
 
 
+def run_duckdb_cache_and_allowlist(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT * FROM ai_clear_usage();
+        SELECT * FROM ai_clear_cache();
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_model = 'mock-model';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_allowed_hosts = '{base_url}';
+        SET duckdb_ai_timeout_seconds = 5;
+        CREATE OR REPLACE SECRET smoke_cache_duckdb_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai'
+        );
+        SELECT ai_complete('cache smoke', cache := true) AS first_completion;
+        SELECT ai_complete('cache smoke', cache := true) AS second_completion;
+        SELECT count(*) AS usage_events FROM ai_usage();
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb cache smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def run_duckdb_allowlist_error(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_model = 'mock-model';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_allowed_hosts = 'example.com';
+        SET duckdb_ai_timeout_seconds = 5;
+        CREATE OR REPLACE SECRET smoke_allowlist_duckdb_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai'
+        );
+        SELECT ai_complete('blocked by allowlist');
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"duckdb allowlist smoke unexpectedly succeeded\n{result.stdout}")
+    return result.stdout
+
+
 def assert_provider_error(output: str):
     required = [
         'AI provider "openai" (openai_chat, model "mock-model") returned HTTP 401',
@@ -399,6 +476,31 @@ def assert_provider_error(output: str):
         raise AssertionError(f"provider error output missing {missing}\n{output}")
     if "test-key" in output:
         raise AssertionError(f"provider error output leaked API key\n{output}")
+
+
+def assert_cache_and_allowlist_result(output: str):
+    required = ["first_completion", "second_completion", "mock completion", "usage_events", "2"]
+    missing = [value for value in required if value not in output]
+    if missing:
+        raise AssertionError(f"cache output missing {missing}\n{output}")
+    if len(MockProviderHandler.completion_requests) != 1:
+        raise AssertionError(
+            f"expected 1 cached completion request, got {len(MockProviderHandler.completion_requests)}"
+        )
+    if len(MockProviderHandler.authorization_headers) != 1:
+        raise AssertionError(f"expected 1 cached auth header, got {len(MockProviderHandler.authorization_headers)}")
+    prompt = MockProviderHandler.completion_requests[0]["messages"][-1]["content"]
+    if prompt != "cache smoke":
+        raise AssertionError(f"unexpected cache prompt: {prompt}")
+
+
+def assert_allowlist_error(output: str):
+    if "not allowed by duckdb_ai_allowed_hosts" not in output:
+        raise AssertionError(f"allowlist error missing expected message\n{output}")
+    if MockProviderHandler.completion_requests:
+        raise AssertionError(
+            f"allowlist should block before provider request: {MockProviderHandler.completion_requests}"
+        )
 
 
 def assert_smoke_result(output: str):
@@ -791,6 +893,12 @@ def main():
         assert_smoke_result(output)
         provider_error_output = run_duckdb_provider_error(args.duckdb, f"http://127.0.0.1:{port}")
         assert_provider_error(provider_error_output)
+        MockProviderHandler.reset()
+        cache_output = run_duckdb_cache_and_allowlist(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_cache_and_allowlist_result(cache_output)
+        MockProviderHandler.reset()
+        allowlist_error_output = run_duckdb_allowlist_error(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_allowlist_error(allowlist_error_output)
     finally:
         server.shutdown()
         thread.join(timeout=5)

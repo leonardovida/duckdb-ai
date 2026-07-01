@@ -5,6 +5,8 @@
 #include <vector>
 
 namespace duckdb {
+class ClientContext;
+
 namespace duckdb_ai {
 
 //! Runtime provider configuration after aliases, defaults, environment variables, and explicit options are resolved.
@@ -49,6 +51,9 @@ struct CompletionOptions {
 	double output_token_price_per_million = 0;
 	bool has_use_builtin_model_prices = false;
 	bool use_builtin_model_prices = false;
+	bool has_cache = false;
+	bool cache = false;
+	std::string allowed_hosts;
 	std::string log_endpoint;
 	std::string log_format;
 	std::string log_tags;
@@ -61,6 +66,8 @@ struct CompletionOptions {
 	bool fail_on_error = true;
 	std::string response_format;
 	std::string response_schema;
+	ClientContext *client_context = nullptr;
+	void *runtime_state = nullptr;
 };
 
 //! Parsed result from a text-generation provider response.
@@ -172,12 +179,29 @@ std::string BuildEmbeddingRequestJson(const std::string &input, const Completion
 EmbeddingResult Embed(const std::string &input, const std::string &model, const std::string &provider);
 //! Execute an embedding request from a full option set.
 EmbeddingResult Embed(const std::string &input, const CompletionOptions &options);
+//! Return the effective max_concurrent_requests value from options or env.
+int64_t EffectiveMaxConcurrentRequests(const CompletionOptions &options);
+//! Initialize provider runtime dependencies such as libcurl.
+void InitializeProviderRuntime();
+//! Attach per-database provider runtime state before provider calls run on worker threads.
+void AttachProviderRuntimeState(CompletionOptions &options, ClientContext &context);
 //! Return a snapshot of the bounded in-process usage buffer.
 std::vector<UsageEvent> UsageEvents();
+//! Return a snapshot of the bounded per-database usage buffer.
+std::vector<UsageEvent> UsageEvents(ClientContext &context);
 //! Clear the in-process usage buffer.
 void ClearUsageEvents();
+//! Clear the per-database usage buffer.
+void ClearUsageEvents(ClientContext &context);
+//! Clear the in-process response cache.
+void ClearResponseCache();
+//! Clear the per-database response cache.
+void ClearResponseCache(ClientContext &context);
 //! Record local deterministic work that does not call a provider, such as ai_schema_prompt().
 void RecordLocalUsageEvent(const std::string &event, int64_t input_chars, int64_t response_chars);
+//! Record local deterministic work against a specific client context.
+void RecordLocalUsageEvent(ClientContext *context, const std::string &event, int64_t input_chars,
+                           int64_t response_chars);
 //! Return the built-in model pricing catalog.
 std::vector<ModelPrice> ModelPrices();
 //! Validate that the input is one complete JSON document.

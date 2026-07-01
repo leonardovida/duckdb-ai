@@ -14,7 +14,7 @@ into typed DuckDB values, compare text with embeddings, and ask questions over a
 bounded schema prompt without moving the workflow into a separate application.
 
 ```sql
-INSTALL duckdb_ai FROM community;
+-- From a local source build.
 LOAD duckdb_ai;
 
 SELECT ai_summarize(
@@ -44,10 +44,18 @@ DuckDB `SELECT` before returning or executing it.
 
 ## Quick Start
 
-Install and load the extension from DuckDB:
+`duckdb_ai` is not published in the DuckDB community extension repository yet.
+Until the manual community submission is accepted, build and load it from this
+source tree:
+
+```sh
+GEN=ninja make release
+./build/release/duckdb
+```
+
+Then load the extension:
 
 ```sql
-INSTALL duckdb_ai FROM community;
 LOAD duckdb_ai;
 ```
 
@@ -67,7 +75,6 @@ ollama pull gemma4:e4b
 ```
 
 ```sql
-INSTALL duckdb_ai FROM community;
 LOAD duckdb_ai;
 
 SET duckdb_ai_provider = 'ollama';
@@ -79,7 +86,6 @@ SELECT ai_complete('Write one sentence about DuckDB.');
 For OpenAI, store the API key in a DuckDB secret:
 
 ```sql
-INSTALL duckdb_ai FROM community;
 LOAD duckdb_ai;
 
 CREATE OR REPLACE SECRET openai_ai (
@@ -271,7 +277,7 @@ These are the main functions most users should start with:
 | SQL assistant | `ai_schema_prompt`, `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql`, `ai_fix_sql_line` |
 | SQL safety checks | `ai_is_read_only_sql`, `ai_validate_read_only_sql` |
 | Provider metadata | `ai_provider_base_url`, `ai_provider_protocol`, `ai_models` |
-| Usage and secrets | `ai_usage`, `ai_clear_usage`, `ai_secrets` |
+| Usage and secrets | `ai_usage`, `ai_clear_usage`, `ai_clear_cache`, `ai_secrets` |
 | Local utility | `ai_count_tokens`, `ai_recommended_batch_size` |
 
 The full SQL reference is in [`docs/functions.md`](docs/functions.md).
@@ -383,6 +389,8 @@ arrays become `STRUCT` and `LIST` values.
 - Provider error messages redact the active API key before surfacing errors.
 - Usage logs do not include prompt, input, or response text unless
   `duckdb_ai_log_include_text` or `DUCKDB_AI_LOG_INCLUDE_TEXT=1` is enabled.
+- `duckdb_ai_allowed_hosts` and `allowed_hosts := ...` can restrict provider
+  egress to a comma-separated host allowlist.
 - Generated SQL is guarded by `ai_validate_read_only_sql`, which only accepts one
   read-only DuckDB `SELECT`.
 
@@ -405,6 +413,7 @@ in a local in-process ring buffer:
 ```sql
 SELECT * FROM ai_usage();
 SELECT * FROM ai_clear_usage();
+SELECT * FROM ai_clear_cache();
 ```
 
 Cost estimates are opt-in. Either pass prices per call or enable the built-in
@@ -449,10 +458,19 @@ SET duckdb_ai_min_request_interval_ms = 100;
 SET duckdb_ai_token_limit_per_minute = 200000;
 ```
 
-These controls apply to completion and embedding calls. The token limit uses the
-local `ai_count_tokens` estimate plus `max_tokens` when present, or a conservative
-default output estimate otherwise. Set `max_tokens` for large jobs so the runtime
-can pace requests against your provider's current tokens-per-minute limit.
+These controls apply per DuckDB database instance to completion and embedding
+calls. The token limit uses the local `ai_count_tokens` estimate plus
+`max_tokens` when present, or a conservative default output estimate otherwise.
+Set `max_tokens` for large jobs so the runtime can pace requests against your
+provider's current tokens-per-minute limit.
+
+Response caching is opt-in and in-memory:
+
+```sql
+SET duckdb_ai_cache = true;
+SELECT ai_complete('Summarize this repeated prompt.');
+SELECT * FROM ai_clear_cache();
+```
 
 Use `ai_recommended_batch_size` with a small provider-limit table to pick a
 starting batch size before running a large enrichment:
@@ -517,7 +535,11 @@ or an `s3://...` target when failures should live outside the DuckDB database.
   every supported provider.
 - [`docs/best-practices.md`](docs/best-practices.md): provider selection,
   secrets, defaults, privacy, logging, throughput, and validation guidance.
+- [`docs/security-data-flow.md`](docs/security-data-flow.md): egress controls,
+  per-function data flow, logging defaults, and proxy/TLS notes.
 - [`docs/SMOKE_TESTING.md`](docs/SMOKE_TESTING.md): local mock-provider, Ollama,
   and remote-provider smoke checks.
 - [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md): release and distribution notes.
+- [`SECURITY.md`](SECURITY.md): vulnerability reporting policy.
+- [`CHANGELOG.md`](CHANGELOG.md): release notes and compatibility policy.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md): development workflow for contributors.

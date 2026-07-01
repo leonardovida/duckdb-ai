@@ -4,49 +4,46 @@ The checked-in GitHub Actions workflow currently builds and runs quality checks
 for `duckdb_ai` against DuckDB `v1.5.4` with `extension-ci-tools`
 `v1.5-variegata`.
 
-It does not publish extension binaries. The inherited `scripts/extension-upload.sh`
-helper is present for future custom repository publishing, but no workflow calls
-it yet and no signing or S3 target is configured.
+It does not publish extension binaries yet. Until the DuckDB community extension
+submission is accepted, users should build and load the extension from source.
 
 ## Current release stance
 
-- Build-only CI is enabled through
+- Pull-request build, SQLLogic, and mock-provider smoke CI is enabled through
   `.github/workflows/MainDistributionPipeline.yml`.
 - Public binary distribution is not configured.
 - The initial preview source release is `0.1.0` in `extension_config.cmake`.
-- The repository should stay in source-first mode until the SQL function surface
-  and provider configuration contract stabilize.
+- The extension name is `duckdb_ai` across the build target, loadable
+  extension, secret type, and SQL docs.
+- The repository is readying a `0.x` community-extension preview; the actual
+  community repository submission is a manual follow-up.
 
 ## First distribution target
 
-Use a custom unsigned extension repository first.
+Use the DuckDB community extension repository for the first public binary
+distribution. A community entry is the clearest install path for DuckDB users
+and gives release signing/provenance through the DuckDB extension pipeline.
 
-That path matches the current state of the project: the SQL function surface and
-provider configuration contract are still moving, and this extension has network,
-credential, logging, and model-provider semantics that should settle before a
-DuckDB community extension submission. A custom repository lets early users test
-explicit builds while keeping install instructions honest about trust and binary
-provenance.
+Before submitting the community PR, verify:
 
-Defer the DuckDB community extension flow until:
-
-- the public SQL function names and named options are stable,
-- provider credentials and logging behavior have completed at least one
-  end-to-end user review,
-- macOS and Linux builds are validated against the pinned DuckDB release, and
-- the release process has a signed or otherwise clearly documented binary
-  provenance story.
+- the SQL function names and named options are intentionally stable for a `0.x`
+  preview,
+- README and docs do not claim `INSTALL duckdb_ai FROM community` until the
+  catalog entry exists,
+- macOS arm64/x64, Linux glibc, Linux musl, and Windows builds are green through
+  the extension distribution workflow, and
+- WASM is explicitly excluded for the first preview because this extension links
+  libcurl for provider HTTP calls.
 
 ## Publishing gap
 
-The next publishing step is not to enable the inherited upload script directly.
-First add a release workflow that:
+The next publishing step is the manual community-extension submission. Before
+that submission, run or inspect a distribution workflow that:
 
 - builds the same DuckDB version as CI,
 - runs SQLLogic and mock-provider smoke tests,
-- signs or clearly labels unsigned extension binaries,
-- uploads artifacts to the selected custom repository, and
-- publishes matching install instructions for the artifact URL layout.
+- builds the target platform matrix listed above, and
+- records the explicit WASM exclusion.
 
 ## Stable distribution requirements
 
@@ -61,9 +58,12 @@ install a known binary without guessing provenance:
 - Document a clean install smoke command that loads the published extension and
   runs deterministic local checks such as `ai_provider_protocol('openai')`,
   `ai_models()`, and `ai_request_json(...)`.
-- Keep preview/custom repository instructions separate from any future DuckDB
-  community extension submission instructions.
+- Keep source-build instructions separate from community install instructions
+  until the community catalog entry exists.
 
-The first stable release can still use the custom unsigned repository path if
-that provenance is clearly documented. A DuckDB community extension submission
-is a separate distribution milestone, not a prerequisite for `1.0.0`.
+After the community catalog entry exists, public docs should lead with:
+
+```sql
+INSTALL duckdb_ai FROM community;
+LOAD duckdb_ai;
+```
