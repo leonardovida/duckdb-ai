@@ -4,17 +4,15 @@
 
 # duckdb-ai
 
-duckdb-ai is a DuckDB extension for model-backed analytical workflows inside
-SQL. It adds functions for completions, structured JSON extraction, embeddings,
-natural-language filters, read-only SQL generation, and usage tracking.
+[![CI](https://github.com/leonardovida/duckdb-ai/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/leonardovida/duckdb-ai/actions/workflows/MainDistributionPipeline.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-The extension is intended for local analytics work where data already lives in
-DuckDB. You can enrich table columns with model output, project JSON responses
-into typed DuckDB values, compare text with embeddings, and ask questions over a
-bounded schema prompt without moving the workflow into a separate application.
+Run language models on the data you already have in DuckDB — summarize,
+classify, extract, embed, redact, and generate SQL, all from plain SQL
+functions. No pipeline to a separate application, no data leaving your
+machine unless you choose a hosted provider.
 
 ```sql
--- From a local source build.
 LOAD duckdb_ai;
 
 SELECT ai_summarize(
@@ -24,29 +22,42 @@ SELECT ai_summarize(
 );
 ```
 
-The public API keeps provider credentials out of SQL arguments, supports DuckDB
-`TYPE duckdb_ai` secrets, and validates generated SQL as a single read-only
-DuckDB `SELECT` before returning or executing it.
+One extension covers both ends of the spectrum:
+
+- **Working on your laptop?** Point it at [Ollama](https://ollama.com) or any
+  OpenAI-compatible local server and enrich tables with a free local model —
+  nothing ever leaves your machine.
+- **Running this for a team or company?** Route calls through your own gateway
+  (Azure OpenAI, Databricks, Snowflake Cortex, vLLM, LiteLLM), keep credentials
+  in DuckDB secrets or environment variables, restrict network egress to an
+  allowlist, track per-call tokens and estimated cost in `ai_usage()`, and ship
+  privacy-minimized usage logs to your own collector.
 
 ## What You Can Do
 
 - Summarize, translate, redact, classify, and extract text from SQL queries.
-- Generate valid JSON or typed DuckDB columns from model output.
-- Create embeddings and compare text with cosine similarity.
+- Generate valid JSON, typed DuckDB columns, or per-row `STRUCT` values from
+  model output, validated against a JSON Schema.
+- Create embeddings (batched automatically per chunk), compare text with cosine
+  similarity, and rerank candidates.
 - Ask questions about local tables and generate read-only DuckDB `SELECT`
-  statements.
+  statements — generated SQL is parser-validated before it runs.
 - Route model calls across local Ollama, hosted providers, and
-  OpenAI-compatible gateways.
+  OpenAI-compatible gateways, with per-call, per-session, or secret-based
+  configuration.
 - Store credentials in DuckDB secrets instead of passing API keys through SQL
   function arguments.
-- Inspect local usage events and optionally send privacy-minimized usage logs to
-  your own collector.
+- Control throughput with concurrency caps, request pacing, token-per-minute
+  budgets, retries with backoff, and opt-in response and prompt caching.
+- Inspect local usage events — including failures, retries, cache hits, and
+  estimated cost — and optionally send privacy-minimized usage logs to your own
+  collector.
 
 ## Quick Start
 
-`duckdb_ai` is not published in the DuckDB community extension repository yet.
-Until the manual community submission is accepted, build and load it from this
-source tree:
+`duckdb_ai` is not published in the DuckDB community extension repository yet
+(submission in progress). Until then, build and load it from this source tree
+(requires a C++ toolchain, CMake, and ninja):
 
 ```sh
 GEN=ninja make release
@@ -412,9 +423,10 @@ instead of a bare `NULL`.
 
 ## Usage And Cost Visibility
 
-Successful completions, embeddings, and local `ai_schema_prompt` calls are kept
-in a local in-process ring buffer with function name, query id, provider,
-latency, token, cache, status, error, and cost metadata:
+Completions, embeddings, and local `ai_schema_prompt` calls — including failed
+provider calls — are kept in a local in-process ring buffer with function name,
+query id, provider, latency, token, cache, retry, status, error, and cost
+metadata:
 
 ```sql
 SELECT * FROM ai_usage();
@@ -470,13 +482,20 @@ calls. The token limit uses the local `ai_count_tokens` estimate plus
 Set `max_tokens` for large jobs so the runtime can pace requests against your
 provider's current tokens-per-minute limit.
 
-Response caching is opt-in and in-memory:
+Response caching is opt-in and in-memory. Identical in-flight requests are
+coalesced into one provider call, and cached entries can expire with a TTL:
 
 ```sql
 SET duckdb_ai_cache = true;
+SET duckdb_ai_cache_ttl_seconds = 3600;
 SELECT ai_complete('Summarize this repeated prompt.');
 SELECT * FROM ai_clear_cache();
 ```
+
+Provider-side prompt caching is separate and reduces cost on repeated static
+prefixes (system prompts, schemas). Enable it with `prompt_cache := true` or
+`SET duckdb_ai_prompt_cache = true`; the extension sends the matching cache
+hints for OpenAI and Anthropic and reports cached token counts in `ai_usage()`.
 
 Use `ai_recommended_batch_size` with a small provider-limit table to pick a
 starting batch size before running a large enrichment:
