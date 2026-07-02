@@ -705,6 +705,7 @@ not from direct API key arguments.
 | `max_tokens` | `BIGINT` | Completion, SQL assistant, aggregate | Maximum provider output tokens. Must be greater than 0. |
 | `base_url` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Provider or gateway base URL override. |
 | `timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP timeout. Must be greater than 0. |
+| `connect_timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP connection timeout from 1 to 31536000 seconds. It must be less than or equal to the total timeout when a provider call runs. |
 | `retry_count` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Retry count from 0 to 10 for curl failures and retryable HTTP status codes. Retries honor `Retry-After` on 429/5xx responses when present. |
 | `retry_backoff_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Base retry backoff from 0 to 60000 milliseconds; exponential jitter is added per retry. |
 | `max_concurrent_requests` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database request concurrency cap from 0 to 64. |
@@ -712,6 +713,7 @@ not from direct API key arguments.
 | `token_limit_per_minute` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database estimated token cap per rolling minute. `0` disables the token cap. |
 | `cache` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables the current database instance's in-memory response cache for successful provider responses. |
 | `cache_ttl_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Optional response-cache expiration from 0 to 31536000 seconds. `0` means entries do not expire by age. The `DUCKDB_AI_CACHE_TTL_SECONDS` environment variable sets the default. |
+| `cache_max_entries` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Maximum in-memory response-cache entries from 0 to 1000000. `0` disables response-cache storage. The `DUCKDB_AI_CACHE_MAX_ENTRIES` environment variable sets the default. |
 | `prompt_cache` | `BOOLEAN` | Completion, task wrappers, and SQL assistant | Emits provider-side prompt-cache controls where supported. OpenAI requests include a stable `prompt_cache_key`; Anthropic requests attach ephemeral cache control to the system prompt. The `DUCKDB_AI_PROMPT_CACHE` environment variable enables this by default. |
 | `allowed_hosts` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Comma-separated provider/logging host allowlist. Entries may be hostnames, `host:port`, full URLs, `*.example.com`, or `*`. |
 | `on_error` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Error handling mode: `fail`, `null`, or `capture`. `capture` is used by `ai_try_complete`; scalar/table functions that cannot return an error field use `NULL` behavior. |

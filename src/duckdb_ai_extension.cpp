@@ -524,7 +524,8 @@ bool TryGetOptionType(const std::string &name, LogicalType &type) {
 		return true;
 	}
 	if (name == "max_tokens" || name == "retry_count" || name == "retry_backoff_ms" ||
-	    name == "max_concurrent_requests" || name == "min_request_interval_ms" || name == "token_limit_per_minute") {
+	    name == "max_concurrent_requests" || name == "min_request_interval_ms" || name == "token_limit_per_minute" ||
+	    name == "connect_timeout_seconds" || name == "cache_max_entries") {
 		type = LogicalType::BIGINT;
 		return true;
 	}
@@ -547,7 +548,7 @@ LogicalType OptionType(const std::string &name) {
 	throw BinderException("Unsupported AI option \"%s\". Supported options: model, provider, temperature, "
 	                      "system_prompt, max_tokens, base_url, timeout_seconds, retry_count, retry_backoff_ms, "
 	                      "max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, cache, "
-	                      "cache_ttl_seconds, prompt_cache, "
+	                      "cache_ttl_seconds, cache_max_entries, prompt_cache, connect_timeout_seconds, "
 	                      "allowed_hosts, "
 	                      "input_token_price_per_million, output_token_price_per_million, use_builtin_model_prices, "
 	                      "fail_on_error, on_error, profile, secret, response_format, response_schema, json_schema, "
@@ -725,6 +726,14 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 		options.has_cache_ttl_seconds = true;
 		return true;
 	}
+	if (name == "cache_max_entries") {
+		options.response_cache_max_entries = OptionBigIntValue(value, function_name, name);
+		if (options.response_cache_max_entries < 0 || options.response_cache_max_entries > 1000000) {
+			throw BinderException("%s option \"cache_max_entries\" must be between 0 and 1000000", function_name);
+		}
+		options.has_response_cache_max_entries = true;
+		return true;
+	}
 	if (name == "prompt_cache") {
 		options.prompt_cache = OptionBoolValue(value, function_name, name);
 		options.has_prompt_cache = true;
@@ -787,6 +796,15 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 			throw BinderException("%s option \"timeout_seconds\" must be greater than 0", function_name);
 		}
 		options.has_timeout_seconds = true;
+		return true;
+	}
+	if (name == "connect_timeout_seconds") {
+		options.connect_timeout_seconds = OptionBigIntValue(value, function_name, name);
+		if (options.connect_timeout_seconds <= 0 || options.connect_timeout_seconds > 31536000) {
+			throw BinderException("%s option \"connect_timeout_seconds\" must be between 1 and 31536000",
+			                      function_name);
+		}
+		options.has_connect_timeout_seconds = true;
 		return true;
 	}
 	if (name == "fail_on_error") {
@@ -1011,7 +1029,11 @@ void ApplySettingsWithPrefix(ClientContext &context, const std::string &prefix, 
 	ApplyBoolSetting(context, prefix + "_cache", options.cache, options.has_cache);
 	ApplyOptionalBigIntRangeSetting(context, prefix + "_cache_ttl_seconds", options.cache_ttl_seconds,
 	                                options.has_cache_ttl_seconds, 0, 31536000);
+	ApplyOptionalBigIntRangeSetting(context, prefix + "_cache_max_entries", options.response_cache_max_entries,
+	                                options.has_response_cache_max_entries, 0, 1000000);
 	ApplyBoolSetting(context, prefix + "_prompt_cache", options.prompt_cache, options.has_prompt_cache);
+	ApplyOptionalBigIntRangeSetting(context, prefix + "_connect_timeout_seconds", options.connect_timeout_seconds,
+	                                options.has_connect_timeout_seconds, 1, 31536000);
 	ApplyTimeoutSetting(context, prefix + "_timeout_seconds", options);
 }
 
@@ -4962,6 +4984,10 @@ void RegisterSettingsForPrefix(DBConfig &config, const std::string &prefix, cons
 	           "Maximum response-cache entry age in seconds between 0 and 31536000; 0 disables age expiry, -1 uses "
 	           "default",
 	           LogicalType::BIGINT, Value::BIGINT(-1));
+	AddSetting(config, prefix + "_cache_max_entries",
+	           "Maximum response-cache entries between 0 and 1000000; 0 disables response-cache storage, -1 uses "
+	           "default",
+	           LogicalType::BIGINT, Value::BIGINT(-1));
 	AddSetting(config, prefix + "_prompt_cache", "Enable provider-side prompt caching hints when supported",
 	           LogicalType::BOOLEAN, Value(LogicalType::BOOLEAN));
 	AddSetting(config, prefix + "_response_format", "Default AI response format: text, json_object, or json_schema",
@@ -4970,6 +4996,9 @@ void RegisterSettingsForPrefix(DBConfig &config, const std::string &prefix, cons
 	           LogicalType::VARCHAR, Value(""));
 	AddSetting(config, prefix + "_timeout_seconds", "AI provider HTTP timeout in seconds; 0 uses the extension default",
 	           LogicalType::BIGINT, Value::BIGINT(0));
+	AddSetting(config, prefix + "_connect_timeout_seconds",
+	           "AI provider connection timeout in seconds between 1 and 31536000; -1 uses default", LogicalType::BIGINT,
+	           Value::BIGINT(-1));
 	AddSetting(config, prefix + "_retry_count", "AI provider retry count between 0 and 10; -1 uses default",
 	           LogicalType::BIGINT, Value::BIGINT(-1));
 	AddSetting(config, prefix + "_retry_backoff_ms",
@@ -5177,8 +5206,10 @@ void AddCompletionNamedParameters(TableFunction &function, bool include_response
 	                                           "token_limit_per_minute",
 	                                           "cache",
 	                                           "cache_ttl_seconds",
+	                                           "cache_max_entries",
 	                                           "prompt_cache",
 	                                           "allowed_hosts",
+	                                           "connect_timeout_seconds",
 	                                           "input_token_price_per_million",
 	                                           "output_token_price_per_million",
 	                                           "use_builtin_model_prices",

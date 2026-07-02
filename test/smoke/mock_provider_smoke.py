@@ -445,6 +445,8 @@ def run_duckdb_cache_and_allowlist(duckdb_path: Path, base_url: str) -> str:
         SET duckdb_ai_base_url = '{base_url}';
         SET duckdb_ai_allowed_hosts = '{base_url}';
         SET duckdb_ai_timeout_seconds = 5;
+        SET duckdb_ai_connect_timeout_seconds = 1;
+        SET duckdb_ai_cache_max_entries = 1;
         CREATE OR REPLACE SECRET smoke_cache_duckdb_ai (
             TYPE duckdb_ai,
             API_KEY 'test-key',
@@ -458,6 +460,7 @@ def run_duckdb_cache_and_allowlist(duckdb_path: Path, base_url: str) -> str:
             FROM range(16)
         )
         WHERE completion = 'mock dogpile completion';
+        SELECT ai_complete('cache smoke', cache := true) AS evicted_completion;
         SELECT count(*) AS usage_events FROM ai_usage();
     """
     env = os.environ.copy()
@@ -556,23 +559,24 @@ def assert_cache_and_allowlist_result(output: str):
     required = [
         "first_completion",
         "second_completion",
+        "evicted_completion",
         "mock completion",
         "dogpile_cached_rows",
         "16",
         "usage_events",
-        "18",
+        "19",
     ]
     missing = [value for value in required if value not in output]
     if missing:
         raise AssertionError(f"cache output missing {missing}\n{output}")
-    if len(MockProviderHandler.completion_requests) != 2:
+    if len(MockProviderHandler.completion_requests) != 3:
         raise AssertionError(
-            f"expected 2 cached completion requests, got {len(MockProviderHandler.completion_requests)}"
+            f"expected 3 cached completion requests, got {len(MockProviderHandler.completion_requests)}"
         )
-    if len(MockProviderHandler.authorization_headers) != 2:
-        raise AssertionError(f"expected 2 cached auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if len(MockProviderHandler.authorization_headers) != 3:
+        raise AssertionError(f"expected 3 cached auth headers, got {len(MockProviderHandler.authorization_headers)}")
     prompts = [request["messages"][-1]["content"] for request in MockProviderHandler.completion_requests]
-    if prompts != ["cache smoke", "cache dogpile"]:
+    if prompts != ["cache smoke", "cache dogpile", "cache smoke"]:
         raise AssertionError(f"unexpected cache prompts: {prompts}")
 
 

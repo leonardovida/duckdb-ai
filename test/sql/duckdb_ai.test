@@ -226,6 +226,11 @@ SELECT contains(ai_completion_request_json('hello', provider := 'openai', model 
 ----
 true
 
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test', cache_max_entries := 1, connect_timeout_seconds := 1), '"model":"gpt-test"');
+----
+true
+
 statement ok
 SET duckdb_ai_cache = true;
 
@@ -564,6 +569,21 @@ SELECT ai_completion_request_json('hello', provider := 'openai', cache_ttl_secon
 Binder Error: AI option "cache_ttl_seconds" must be between 0 and 31536000
 
 statement error
+SELECT ai_completion_request_json('hello', provider := 'openai', cache_max_entries := -1);
+----
+Binder Error: AI option "cache_max_entries" must be between 0 and 1000000
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai', cache_max_entries := 1000001);
+----
+Binder Error: AI option "cache_max_entries" must be between 0 and 1000000
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai', connect_timeout_seconds := 0);
+----
+Binder Error: AI option "connect_timeout_seconds" must be between 1 and 31536000
+
+statement error
 SELECT ai_completion_request_json('hello', provider := 'openai', input_token_price_per_million := -0.1);
 ----
 Binder Error: AI option "input_token_price_per_million" must be greater than or equal to 0
@@ -605,6 +625,28 @@ Binder Error: Setting duckdb_ai_retry_count must be between 0 and 10
 
 statement ok
 RESET duckdb_ai_retry_count;
+
+statement ok
+SET duckdb_ai_cache_max_entries = 1000001;
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai');
+----
+Binder Error: Setting duckdb_ai_cache_max_entries must be between 0 and 1000000, or -1 to disable
+
+statement ok
+RESET duckdb_ai_cache_max_entries;
+
+statement ok
+SET duckdb_ai_connect_timeout_seconds = 0;
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai');
+----
+Binder Error: Setting duckdb_ai_connect_timeout_seconds must be between 1 and 31536000, or -1 to disable
+
+statement ok
+RESET duckdb_ai_connect_timeout_seconds;
 
 statement ok
 SET duckdb_ai_max_concurrent_requests = 65;

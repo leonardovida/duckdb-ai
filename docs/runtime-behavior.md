@@ -90,7 +90,8 @@ connection cache. This allows libcurl to reuse connections across provider
 worker threads where the provider and libcurl build support it.
 
 Provider calls use the configured `timeout_seconds` for the total request. The
-connect timeout defaults to the smaller of 10 seconds and the total timeout; set
+connect timeout defaults to the smaller of 10 seconds and the total timeout. Set
+`connect_timeout_seconds := ...`, `duckdb_ai_connect_timeout_seconds`, or
 `DUCKDB_AI_CONNECT_TIMEOUT_SECONDS` to override it for provider requests.
 
 Provider redirects are not followed. This avoids forwarding authorization or
@@ -120,8 +121,9 @@ Cached responses still record usage events, but their elapsed time is reported
 as `0` because no provider HTTP request was made.
 
 The maximum number of cached entries defaults to `1024`. Set
-`DUCKDB_AI_CACHE_MAX_ENTRIES=0` to disable storage, or use a positive integer to
-change the bound.
+`cache_max_entries := ...`, `duckdb_ai_cache_max_entries`, or
+`DUCKDB_AI_CACHE_MAX_ENTRIES` to change the bound. Use `0` to disable
+response-cache storage.
 
 `ai_query_data()` also keeps a small in-memory generated-SQL cache for successful
 binds. `ai_clear_cache()` clears both caches.

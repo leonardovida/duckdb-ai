@@ -463,6 +463,7 @@ errors:
 ```sql
 SELECT ai_complete(
     'Summarize this.',
+    connect_timeout_seconds := 5,
     retry_count := 2,
     retry_backoff_ms := 1000
 );
@@ -488,6 +489,7 @@ coalesced into one provider call, and cached entries can expire with a TTL:
 ```sql
 SET duckdb_ai_cache = true;
 SET duckdb_ai_cache_ttl_seconds = 3600;
+SET duckdb_ai_cache_max_entries = 1024;
 SELECT ai_complete('Summarize this repeated prompt.');
 SELECT * FROM ai_clear_cache();
 ```
