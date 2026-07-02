@@ -7,6 +7,14 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.3.1 - 2026-07-02
+
+### Fixed
+
+- Defined `NOMINMAX` for Windows builds so the `windows_amd64` MSVC build
+  compiles: `windows.h` (included via curl) defines `min`/`max` macros that
+  broke `std::min`/`std::max` and `std::numeric_limits<T>::max()`.
+
 ## 0.3.0 - 2026-07-02
 
 ### SQL API changes
