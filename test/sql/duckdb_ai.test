@@ -9,7 +9,7 @@ SELECT ai_completion_request_json('hello');
 Catalog Error: Scalar Function with name ai_completion_request_json does not exist!
 
 # Require statement will ensure this test is run with this extension loaded
-require duckdb_ai
+require ai
 
 # Provider metadata is deterministic and does not perform network calls.
 query I

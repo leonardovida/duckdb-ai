@@ -9,7 +9,7 @@ metadata, timestamps, free-text ticket fields, numeric account context, and an
 internal note column with realistic content for redaction tests.
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE TABLE support_tickets AS
 SELECT *

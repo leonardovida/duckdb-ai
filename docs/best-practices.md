@@ -325,7 +325,7 @@ or an `s3://...` target when failures should live outside the DuckDB database.
 
 ## Export provider-native batch requests for offline jobs
 
-`duckdb_ai` runs provider calls synchronously inside the DuckDB query. For
+The `ai` extension runs provider calls synchronously inside the DuckDB query. For
 overnight jobs that should use provider-native Batch APIs, materialize request
 bodies with the request-preview functions, then submit and poll them with your
 job runner or provider SDK:

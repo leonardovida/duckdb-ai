@@ -1,6 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "duckdb_ai_extension.hpp"
+#include "ai_extension.hpp"
 #include "duckdb_ai_provider.hpp"
 
 #include "duckdb.hpp"
@@ -5407,16 +5407,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    TableFunction("ai_model_prices", {}, AiModelPricesFunction, AiModelPricesBind, AiModelPricesInit));
 }
 
-void DuckdbAiExtension::Load(ExtensionLoader &loader) {
+void AiExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
-std::string DuckdbAiExtension::Name() {
-	return "duckdb_ai";
+std::string AiExtension::Name() {
+	return "ai";
 }
 
-std::string DuckdbAiExtension::Version() const {
-#ifdef EXT_VERSION_DUCKDB_AI
-	return EXT_VERSION_DUCKDB_AI;
+std::string AiExtension::Version() const {
+#ifdef EXT_VERSION_AI
+	return EXT_VERSION_AI;
 #else
 	return "";
 #endif
@@ -5426,7 +5426,7 @@ std::string DuckdbAiExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(duckdb_ai, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(ai, loader) {
 	duckdb::LoadInternal(loader);
 }
 }

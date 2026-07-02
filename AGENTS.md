@@ -1,6 +1,6 @@
 # Repository Instructions
 
-This repository contains the `duckdb_ai` DuckDB extension. Keep changes scoped,
+This repository contains the `ai` DuckDB extension (repository name duckdb-ai). Keep changes scoped,
 source-backed, and validated against the local DuckDB extension tooling.
 
 ## Project Layout

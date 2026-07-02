@@ -4,8 +4,8 @@
 
 namespace duckdb {
 
-//! DuckDB extension entry point for registering the duckdb_ai SQL surface.
-class DuckdbAiExtension : public Extension {
+//! DuckDB extension entry point for registering the ai extension SQL surface.
+class AiExtension : public Extension {
 public:
 	//! Register settings, secrets, scalar functions, aggregate functions, and table functions.
 	void Load(ExtensionLoader &db) override;

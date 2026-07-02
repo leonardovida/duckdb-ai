@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # SQL function reference
 
-This page documents the public SQL surface registered by the `duckdb_ai`
+This page documents the public SQL surface registered by the `ai`
 extension. The layout follows the DuckDB function reference style: a compact
 overview table first, then each function with description, example, and result
 shape.
