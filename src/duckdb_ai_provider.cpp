@@ -14,6 +14,7 @@
 #include <ctime>
 #include <curl/curl.h>
 #include <deque>
+#include <list>
 #include <exception>
 #include <functional>
 #include <initializer_list>
@@ -55,6 +56,8 @@ struct HttpResponse {
 struct CachedHttpResponse {
 	HttpResponse response;
 	std::chrono::steady_clock::time_point created_at;
+	//! Position in ProviderRuntimeState::response_cache_order for O(1) LRU updates.
+	std::list<std::string>::iterator order_entry;
 };
 
 struct PendingHttpResponse {
@@ -78,6 +81,9 @@ void StopUsageLogWorker(ProviderRuntimeState &state);
 
 const size_t MAX_USAGE_EVENTS = 1024;
 const size_t MAX_USAGE_LOG_QUEUE = 4096;
+//! Maximum inputs per batched embedding request. Keeps request payloads bounded and stays well
+//! below provider per-request input limits (OpenAI allows up to 2048 inputs).
+const size_t MAX_EMBED_BATCH_INPUTS = 512;
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr int64_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr int64_t DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE = 512;
@@ -113,7 +119,8 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 
 	std::mutex response_cache_mutex;
 	std::unordered_map<std::string, CachedHttpResponse> response_cache;
-	std::deque<std::string> response_cache_order;
+	//! Least-recently-used cache keys first; entries hold their own iterator for O(1) reordering.
+	std::list<std::string> response_cache_order;
 	std::unordered_map<std::string, std::shared_ptr<PendingHttpResponse>> response_cache_pending;
 
 	std::mutex usage_log_mutex;
@@ -368,12 +375,26 @@ void EnsureCurlGlobalInit() {
 	std::call_once(curl_global_init_once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
 }
 
-void CurlShareLock(CURL *, curl_lock_data, curl_lock_access, void *userptr) {
-	reinterpret_cast<std::mutex *>(userptr)->lock();
+struct CurlShareLocks {
+	// libcurl may lock different data classes independently (and could nest them), so use one
+	// mutex per curl_lock_data value instead of a single non-recursive mutex for everything.
+	std::mutex mutexes[CURL_LOCK_DATA_LAST];
+
+	std::mutex &MutexFor(curl_lock_data data) {
+		auto index = static_cast<size_t>(data);
+		if (index >= CURL_LOCK_DATA_LAST) {
+			index = 0;
+		}
+		return mutexes[index];
+	}
+};
+
+void CurlShareLock(CURL *, curl_lock_data data, curl_lock_access, void *userptr) {
+	reinterpret_cast<CurlShareLocks *>(userptr)->MutexFor(data).lock();
 }
 
-void CurlShareUnlock(CURL *, curl_lock_data, void *userptr) {
-	reinterpret_cast<std::mutex *>(userptr)->unlock();
+void CurlShareUnlock(CURL *, curl_lock_data data, void *userptr) {
+	reinterpret_cast<CurlShareLocks *>(userptr)->MutexFor(data).unlock();
 }
 
 struct CurlShareHandle {
@@ -385,8 +406,10 @@ struct CurlShareHandle {
 		}
 		if (curl_share_setopt(handle, CURLSHOPT_LOCKFUNC, CurlShareLock) != CURLSHE_OK ||
 		    curl_share_setopt(handle, CURLSHOPT_UNLOCKFUNC, CurlShareUnlock) != CURLSHE_OK ||
-		    curl_share_setopt(handle, CURLSHOPT_USERDATA, &mutex) != CURLSHE_OK ||
-		    curl_share_setopt(handle, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT) != CURLSHE_OK) {
+		    curl_share_setopt(handle, CURLSHOPT_USERDATA, &locks) != CURLSHE_OK ||
+		    curl_share_setopt(handle, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT) != CURLSHE_OK ||
+		    curl_share_setopt(handle, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS) != CURLSHE_OK ||
+		    curl_share_setopt(handle, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION) != CURLSHE_OK) {
 			curl_share_cleanup(handle);
 			handle = nullptr;
 			throw IOException("Could not configure libcurl connection sharing for AI requests");
@@ -400,7 +423,7 @@ struct CurlShareHandle {
 	}
 
 	CURLSH *handle;
-	std::mutex mutex;
+	CurlShareLocks locks;
 };
 
 CURLSH *SharedCurlHandle() {
@@ -793,11 +816,19 @@ std::string ResponseCacheKey(const std::string &operation, const ProviderConfig 
 	       api_key_hash + "\n" + payload;
 }
 
-void RemoveResponseCacheOrderEntry(ProviderRuntimeState &state, const std::string &cache_key) {
-	auto order_entry = std::find(state.response_cache_order.begin(), state.response_cache_order.end(), cache_key);
-	if (order_entry != state.response_cache_order.end()) {
-		state.response_cache_order.erase(order_entry);
+void TouchResponseCacheEntry(ProviderRuntimeState &state, CachedHttpResponse &entry, const std::string &cache_key) {
+	state.response_cache_order.erase(entry.order_entry);
+	entry.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
+}
+
+void RemoveCachedResponse(ProviderRuntimeState &state, const std::string &cache_key) {
+	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	auto entry = state.response_cache.find(cache_key);
+	if (entry == state.response_cache.end()) {
+		return;
 	}
+	state.response_cache_order.erase(entry->second.order_entry);
+	state.response_cache.erase(entry);
 }
 
 bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const CompletionOptions &options,
@@ -808,16 +839,15 @@ bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 		return false;
 	}
 	if (ResponseCacheEntryExpired(entry->second, options)) {
+		state.response_cache_order.erase(entry->second.order_entry);
 		state.response_cache.erase(entry);
-		RemoveResponseCacheOrderEntry(state, cache_key);
 		return false;
 	}
 	response = entry->second.response;
 	response.elapsed_ms = 0;
 	response.retries = 0;
 	response.cache_hit = true;
-	RemoveResponseCacheOrderEntry(state, cache_key);
-	state.response_cache_order.push_back(cache_key);
+	TouchResponseCacheEntry(state, entry->second, cache_key);
 	return true;
 }
 
@@ -828,11 +858,20 @@ void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_k
 		return;
 	}
 	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
-	RemoveResponseCacheOrderEntry(state, cache_key);
-	auto stored_response = response;
-	stored_response.cache_hit = false;
-	state.response_cache_order.push_back(cache_key);
-	state.response_cache[cache_key] = {std::move(stored_response), std::chrono::steady_clock::now()};
+	auto entry = state.response_cache.find(cache_key);
+	if (entry != state.response_cache.end()) {
+		entry->second.response = response;
+		entry->second.response.cache_hit = false;
+		entry->second.created_at = std::chrono::steady_clock::now();
+		TouchResponseCacheEntry(state, entry->second, cache_key);
+		return;
+	}
+	CachedHttpResponse cached;
+	cached.response = response;
+	cached.response.cache_hit = false;
+	cached.created_at = std::chrono::steady_clock::now();
+	cached.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
+	state.response_cache.emplace(cache_key, std::move(cached));
 	while (state.response_cache.size() > max_entries && !state.response_cache_order.empty()) {
 		auto oldest = std::move(state.response_cache_order.front());
 		state.response_cache_order.pop_front();
@@ -854,14 +893,27 @@ std::shared_ptr<PendingHttpResponse> BeginPendingCachedResponse(ProviderRuntimeS
 	return pending;
 }
 
+bool ClientInterrupted(ClientContext *context);
+
 HttpResponse WaitForPendingCachedResponse(ProviderRuntimeState &state, const std::string &cache_key,
-                                          const std::shared_ptr<PendingHttpResponse> &pending) {
+                                          const std::shared_ptr<PendingHttpResponse> &pending,
+                                          const CompletionOptions &options) {
 	std::unique_lock<std::mutex> lock(state.response_cache_mutex);
-	pending->cv.wait(lock, [&]() { return pending->done; });
+	while (!pending->cv.wait_for(lock, std::chrono::milliseconds(100), [&]() { return pending->done; })) {
+		if (ClientInterrupted(options.client_context)) {
+			throw InterruptException();
+		}
+	}
 	if (!pending->error.empty()) {
 		throw IOException("%s", pending->error);
 	}
-	return pending->response;
+	// Waiters share the owner's provider response, so report them as cache hits to avoid
+	// double-counting tokens and cost in usage events.
+	auto response = pending->response;
+	response.elapsed_ms = 0;
+	response.retries = 0;
+	response.cache_hit = true;
+	return response;
 }
 
 void FinishPendingCachedResponse(ProviderRuntimeState &state, const std::string &cache_key,
@@ -2230,7 +2282,10 @@ void UsageLogWorkerLoop(ProviderRuntimeState *state) {
 			std::unique_lock<std::mutex> lock(state->usage_log_mutex);
 			state->usage_log_cv.wait(lock,
 			                         [&]() { return state->usage_log_shutdown || !state->usage_log_queue.empty(); });
-			if (state->usage_log_queue.empty() && state->usage_log_shutdown) {
+			if (state->usage_log_shutdown) {
+				// Non-strict usage logs are best-effort. Draining the queue here would block database
+				// shutdown on up to MAX_USAGE_LOG_QUEUE network posts, so drop what is left instead.
+				state->usage_log_queue.clear();
 				return;
 			}
 			job = std::move(state->usage_log_queue.front());
@@ -3017,12 +3072,10 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config) {
 	return headers;
 }
 
-std::string ExtractCompletionText(const ProviderConfig &config, const std::string &body) {
+std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::yyjson_val *root,
+                                  const std::string &body) {
 	std::string value;
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (doc) {
-		auto root = duckdb_yyjson::yyjson_doc_get_root(doc.get());
+	if (root) {
 		if (config.protocol == "privacy_filter") {
 			if (YyjsonDirectString(root, "redacted_text", value) || YyjsonDirectString(root, "masked_text", value) ||
 			    YyjsonDirectString(root, "text", value) || YyjsonDirectString(root, "output", value)) {
@@ -3059,25 +3112,32 @@ std::string ExtractCompletionText(const ProviderConfig &config, const std::strin
 				throw IOException("AI provider response contained a refusal instead of completion text: %s", value);
 			}
 		}
-	}
-	if (config.protocol == "privacy_filter") {
-		if (FindJsonStringValue(body, "redacted_text", value) || FindJsonStringValue(body, "masked_text", value) ||
-		    FindJsonStringValue(body, "text", value) || FindJsonStringValue(body, "output", value)) {
+		// Fallback for gateways with non-standard response shapes: recursive search over the
+		// already-parsed document.
+		if (config.protocol == "privacy_filter") {
+			if (FindYyjsonStringField(root, "redacted_text", value) ||
+			    FindYyjsonStringField(root, "masked_text", value) || FindYyjsonStringField(root, "text", value) ||
+			    FindYyjsonStringField(root, "output", value)) {
+				return value;
+			}
+		} else if (config.protocol == "anthropic_messages") {
+			if (FindYyjsonStringField(root, "text", value)) {
+				return value;
+			}
+		} else if (FindYyjsonStringField(root, "content", value)) {
 			return value;
 		}
-	} else if (config.protocol == "anthropic_messages") {
-		if (FindJsonStringValue(body, "text", value)) {
-			return value;
-		}
-	} else if (FindJsonStringValue(body, "content", value)) {
-		return value;
 	}
 	throw IOException("AI provider response did not contain a supported completion text field: %s", body);
 }
 
 CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpResponse &response) {
+	std::string error;
+	auto doc = ReadYyjsonDocument(response.body, error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+
 	CompletionResult result;
-	result.text = ExtractCompletionText(config, response.body);
+	result.text = ExtractCompletionText(config, root, response.body);
 	result.raw_response = response.body;
 	result.http_status = response.status;
 	result.elapsed_ms = response.elapsed_ms;
@@ -3089,9 +3149,6 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.cached_prompt_tokens = -1;
 	result.cache_creation_prompt_tokens = -1;
 
-	std::string error;
-	auto doc = ReadYyjsonDocument(response.body, error);
-	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
 	if (config.protocol == "anthropic_messages") {
 		auto usage = YyjsonObjectGet(root, "usage");
 		result.prompt_tokens = YyjsonIntegerOrMissing(usage, "input_tokens");
@@ -3586,6 +3643,108 @@ void MaybePostEmbeddingLog(const ProviderConfig &config, const std::string &inpu
 	SubmitUsageLog(options, log_endpoint, std::move(payload), "AI embedding log request failed");
 }
 
+//! Serialize one embedding into a minimal single-input response body so batched results can be
+//! stored in the response cache and replayed later through ParseEmbeddingResult.
+std::string SerializeEmbeddingCacheBody(const ProviderConfig &config, const EmbeddingResult &result) {
+	std::string body = config.protocol == "ollama_embed" ? "{\"embeddings\":[[" : "{\"data\":[{\"embedding\":[";
+	for (idx_t i = 0; i < result.values.size(); i++) {
+		if (i > 0) {
+			body += ",";
+		}
+		body += JsonDouble(result.values[i]);
+	}
+	body += config.protocol == "ollama_embed" ? "]]" : "]}]";
+	if (result.prompt_tokens >= 0) {
+		body += ",\"prompt_tokens\":" + std::to_string(result.prompt_tokens);
+	}
+	if (result.total_tokens >= 0) {
+		body += ",\"total_tokens\":" + std::to_string(result.total_tokens);
+	}
+	body += "}";
+	return body;
+}
+
+//! Fetch a provider response, going through the response cache and in-flight request coalescing
+//! when caching is enabled. Sets cache_key_out whenever the response cache is consulted so
+//! callers can evict entries that later fail response parsing.
+HttpResponse FetchProviderResponse(const std::string &operation, const ProviderConfig &config,
+                                   const std::string &endpoint, const std::string &payload,
+                                   const CompletionOptions &options, int64_t estimated_tokens,
+                                   std::string &cache_key_out) {
+	if (!ResponseCacheEnabled(options)) {
+		return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, estimated_tokens);
+	}
+	auto &runtime_state = RuntimeState(options);
+	auto cache_key = ResponseCacheKey(operation, config, endpoint, payload);
+	cache_key_out = cache_key;
+	HttpResponse cached_response;
+	if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
+		return cached_response;
+	}
+	bool owns_request = false;
+	auto pending = BeginPendingCachedResponse(runtime_state, cache_key, owns_request);
+	if (!owns_request) {
+		return WaitForPendingCachedResponse(runtime_state, cache_key, pending, options);
+	}
+	try {
+		auto fresh_response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, estimated_tokens);
+		if (fresh_response.status >= 200 && fresh_response.status < 300) {
+			StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
+		}
+		FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
+		return fresh_response;
+	} catch (std::exception &ex) {
+		FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
+		throw;
+	} catch (...) {
+		FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
+		throw;
+	}
+}
+
+//! Issue one batched embedding request and record per-input usage events.
+std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, const std::string &endpoint,
+                                               const std::vector<std::string> &inputs,
+                                               const CompletionOptions &options) {
+	auto payload = EmbeddingPayload(config, inputs);
+	auto total_tokens = int64_t(0);
+	for (auto &input : inputs) {
+		total_tokens += EstimateTokenCount(input);
+	}
+	HttpResponse response;
+	try {
+		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, total_tokens);
+	} catch (InterruptException &) {
+		throw;
+	} catch (std::exception &ex) {
+		for (auto &input : inputs) {
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+		}
+		throw;
+	}
+	if (response.status < 200 || response.status >= 300) {
+		auto error = ProviderErrorDetail(config, response);
+		for (auto &input : inputs) {
+			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+		}
+		throw IOException("%s", error);
+	}
+	std::vector<EmbeddingResult> results;
+	try {
+		results = ParseEmbeddingResults(config, response, inputs.size());
+	} catch (std::exception &ex) {
+		for (auto &input : inputs) {
+			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
+		}
+		throw;
+	}
+	for (idx_t i = 0; i < results.size(); i++) {
+		RecordEmbeddingUsageEvent(config, inputs[i], results[i], options);
+		MaybePostEmbeddingLog(config, inputs[i], results[i], options);
+	}
+	return results;
+}
+
 } // namespace
 
 std::string NormalizeProviderName(const std::string &provider) {
@@ -3650,39 +3809,13 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	auto payload = RequestPayload(config, prompt, options);
 	EnforceAllowedHost(endpoint, options);
 	HttpResponse response;
+	std::string cache_key;
 	try {
-		response = [&]() {
-			if (ResponseCacheEnabled(options)) {
-				auto &runtime_state = RuntimeState(options);
-				auto cache_key = ResponseCacheKey("completion", config, endpoint, payload);
-				HttpResponse cached_response;
-				if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
-					return cached_response;
-				}
-				bool owns_request = false;
-				auto pending = BeginPendingCachedResponse(runtime_state, cache_key, owns_request);
-				if (!owns_request) {
-					return WaitForPendingCachedResponse(runtime_state, cache_key, pending);
-				}
-				try {
-					auto fresh_response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options,
-					                                       EstimatedCompletionTokens(prompt, options));
-					if (fresh_response.status >= 200 && fresh_response.status < 300) {
-						StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
-					}
-					FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
-					return fresh_response;
-				} catch (std::exception &ex) {
-					FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
-					throw;
-				} catch (...) {
-					FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
-					throw;
-				}
-			}
-			return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options,
-			                        EstimatedCompletionTokens(prompt, options));
-		}();
+		response = FetchProviderResponse("completion", config, endpoint, payload, options,
+		                                 EstimatedCompletionTokens(prompt, options), cache_key);
+	} catch (InterruptException &) {
+		// Query cancellation is not a provider failure; keep it out of usage error events.
+		throw;
 	} catch (std::exception &ex) {
 		RecordFailedUsageEvent(config, prompt, options, 0, ex.what(), 0);
 		throw;
@@ -3696,6 +3829,11 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	try {
 		result = ParseCompletionResult(config, response);
 	} catch (std::exception &ex) {
+		if (!cache_key.empty()) {
+			// Do not keep responses that cannot be parsed (for example truncated output); a
+			// poisoned entry would fail every later cache hit until ai_clear_cache().
+			RemoveCachedResponse(RuntimeState(options), cache_key);
+		}
 		RecordFailedUsageEvent(config, prompt, options, response.status, ex.what(), response.retries);
 		throw;
 	}
@@ -3717,38 +3855,12 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	auto payload = RequestPayload(config, text, options);
 	EnforceAllowedHost(endpoint, options);
 	HttpResponse response;
+	std::string cache_key;
 	try {
-		response = [&]() {
-			if (ResponseCacheEnabled(options)) {
-				auto &runtime_state = RuntimeState(options);
-				auto cache_key = ResponseCacheKey("redaction", config, endpoint, payload);
-				HttpResponse cached_response;
-				if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
-					return cached_response;
-				}
-				bool owns_request = false;
-				auto pending = BeginPendingCachedResponse(runtime_state, cache_key, owns_request);
-				if (!owns_request) {
-					return WaitForPendingCachedResponse(runtime_state, cache_key, pending);
-				}
-				try {
-					auto fresh_response =
-					    ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(text));
-					if (fresh_response.status >= 200 && fresh_response.status < 300) {
-						StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
-					}
-					FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
-					return fresh_response;
-				} catch (std::exception &ex) {
-					FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
-					throw;
-				} catch (...) {
-					FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
-					throw;
-				}
-			}
-			return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(text));
-		}();
+		response =
+		    FetchProviderResponse("redaction", config, endpoint, payload, options, EstimateTokenCount(text), cache_key);
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &ex) {
 		RecordFailedUsageEvent(config, text, options, 0, ex.what(), 0);
 		throw;
@@ -3762,6 +3874,9 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	try {
 		result = ParseCompletionResult(config, response);
 	} catch (std::exception &ex) {
+		if (!cache_key.empty()) {
+			RemoveCachedResponse(RuntimeState(options), cache_key);
+		}
 		RecordFailedUsageEvent(config, text, options, response.status, ex.what(), response.retries);
 		throw;
 	}
@@ -3798,38 +3913,12 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	auto payload = EmbeddingPayload(config, input);
 	EnforceAllowedHost(endpoint, options);
 	HttpResponse response;
+	std::string cache_key;
 	try {
-		response = [&]() {
-			if (ResponseCacheEnabled(options)) {
-				auto &runtime_state = RuntimeState(options);
-				auto cache_key = ResponseCacheKey("embedding", config, endpoint, payload);
-				HttpResponse cached_response;
-				if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
-					return cached_response;
-				}
-				bool owns_request = false;
-				auto pending = BeginPendingCachedResponse(runtime_state, cache_key, owns_request);
-				if (!owns_request) {
-					return WaitForPendingCachedResponse(runtime_state, cache_key, pending);
-				}
-				try {
-					auto fresh_response =
-					    ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(input));
-					if (fresh_response.status >= 200 && fresh_response.status < 300) {
-						StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
-					}
-					FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
-					return fresh_response;
-				} catch (std::exception &ex) {
-					FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
-					throw;
-				} catch (...) {
-					FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
-					throw;
-				}
-			}
-			return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(input));
-		}();
+		response = FetchProviderResponse("embedding", config, endpoint, payload, options, EstimateTokenCount(input),
+		                                 cache_key);
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &ex) {
 		RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
 		throw;
@@ -3843,6 +3932,9 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	try {
 		result = ParseEmbeddingResult(config, response);
 	} catch (std::exception &ex) {
+		if (!cache_key.empty()) {
+			RemoveCachedResponse(RuntimeState(options), cache_key);
+		}
 		RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
 		throw;
 	}
@@ -3855,13 +3947,8 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 	if (inputs.empty()) {
 		return {};
 	}
-	if (inputs.size() == 1 || ResponseCacheEnabled(options)) {
-		std::vector<EmbeddingResult> results;
-		results.reserve(inputs.size());
-		for (auto &input : inputs) {
-			results.push_back(Embed(input, options));
-		}
-		return results;
+	if (inputs.size() == 1) {
+		return {Embed(inputs[0], options)};
 	}
 	for (auto &input : inputs) {
 		if (input.empty()) {
@@ -3870,40 +3957,58 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 	}
 	auto config = ResolveEmbeddingProviderConfig(options, true);
 	auto endpoint = EmbeddingEndpoint(config);
-	auto payload = EmbeddingPayload(config, inputs);
 	EnforceAllowedHost(endpoint, options);
-	auto total_tokens = int64_t(0);
-	for (auto &input : inputs) {
-		total_tokens += EstimateTokenCount(input);
-	}
-	HttpResponse response;
-	try {
-		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, total_tokens);
-	} catch (std::exception &ex) {
-		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+
+	std::vector<EmbeddingResult> results(inputs.size());
+	std::vector<idx_t> miss_rows;
+	miss_rows.reserve(inputs.size());
+	auto cache_enabled = ResponseCacheEnabled(options);
+	auto &runtime_state = RuntimeState(options);
+	if (cache_enabled) {
+		// Serve cached inputs individually and batch only the misses, so enabling the response
+		// cache does not disable batched embedding requests.
+		for (idx_t i = 0; i < inputs.size(); i++) {
+			auto cache_key = ResponseCacheKey("embedding", config, endpoint, EmbeddingPayload(config, inputs[i]));
+			HttpResponse cached_response;
+			if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
+				try {
+					results[i] = ParseEmbeddingResult(config, cached_response);
+				} catch (...) {
+					RemoveCachedResponse(runtime_state, cache_key);
+					throw;
+				}
+				RecordEmbeddingUsageEvent(config, inputs[i], results[i], options);
+				MaybePostEmbeddingLog(config, inputs[i], results[i], options);
+				continue;
+			}
+			miss_rows.push_back(i);
 		}
-		throw;
-	}
-	if (response.status < 200 || response.status >= 300) {
-		auto error = ProviderErrorDetail(config, response);
-		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+	} else {
+		for (idx_t i = 0; i < inputs.size(); i++) {
+			miss_rows.push_back(i);
 		}
-		throw IOException("%s", error);
 	}
-	std::vector<EmbeddingResult> results;
-	try {
-		results = ParseEmbeddingResults(config, response, inputs.size());
-	} catch (std::exception &ex) {
-		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
+
+	for (idx_t batch_start = 0; batch_start < miss_rows.size(); batch_start += MAX_EMBED_BATCH_INPUTS) {
+		auto batch_end = std::min<idx_t>(batch_start + MAX_EMBED_BATCH_INPUTS, miss_rows.size());
+		std::vector<std::string> batch_inputs;
+		batch_inputs.reserve(batch_end - batch_start);
+		for (idx_t i = batch_start; i < batch_end; i++) {
+			batch_inputs.push_back(inputs[miss_rows[i]]);
 		}
-		throw;
-	}
-	for (idx_t i = 0; i < results.size(); i++) {
-		RecordEmbeddingUsageEvent(config, inputs[i], results[i], options);
-		MaybePostEmbeddingLog(config, inputs[i], results[i], options);
+		auto batch_results = batch_inputs.size() == 1 ? std::vector<EmbeddingResult> {Embed(batch_inputs[0], options)}
+		                                              : EmbedBatchRequest(config, endpoint, batch_inputs, options);
+		for (idx_t i = 0; i < batch_results.size(); i++) {
+			auto input_row = miss_rows[batch_start + i];
+			if (cache_enabled && batch_inputs.size() > 1) {
+				auto cache_key =
+				    ResponseCacheKey("embedding", config, endpoint, EmbeddingPayload(config, inputs[input_row]));
+				HttpResponse cache_entry(SerializeEmbeddingCacheBody(config, batch_results[i]),
+				                         batch_results[i].http_status, 0, -1);
+				StoreCachedResponse(runtime_state, cache_key, cache_entry, options);
+			}
+			results[input_row] = std::move(batch_results[i]);
+		}
 	}
 	return results;
 }

@@ -54,8 +54,13 @@ constexpr idx_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr size_t MAX_PROMPT_QUERY_CACHE_ENTRIES = 1024;
 std::atomic<uint64_t> NEXT_QUERY_ID {1};
 
+// Tripwire so CompletionOptionsEqual is updated when CompletionOptions gains fields. The size is
+// ABI-specific (std::string layout differs per standard library), so only enforce it on the
+// toolchains where the expected values are known instead of breaking every other build.
+#if defined(__APPLE__)
 static_assert(sizeof(duckdb_ai::CompletionOptions) == 608 || sizeof(duckdb_ai::CompletionOptions) == 728,
               "Update CompletionOptionsEqual when CompletionOptions fields change");
+#endif
 
 bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duckdb_ai::CompletionOptions &right) {
 	return left.model == right.model && left.provider == right.provider && left.secret_name == right.secret_name &&
@@ -3566,6 +3571,9 @@ void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &r
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<list_entry_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
+	for (idx_t row = 0; row < args.size(); row++) {
+		result_data[row] = list_entry_t(0, 0);
+	}
 	StringVectorReader input_reader(args, 0);
 	auto label_reader = OptionalStringReader(args, !bind_data.parameter_is_label_list, 1);
 	unique_ptr<StringListVectorReader> label_list_reader;
