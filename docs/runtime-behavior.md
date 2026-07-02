@@ -17,6 +17,19 @@ calls were deterministic.
 Local helper functions such as `ai_count_tokens()` and
 `ai_is_read_only_sql()` remain deterministic and do not call providers.
 
+## Prompt shape
+
+Completion functions accept one user prompt plus an optional system prompt.
+Task wrappers and SQL assistant functions build provider messages from their SQL
+arguments: static instructions and schema context are placed in the system
+message when the selected provider protocol supports it, while row-specific text
+stays in the user message.
+
+Multi-turn chat transcripts are deliberately outside the scalar function
+surface. Store or serialize the conversation in your own table and pass the
+conversation summary or transcript as the prompt when you need row-wise SQL
+enrichment.
+
 ## Runtime state scope
 
 Usage events, response-cache entries, and provider pacing state are scoped to
@@ -27,6 +40,7 @@ The affected state includes:
 
 - `ai_usage()` and `ai_clear_usage()`,
 - opt-in response cache entries used by `cache := true` or `duckdb_ai_cache`,
+- generated SQL cache entries for successful `ai_query_data()` binds,
 - `duckdb_ai_max_concurrent_requests`,
 - `duckdb_ai_min_request_interval_ms`, and
 - `duckdb_ai_token_limit_per_minute`.
@@ -41,7 +55,7 @@ completion on the execution thread.
 This applies to:
 
 - `ai_complete()`, `ai_try_complete()`, `ai_complete_json()`, and
-  `ai_request_json()`,
+  `ai_completion_request_json()`,
 - task wrappers such as `ai_summarize()`, `ai_classify()`, `ai_redact()`,
   `ai_translate()`, and `ai_filter()`,
 - `ai_embed()`, `ai_embedding_request_json()`, and `ai_similarity()`, and
@@ -51,6 +65,8 @@ The worker count is bounded by `duckdb_ai_max_concurrent_requests` or
 `max_concurrent_requests := ...` when configured. Without an explicit cap, the
 extension uses a conservative local worker count for the chunk while the
 provider rate limiter still controls outbound request pacing.
+Configured worker caps must be between 0 and 64; larger values are rejected
+instead of being silently clamped.
 
 Aggregate functions and SQL-assistant table functions perform one provider call
 per group or invocation and do not need intra-chunk fan-out.
@@ -68,9 +84,14 @@ the configured backoff.
 
 ## HTTP connection behavior
 
-The extension initializes libcurl once per process and reuses a thread-local
-easy handle for provider requests. This allows libcurl to reuse connections
-where the provider and libcurl build support it.
+The extension initializes libcurl once per process, reuses a thread-local easy
+handle for provider requests, and attaches those handles to a shared libcurl
+connection cache. This allows libcurl to reuse connections across provider
+worker threads where the provider and libcurl build support it.
+
+Provider calls use the configured `timeout_seconds` for the total request. The
+connect timeout defaults to the smaller of 10 seconds and the total timeout; set
+`DUCKDB_AI_CONNECT_TIMEOUT_SECONDS` to override it for provider requests.
 
 Provider redirects are not followed. This avoids forwarding authorization or
 API-key headers to an unexpected redirect target.
@@ -91,9 +112,9 @@ SELECT ai_complete('Summarize this repeated prompt.');
 SELECT * FROM ai_clear_cache();
 ```
 
-The cache is in-memory and scoped to the current DuckDB database instance. It is
-keyed by provider, model, endpoint, request payload, and response-relevant
-options. API keys are not stored directly in cache keys.
+The response cache is in-memory and scoped to the current DuckDB database
+instance. It is keyed by provider, model, endpoint, request payload, and
+response-relevant options. API keys are not stored directly in cache keys.
 
 Cached responses still record usage events, but their elapsed time is reported
 as `0` because no provider HTTP request was made.
@@ -101,6 +122,9 @@ as `0` because no provider HTTP request was made.
 The maximum number of cached entries defaults to `1024`. Set
 `DUCKDB_AI_CACHE_MAX_ENTRIES=0` to disable storage, or use a positive integer to
 change the bound.
+
+`ai_query_data()` also keeps a small in-memory generated-SQL cache for successful
+binds. `ai_clear_cache()` clears both caches.
 
 ## Egress allowlisting
 

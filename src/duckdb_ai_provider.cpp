@@ -36,26 +36,57 @@ namespace duckdb_ai {
 namespace {
 
 struct HttpResponse {
-	HttpResponse() : status(0), elapsed_ms(0), retry_after_ms(-1) {
+	HttpResponse() : status(0), elapsed_ms(0), retry_after_ms(-1), retries(0), cache_hit(false) {
 	}
 
 	HttpResponse(std::string body_p, long status_p, int64_t elapsed_ms_p, long retry_after_ms_p)
-	    : body(std::move(body_p)), status(status_p), elapsed_ms(elapsed_ms_p), retry_after_ms(retry_after_ms_p) {
+	    : body(std::move(body_p)), status(status_p), elapsed_ms(elapsed_ms_p), retry_after_ms(retry_after_ms_p),
+	      retries(0), cache_hit(false) {
 	}
 
 	std::string body;
 	long status;
 	int64_t elapsed_ms;
 	long retry_after_ms;
+	int64_t retries;
+	bool cache_hit;
 };
 
+struct CachedHttpResponse {
+	HttpResponse response;
+	std::chrono::steady_clock::time_point created_at;
+};
+
+struct PendingHttpResponse {
+	std::condition_variable cv;
+	bool done = false;
+	HttpResponse response;
+	std::string error;
+};
+
+struct UsageLogJob {
+	std::string url;
+	std::string payload;
+	std::vector<std::string> headers;
+	long timeout_seconds;
+	long retry_count;
+	long retry_backoff_ms;
+};
+
+struct ProviderRuntimeState;
+void StopUsageLogWorker(ProviderRuntimeState &state);
+
 const size_t MAX_USAGE_EVENTS = 1024;
+const size_t MAX_USAGE_LOG_QUEUE = 4096;
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
+constexpr int64_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr int64_t DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE = 512;
 std::once_flag curl_global_init_once;
 const size_t DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 1024;
 
 struct ProviderRuntimeState : public ObjectCacheEntry {
+	~ProviderRuntimeState();
+
 	static std::string ObjectType() {
 		return "duckdb_ai_runtime_state";
 	}
@@ -81,8 +112,16 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	int64_t provider_token_window_tokens = 0;
 
 	std::mutex response_cache_mutex;
-	std::unordered_map<std::string, HttpResponse> response_cache;
+	std::unordered_map<std::string, CachedHttpResponse> response_cache;
 	std::deque<std::string> response_cache_order;
+	std::unordered_map<std::string, std::shared_ptr<PendingHttpResponse>> response_cache_pending;
+
+	std::mutex usage_log_mutex;
+	std::condition_variable usage_log_cv;
+	std::deque<UsageLogJob> usage_log_queue;
+	std::thread usage_log_worker;
+	bool usage_log_worker_started = false;
+	bool usage_log_shutdown = false;
 };
 
 ProviderRuntimeState fallback_runtime_state;
@@ -106,8 +145,8 @@ std::string LowerAscii(std::string input) {
 
 std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	auto provider = LowerAscii(provider_input);
-	if (provider == "anthropic") {
-		return "claude";
+	if (provider == "claude") {
+		return "anthropic";
 	}
 	if (provider == "gcp" || provider == "google" || provider == "google_gemini") {
 		return "gemini";
@@ -140,6 +179,62 @@ std::string GetEnv(const std::string &name) {
 bool EnvFlagEnabled(const std::string &name) {
 	auto value = LowerAscii(GetEnv(name));
 	return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+bool TryReadEnvFlag(const std::string &name, bool &target) {
+	auto value = LowerAscii(GetEnv(name));
+	if (value.empty()) {
+		return false;
+	}
+	if (value == "1" || value == "true" || value == "yes" || value == "on") {
+		target = true;
+		return true;
+	}
+	if (value == "0" || value == "false" || value == "no" || value == "off") {
+		target = false;
+		return true;
+	}
+	throw InvalidInputException("%s must be a boolean", name);
+}
+
+bool TryReadEnvInt64(const std::string &name, int64_t &target, int64_t min_value, int64_t max_value) {
+	auto configured = GetEnv(name);
+	if (configured.empty()) {
+		return false;
+	}
+	try {
+		auto value = std::stoll(configured);
+		if (value < min_value || value > max_value) {
+			throw InvalidInputException("%s must be between %lld and %lld", name, static_cast<long long>(min_value),
+			                            static_cast<long long>(max_value));
+		}
+		target = value;
+		return true;
+	} catch (InvalidInputException &) {
+		throw;
+	} catch (...) {
+		throw InvalidInputException("%s must be an integer between %lld and %lld", name,
+		                            static_cast<long long>(min_value), static_cast<long long>(max_value));
+	}
+}
+
+bool TryReadEnvDouble(const std::string &name, double &target, double min_value, double max_value) {
+	auto configured = GetEnv(name);
+	if (configured.empty()) {
+		return false;
+	}
+	try {
+		auto value = std::stod(configured);
+		if (value < min_value || value > max_value) {
+			throw InvalidInputException("%s must be between %.0f and %.0f", name, min_value, max_value);
+		}
+		target = value;
+		return true;
+	} catch (InvalidInputException &) {
+		throw;
+	} catch (...) {
+		throw InvalidInputException("%s must be a number between %.0f and %.0f", name, min_value, max_value);
+	}
 }
 
 std::string TrimTrailingSlash(std::string value) {
@@ -271,6 +366,46 @@ void EnforceAllowedHost(const std::string &url, const CompletionOptions &options
 
 void EnsureCurlGlobalInit() {
 	std::call_once(curl_global_init_once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+
+void CurlShareLock(CURL *, curl_lock_data, curl_lock_access, void *userptr) {
+	reinterpret_cast<std::mutex *>(userptr)->lock();
+}
+
+void CurlShareUnlock(CURL *, curl_lock_data, void *userptr) {
+	reinterpret_cast<std::mutex *>(userptr)->unlock();
+}
+
+struct CurlShareHandle {
+	CurlShareHandle() {
+		EnsureCurlGlobalInit();
+		handle = curl_share_init();
+		if (!handle) {
+			throw IOException("Could not initialize libcurl share handle for AI requests");
+		}
+		if (curl_share_setopt(handle, CURLSHOPT_LOCKFUNC, CurlShareLock) != CURLSHE_OK ||
+		    curl_share_setopt(handle, CURLSHOPT_UNLOCKFUNC, CurlShareUnlock) != CURLSHE_OK ||
+		    curl_share_setopt(handle, CURLSHOPT_USERDATA, &mutex) != CURLSHE_OK ||
+		    curl_share_setopt(handle, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT) != CURLSHE_OK) {
+			curl_share_cleanup(handle);
+			handle = nullptr;
+			throw IOException("Could not configure libcurl connection sharing for AI requests");
+		}
+	}
+
+	~CurlShareHandle() {
+		if (handle) {
+			curl_share_cleanup(handle);
+		}
+	}
+
+	CURLSH *handle;
+	std::mutex mutex;
+};
+
+CURLSH *SharedCurlHandle() {
+	static CurlShareHandle share;
+	return share.handle;
 }
 
 struct CurlEasyHandle {
@@ -418,6 +553,16 @@ std::string JsonDouble(double input) {
 	return out.str();
 }
 
+uint64_t StableHash(const std::string &input);
+
+std::string ExtensionUserAgent() {
+#ifdef EXT_VERSION_DUCKDB_AI
+	return std::string("duckdb_ai/") + EXT_VERSION_DUCKDB_AI;
+#else
+	return "duckdb_ai/dev";
+#endif
+}
+
 bool HasEstimatedCost(double estimated_cost_usd) {
 	return estimated_cost_usd >= 0 && std::isfinite(estimated_cost_usd);
 }
@@ -433,11 +578,11 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	    {"openai", "text-embedding-3-small", "embedding", 0.02, -1,
 	     "https://developers.openai.com/api/docs/models/text-embedding-3-small", "embedding input tokens only",
 	     "2026-06-30"},
-	    {"claude", "claude-haiku-4-5", "completion", 1.00, 5.00,
+	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
-	    {"claude", "claude-3-5-haiku-latest", "completion", 0.80, 4.00,
+	    {"anthropic", "claude-3-5-haiku-latest", "completion", 0.80, 4.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "legacy Haiku 3.5 pricing", "2026-06-30"},
-	    {"claude", "claude-sonnet-4-5", "completion", 3.00, 15.00,
+	    {"anthropic", "claude-sonnet-4-5", "completion", 3.00, 15.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
 	    {"gemini", "gemini-2.5-flash", "completion", 0.30, 2.50, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "text/image/video input <= 200k tokens", "2026-06-30"},
@@ -495,7 +640,105 @@ bool ResponseCacheEnabled(const CompletionOptions &options) {
 	return EnvFlagEnabled("DUCKDB_AI_CACHE");
 }
 
-size_t MaxResponseCacheEntries() {
+bool PromptCacheEnabled(const CompletionOptions &options) {
+	if (options.has_prompt_cache) {
+		return options.prompt_cache;
+	}
+	return EnvFlagEnabled("DUCKDB_AI_PROMPT_CACHE");
+}
+
+std::string PromptCacheKey(const ProviderConfig &config, const CompletionOptions &options) {
+	std::string static_prefix;
+	if (!options.system_prompt.empty()) {
+		static_prefix += "system:";
+		static_prefix += options.system_prompt;
+	}
+	if (!options.response_schema.empty()) {
+		static_prefix += "\nschema:";
+		static_prefix += options.response_schema;
+	}
+	if (static_prefix.empty()) {
+		return "";
+	}
+	auto key_material = config.provider + "\n" + config.model + "\n" + static_prefix;
+	return "duckdb-ai-" + std::to_string(StableHash(key_material));
+}
+
+void SnapshotEnvironmentOptionsInternal(CompletionOptions &options) {
+	if (options.allowed_hosts.empty()) {
+		options.allowed_hosts = GetEnv("DUCKDB_AI_ALLOWED_HOSTS");
+	}
+	if (options.log_endpoint.empty()) {
+		options.log_endpoint = GetEnv("DUCKDB_AI_LOG_ENDPOINT");
+	}
+	if (options.log_format.empty()) {
+		options.log_format = GetEnv("DUCKDB_AI_LOG_FORMAT");
+	}
+	if (options.log_tags.empty()) {
+		options.log_tags = GetEnv("DUCKDB_AI_LOG_TAGS");
+	}
+	if (!options.has_use_builtin_model_prices &&
+	    TryReadEnvFlag("DUCKDB_AI_USE_BUILTIN_MODEL_PRICES", options.use_builtin_model_prices)) {
+		options.has_use_builtin_model_prices = true;
+	}
+	if (!options.has_cache && TryReadEnvFlag("DUCKDB_AI_CACHE", options.cache)) {
+		options.has_cache = true;
+	}
+	if (!options.has_prompt_cache && TryReadEnvFlag("DUCKDB_AI_PROMPT_CACHE", options.prompt_cache)) {
+		options.has_prompt_cache = true;
+	}
+	if (!options.has_log_include_text && TryReadEnvFlag("DUCKDB_AI_LOG_INCLUDE_TEXT", options.log_include_text)) {
+		options.has_log_include_text = true;
+	}
+	if (!options.has_log_strict && TryReadEnvFlag("DUCKDB_AI_LOG_STRICT", options.log_strict)) {
+		options.has_log_strict = true;
+	}
+	if (!options.has_timeout_seconds &&
+	    TryReadEnvInt64("DUCKDB_AI_TIMEOUT_SECONDS", options.timeout_seconds, 1, 31536000)) {
+		options.has_timeout_seconds = true;
+	}
+	if (!options.has_connect_timeout_seconds &&
+	    TryReadEnvInt64("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS", options.connect_timeout_seconds, 1, 31536000)) {
+		options.has_connect_timeout_seconds = true;
+	}
+	if (!options.has_retry_count && TryReadEnvInt64("DUCKDB_AI_RETRY_COUNT", options.retry_count, 0, 10)) {
+		options.has_retry_count = true;
+	}
+	if (!options.has_retry_backoff_ms &&
+	    TryReadEnvInt64("DUCKDB_AI_RETRY_BACKOFF_MS", options.retry_backoff_ms, 0, 60000)) {
+		options.has_retry_backoff_ms = true;
+	}
+	if (!options.has_max_concurrent_requests &&
+	    TryReadEnvInt64("DUCKDB_AI_MAX_CONCURRENT_REQUESTS", options.max_concurrent_requests, 0,
+	                    MAX_PROVIDER_CHUNK_WORKERS)) {
+		options.has_max_concurrent_requests = true;
+	}
+	if (!options.has_min_request_interval_ms &&
+	    TryReadEnvInt64("DUCKDB_AI_MIN_REQUEST_INTERVAL_MS", options.min_request_interval_ms, 0, 60000)) {
+		options.has_min_request_interval_ms = true;
+	}
+	if (!options.has_token_limit_per_minute &&
+	    TryReadEnvInt64("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE", options.token_limit_per_minute, 0,
+	                    MAX_TOKEN_LIMIT_PER_MINUTE)) {
+		options.has_token_limit_per_minute = true;
+	}
+	if (!options.has_cache_ttl_seconds &&
+	    TryReadEnvInt64("DUCKDB_AI_CACHE_TTL_SECONDS", options.cache_ttl_seconds, 0, 31536000)) {
+		options.has_cache_ttl_seconds = true;
+	}
+	if (!options.has_response_cache_max_entries &&
+	    TryReadEnvInt64("DUCKDB_AI_CACHE_MAX_ENTRIES", options.response_cache_max_entries, 0, 1000000)) {
+		options.has_response_cache_max_entries = true;
+	}
+	if (!options.has_log_sample_rate && TryReadEnvDouble("DUCKDB_AI_LOG_SAMPLE_RATE", options.log_sample_rate, 0, 1)) {
+		options.has_log_sample_rate = true;
+	}
+}
+
+size_t MaxResponseCacheEntries(const CompletionOptions &options) {
+	if (options.has_response_cache_max_entries) {
+		return static_cast<size_t>(options.response_cache_max_entries);
+	}
 	auto configured = GetEnv("DUCKDB_AI_CACHE_MAX_ENTRIES");
 	if (configured.empty()) {
 		return DEFAULT_MAX_RESPONSE_CACHE_ENTRIES;
@@ -513,6 +756,35 @@ size_t MaxResponseCacheEntries() {
 	}
 }
 
+int64_t ResponseCacheTtlSeconds(const CompletionOptions &options) {
+	if (options.has_cache_ttl_seconds) {
+		return options.cache_ttl_seconds;
+	}
+	auto configured = GetEnv("DUCKDB_AI_CACHE_TTL_SECONDS");
+	if (configured.empty()) {
+		return 0;
+	}
+	try {
+		auto value = std::stoll(configured);
+		if (value < 0 || value > 31536000) {
+			throw InvalidInputException("DUCKDB_AI_CACHE_TTL_SECONDS must be between 0 and 31536000");
+		}
+		return value;
+	} catch (InvalidInputException &) {
+		throw;
+	} catch (...) {
+		throw InvalidInputException("DUCKDB_AI_CACHE_TTL_SECONDS must be an integer between 0 and 31536000");
+	}
+}
+
+bool ResponseCacheEntryExpired(const CachedHttpResponse &entry, const CompletionOptions &options) {
+	auto ttl_seconds = ResponseCacheTtlSeconds(options);
+	if (ttl_seconds <= 0) {
+		return false;
+	}
+	return std::chrono::steady_clock::now() - entry.created_at > std::chrono::seconds(ttl_seconds);
+}
+
 std::string ResponseCacheKey(const std::string &operation, const ProviderConfig &config, const std::string &endpoint,
                              const std::string &payload) {
 	auto api_key_hash =
@@ -521,32 +793,94 @@ std::string ResponseCacheKey(const std::string &operation, const ProviderConfig 
 	       api_key_hash + "\n" + payload;
 }
 
-bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, HttpResponse &response) {
+void RemoveResponseCacheOrderEntry(ProviderRuntimeState &state, const std::string &cache_key) {
+	auto order_entry = std::find(state.response_cache_order.begin(), state.response_cache_order.end(), cache_key);
+	if (order_entry != state.response_cache_order.end()) {
+		state.response_cache_order.erase(order_entry);
+	}
+}
+
+bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const CompletionOptions &options,
+                          HttpResponse &response) {
 	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
 	auto entry = state.response_cache.find(cache_key);
 	if (entry == state.response_cache.end()) {
 		return false;
 	}
-	response = entry->second;
+	if (ResponseCacheEntryExpired(entry->second, options)) {
+		state.response_cache.erase(entry);
+		RemoveResponseCacheOrderEntry(state, cache_key);
+		return false;
+	}
+	response = entry->second.response;
 	response.elapsed_ms = 0;
+	response.retries = 0;
+	response.cache_hit = true;
+	RemoveResponseCacheOrderEntry(state, cache_key);
+	state.response_cache_order.push_back(cache_key);
 	return true;
 }
 
-void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const HttpResponse &response) {
-	auto max_entries = MaxResponseCacheEntries();
+void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const HttpResponse &response,
+                         const CompletionOptions &options) {
+	auto max_entries = MaxResponseCacheEntries(options);
 	if (max_entries == 0) {
 		return;
 	}
 	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
-	if (state.response_cache.find(cache_key) == state.response_cache.end()) {
-		state.response_cache_order.push_back(cache_key);
-	}
-	state.response_cache[cache_key] = response;
+	RemoveResponseCacheOrderEntry(state, cache_key);
+	auto stored_response = response;
+	stored_response.cache_hit = false;
+	state.response_cache_order.push_back(cache_key);
+	state.response_cache[cache_key] = {std::move(stored_response), std::chrono::steady_clock::now()};
 	while (state.response_cache.size() > max_entries && !state.response_cache_order.empty()) {
 		auto oldest = std::move(state.response_cache_order.front());
 		state.response_cache_order.pop_front();
 		state.response_cache.erase(oldest);
 	}
+}
+
+std::shared_ptr<PendingHttpResponse> BeginPendingCachedResponse(ProviderRuntimeState &state,
+                                                                const std::string &cache_key, bool &owner) {
+	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	auto entry = state.response_cache_pending.find(cache_key);
+	if (entry != state.response_cache_pending.end()) {
+		owner = false;
+		return entry->second;
+	}
+	auto pending = std::make_shared<PendingHttpResponse>();
+	state.response_cache_pending[cache_key] = pending;
+	owner = true;
+	return pending;
+}
+
+HttpResponse WaitForPendingCachedResponse(ProviderRuntimeState &state, const std::string &cache_key,
+                                          const std::shared_ptr<PendingHttpResponse> &pending) {
+	std::unique_lock<std::mutex> lock(state.response_cache_mutex);
+	pending->cv.wait(lock, [&]() { return pending->done; });
+	if (!pending->error.empty()) {
+		throw IOException("%s", pending->error);
+	}
+	return pending->response;
+}
+
+void FinishPendingCachedResponse(ProviderRuntimeState &state, const std::string &cache_key,
+                                 const std::shared_ptr<PendingHttpResponse> &pending, const HttpResponse &response) {
+	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	pending->response = response;
+	pending->error.clear();
+	pending->done = true;
+	state.response_cache_pending.erase(cache_key);
+	pending->cv.notify_all();
+}
+
+void FailPendingCachedResponse(ProviderRuntimeState &state, const std::string &cache_key,
+                               const std::shared_ptr<PendingHttpResponse> &pending, const std::string &error) {
+	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	pending->error = error;
+	pending->done = true;
+	state.response_cache_pending.erase(cache_key);
+	pending->cv.notify_all();
 }
 
 enum class JsonValueType { NULL_VALUE, BOOLEAN, NUMBER, STRING, ARRAY, OBJECT };
@@ -583,6 +917,59 @@ YyjsonDocPtr ReadYyjsonDocument(const std::string &input, std::string &error) {
 
 std::string YyjsonString(duckdb_yyjson::yyjson_val *value) {
 	return std::string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value));
+}
+
+duckdb_yyjson::yyjson_val *YyjsonObjectGet(duckdb_yyjson::yyjson_val *object, const char *key) {
+	if (!object || !duckdb_yyjson::yyjson_is_obj(object)) {
+		return nullptr;
+	}
+	return duckdb_yyjson::yyjson_obj_get(object, key);
+}
+
+duckdb_yyjson::yyjson_val *YyjsonArrayGet(duckdb_yyjson::yyjson_val *array, idx_t index) {
+	if (!array || !duckdb_yyjson::yyjson_is_arr(array)) {
+		return nullptr;
+	}
+	return duckdb_yyjson::yyjson_arr_get(array, static_cast<size_t>(index));
+}
+
+bool YyjsonDirectString(duckdb_yyjson::yyjson_val *object, const char *key, std::string &result) {
+	auto value = YyjsonObjectGet(object, key);
+	if (!value || !duckdb_yyjson::yyjson_is_str(value)) {
+		return false;
+	}
+	result = YyjsonString(value);
+	return true;
+}
+
+bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int64_t &result) {
+	auto value = YyjsonObjectGet(object, key);
+	if (!value || !duckdb_yyjson::yyjson_is_int(value)) {
+		return false;
+	}
+	if (duckdb_yyjson::yyjson_is_uint(value)) {
+		auto unsigned_value = duckdb_yyjson::yyjson_get_uint(value);
+		if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+			return false;
+		}
+		result = static_cast<int64_t>(unsigned_value);
+	} else {
+		result = duckdb_yyjson::yyjson_get_sint(value);
+	}
+	return true;
+}
+
+int64_t YyjsonIntegerOrMissing(duckdb_yyjson::yyjson_val *object, const char *key) {
+	int64_t result = -1;
+	YyjsonDirectInteger(object, key, result);
+	return result;
+}
+
+bool YyjsonNumericArray(duckdb_yyjson::yyjson_val *value, std::vector<double> &result);
+
+bool YyjsonDirectNumberArray(duckdb_yyjson::yyjson_val *object, const char *key, std::vector<double> &result) {
+	auto value = YyjsonObjectGet(object, key);
+	return value && YyjsonNumericArray(value, result);
 }
 
 bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, std::string &error) {
@@ -1029,9 +1416,25 @@ void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaPr
 }
 
 bool RegexMatches(const std::string &value, const std::string &pattern, const std::string &path, std::string &error) {
+	static std::mutex regex_cache_mutex;
+	static std::unordered_map<std::string, std::shared_ptr<std::regex>> regex_cache;
+	constexpr size_t max_regex_cache_entries = 256;
 	try {
-		std::regex regex(pattern);
-		return std::regex_search(value, regex);
+		std::shared_ptr<std::regex> regex;
+		{
+			std::lock_guard<std::mutex> lock(regex_cache_mutex);
+			auto entry = regex_cache.find(pattern);
+			if (entry == regex_cache.end()) {
+				if (regex_cache.size() >= max_regex_cache_entries) {
+					regex_cache.clear();
+				}
+				regex = std::make_shared<std::regex>(pattern);
+				regex_cache.emplace(pattern, regex);
+			} else {
+				regex = entry->second;
+			}
+		}
+		return std::regex_search(value, *regex);
 	} catch (std::regex_error &ex) {
 		error = path + " schema pattern is invalid: " + ex.what();
 		return false;
@@ -1465,6 +1868,35 @@ long TimeoutSeconds(const CompletionOptions &options) {
 	return static_cast<long>(options.timeout_seconds);
 }
 
+long ConnectTimeoutSeconds(long timeout_seconds) {
+	auto configured = GetEnv("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS");
+	if (configured.empty()) {
+		return std::max<long>(1, std::min<long>(10, timeout_seconds));
+	}
+	try {
+		auto timeout = std::stol(configured);
+		if (timeout <= 0 || timeout > timeout_seconds) {
+			throw InvalidInputException("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS must be between 1 and the total timeout");
+		}
+		return timeout;
+	} catch (InvalidInputException &) {
+		throw;
+	} catch (...) {
+		throw InvalidInputException("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS must be a positive integer");
+	}
+}
+
+long ConnectTimeoutSeconds(const CompletionOptions &options, long timeout_seconds) {
+	if (!options.has_connect_timeout_seconds) {
+		return ConnectTimeoutSeconds(timeout_seconds);
+	}
+	auto connect_timeout_seconds = static_cast<long>(options.connect_timeout_seconds);
+	if (connect_timeout_seconds <= 0 || connect_timeout_seconds > timeout_seconds) {
+		throw InvalidInputException("AI connect timeout must be between 1 and the total timeout");
+	}
+	return connect_timeout_seconds;
+}
+
 long RetryCount(const CompletionOptions &options) {
 	if (options.has_retry_count) {
 		return static_cast<long>(options.retry_count);
@@ -1517,14 +1949,16 @@ int64_t MaxConcurrentRequests(const CompletionOptions &options) {
 	}
 	try {
 		auto max_concurrent_requests = std::stoll(configured);
-		if (max_concurrent_requests < 0 || max_concurrent_requests > 1024) {
-			throw InvalidInputException("DUCKDB_AI_MAX_CONCURRENT_REQUESTS must be between 0 and 1024");
+		if (max_concurrent_requests < 0 || max_concurrent_requests > MAX_PROVIDER_CHUNK_WORKERS) {
+			throw InvalidInputException("DUCKDB_AI_MAX_CONCURRENT_REQUESTS must be between 0 and %lld",
+			                            static_cast<long long>(MAX_PROVIDER_CHUNK_WORKERS));
 		}
 		return max_concurrent_requests;
 	} catch (InvalidInputException &) {
 		throw;
 	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_MAX_CONCURRENT_REQUESTS must be an integer between 0 and 1024");
+		throw InvalidInputException("DUCKDB_AI_MAX_CONCURRENT_REQUESTS must be an integer between 0 and %lld",
+		                            static_cast<long long>(MAX_PROVIDER_CHUNK_WORKERS));
 	}
 }
 
@@ -1722,7 +2156,8 @@ void SleepBeforeRetry(long retry_delay_ms, ClientContext *client_context) {
 
 HttpResponse HttpPost(const std::string &url, const std::string &payload, const std::vector<std::string> &headers,
                       long timeout_seconds, bool throw_http_errors = true, long retry_count = 0,
-                      long retry_backoff_ms = 1000, ClientContext *client_context = nullptr) {
+                      long retry_backoff_ms = 1000, ClientContext *client_context = nullptr,
+                      long connect_timeout_seconds = 0) {
 	EnsureCurlGlobalInit();
 	int64_t total_elapsed_ms = 0;
 	for (long attempt = 0; attempt <= retry_count; attempt++) {
@@ -1740,11 +2175,15 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
 		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(payload.size()));
 		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+		curl_easy_setopt(curl, CURLOPT_SHARE, SharedCurlHandle());
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
 		curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
 		curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_capture);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
+		                 connect_timeout_seconds > 0 ? connect_timeout_seconds
+		                                             : ConnectTimeoutSeconds(timeout_seconds));
 		curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
 		curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L);
@@ -1777,7 +2216,103 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		if (throw_http_errors && (status < 200 || status >= 300)) {
 			throw IOException("AI provider returned HTTP %ld: %s", status, response_body);
 		}
-		return HttpResponse(response_body, status, total_elapsed_ms, header_capture.retry_after_ms);
+		auto response = HttpResponse(response_body, status, total_elapsed_ms, header_capture.retry_after_ms);
+		response.retries = attempt;
+		return response;
+	}
+	throw InternalException("AI provider retry loop exited unexpectedly");
+}
+
+void UsageLogWorkerLoop(ProviderRuntimeState *state) {
+	while (true) {
+		UsageLogJob job;
+		{
+			std::unique_lock<std::mutex> lock(state->usage_log_mutex);
+			state->usage_log_cv.wait(lock,
+			                         [&]() { return state->usage_log_shutdown || !state->usage_log_queue.empty(); });
+			if (state->usage_log_queue.empty() && state->usage_log_shutdown) {
+				return;
+			}
+			job = std::move(state->usage_log_queue.front());
+			state->usage_log_queue.pop_front();
+		}
+		try {
+			HttpPost(job.url, job.payload, job.headers, job.timeout_seconds, true, job.retry_count,
+			         job.retry_backoff_ms);
+		} catch (...) {
+			// Non-strict usage logs are best-effort and must not fail later queries from the worker thread.
+		}
+	}
+}
+
+void StartUsageLogWorkerLocked(ProviderRuntimeState &state) {
+	if (state.usage_log_worker_started) {
+		return;
+	}
+	state.usage_log_worker = std::thread(UsageLogWorkerLoop, &state);
+	state.usage_log_worker_started = true;
+}
+
+void EnqueueUsageLog(ProviderRuntimeState &state, UsageLogJob job) {
+	{
+		std::lock_guard<std::mutex> lock(state.usage_log_mutex);
+		StartUsageLogWorkerLocked(state);
+		if (state.usage_log_queue.size() >= MAX_USAGE_LOG_QUEUE) {
+			state.usage_log_queue.pop_front();
+		}
+		state.usage_log_queue.push_back(std::move(job));
+	}
+	state.usage_log_cv.notify_one();
+}
+
+void StopUsageLogWorker(ProviderRuntimeState &state) {
+	{
+		std::lock_guard<std::mutex> lock(state.usage_log_mutex);
+		state.usage_log_shutdown = true;
+	}
+	state.usage_log_cv.notify_all();
+	if (state.usage_log_worker_started && state.usage_log_worker.joinable()) {
+		state.usage_log_worker.join();
+	}
+}
+
+ProviderRuntimeState::~ProviderRuntimeState() {
+	StopUsageLogWorker(*this);
+}
+
+HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload,
+                              const std::vector<std::string> &headers, const CompletionOptions &options,
+                              int64_t estimated_tokens) {
+	auto retry_count = RetryCount(options);
+	auto retry_backoff_ms = RetryBackoffMs(options);
+	auto timeout_seconds = TimeoutSeconds(options);
+	auto connect_timeout_seconds = ConnectTimeoutSeconds(options, timeout_seconds);
+	int64_t total_elapsed_ms = 0;
+	for (long attempt = 0; attempt <= retry_count; attempt++) {
+		try {
+			HttpResponse response;
+			{
+				ProviderRequestGuard request_guard(options, estimated_tokens);
+				response = HttpPost(url, payload, headers, timeout_seconds, false, 0, retry_backoff_ms,
+				                    options.client_context, connect_timeout_seconds);
+			}
+			total_elapsed_ms += response.elapsed_ms;
+			response.elapsed_ms = total_elapsed_ms;
+			response.retries = attempt;
+			if (attempt < retry_count && IsRetryableHttpStatus(response.status)) {
+				SleepBeforeRetry(RetryDelayMs(retry_backoff_ms, attempt, response.retry_after_ms),
+				                 options.client_context);
+				continue;
+			}
+			return response;
+		} catch (InterruptException &) {
+			throw;
+		} catch (std::exception &) {
+			if (attempt >= retry_count) {
+				throw;
+			}
+			SleepBeforeRetry(RetryDelayMs(retry_backoff_ms, attempt, -1), options.client_context);
+		}
 	}
 	throw InternalException("AI provider retry loop exited unexpectedly");
 }
@@ -1909,10 +2444,10 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 		        "",
 		        true};
 	}
-	if (provider == "claude" || provider == "anthropic") {
-		return {"claude",
+	if (provider == "anthropic" || provider == "claude") {
+		return {"anthropic",
 		        "anthropic_messages",
-		        "claude-3-5-haiku-latest",
+		        "claude-haiku-4-5",
 		        "",
 		        "https://api.anthropic.com/v1",
 		        "ANTHROPIC_API_KEY",
@@ -1923,10 +2458,11 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 		return {provider, "ollama_chat", "llama3.2", "", "http://localhost:11434", "OLLAMA_API_KEY", "", false};
 	}
 
-	throw InvalidInputException("Unsupported AI provider \"%s\". Supported providers: ollama, openai, azure, claude, "
-	                            "anthropic, databricks, gemini, gcp, mistral, snowflake, zai, deepseek, openrouter, "
-	                            "openai_privacy_filter, openai_compatible, local",
-	                            provider_input);
+	throw InvalidInputException(
+	    "Unsupported AI provider \"%s\". Supported providers: ollama, openai, azure, "
+	    "anthropic, claude, databricks, gemini, gcp, mistral, snowflake, zai, deepseek, openrouter, "
+	    "openai_privacy_filter, openai_compatible, local",
+	    provider_input);
 }
 
 std::string ResolveBaseUrl(const ProviderConfig &config) {
@@ -1954,6 +2490,12 @@ std::string ResolveBaseUrl(const ProviderConfig &config) {
 		       : config.provider == "databricks" ? DatabricksBaseUrl(generic_base_url)
 		       : config.provider == "snowflake"  ? SnowflakeCortexBaseUrl(generic_base_url)
 		                                         : TrimTrailingSlash(generic_base_url);
+	}
+	if (config.provider == "anthropic") {
+		auto claude_base_url = GetEnv("CLAUDE_BASE_URL");
+		if (!claude_base_url.empty()) {
+			return TrimTrailingSlash(claude_base_url);
+		}
 	}
 	if (config.provider == "databricks") {
 		auto databricks_host = GetEnv("DATABRICKS_HOST");
@@ -2000,7 +2542,7 @@ std::string ResolveApiKey(const ProviderConfig &config) {
 	if (!generic_key.empty()) {
 		return generic_key;
 	}
-	if (config.provider == "claude") {
+	if (config.provider == "anthropic") {
 		auto claude_key = GetEnv("CLAUDE_API_KEY");
 		if (!claude_key.empty()) {
 			return claude_key;
@@ -2047,6 +2589,12 @@ std::string ResolveModel(const ProviderConfig &config, const std::string &model_
 	}
 	if (!generic_model.empty()) {
 		return generic_model;
+	}
+	if (config.provider == "anthropic") {
+		auto claude_model = GetEnv("CLAUDE_MODEL");
+		if (!claude_model.empty()) {
+			return claude_model;
+		}
 	}
 	return config.default_model;
 }
@@ -2186,14 +2734,25 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	if (config.protocol == "anthropic_messages") {
 		ValidateResponseSchema(options);
 		auto format = NormalizeResponseFormat(options);
+		if (!options.response_schema.empty()) {
+			throw InvalidInputException(
+			    "AI option \"response_schema\" is not supported for provider \"%s\". Use an OpenAI-compatible or "
+			    "Ollama provider for enforced JSON Schema output.",
+			    config.provider);
+		}
 		if (format == "json_schema" && options.response_schema.empty()) {
 			throw InvalidInputException(
 			    "AI option \"response_schema\" must be provided when response_format is json_schema");
 		}
-		auto max_tokens = options.has_max_tokens ? options.max_tokens : 1024;
+		auto max_tokens = options.has_max_tokens ? options.max_tokens : 4096;
 		auto payload = "{\"model\":\"" + escaped_model + "\",\"max_tokens\":" + std::to_string(max_tokens);
 		if (!options.system_prompt.empty()) {
-			payload += ",\"system\":\"" + JsonEscape(options.system_prompt) + "\"";
+			if (PromptCacheEnabled(options)) {
+				payload += ",\"system\":[{\"type\":\"text\",\"text\":\"" + JsonEscape(options.system_prompt) +
+				           "\",\"cache_control\":{\"type\":\"ephemeral\"}}]";
+			} else {
+				payload += ",\"system\":\"" + JsonEscape(options.system_prompt) + "\"";
+			}
 		}
 		if (options.has_temperature) {
 			payload += ",\"temperature\":" + JsonDouble(options.temperature);
@@ -2236,6 +2795,12 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	auto response_format = OpenAIResponseFormatJson(options);
 	if (!response_format.empty()) {
 		payload += "," + response_format;
+	}
+	if (config.provider == "openai" && PromptCacheEnabled(options)) {
+		auto prompt_cache_key = PromptCacheKey(config, options);
+		if (!prompt_cache_key.empty()) {
+			payload += ",\"prompt_cache_key\":\"" + JsonEscape(prompt_cache_key) + "\"";
+		}
 	}
 	payload += "}";
 	return payload;
@@ -2298,6 +2863,21 @@ std::string EmbeddingPayload(const ProviderConfig &config, const std::string &in
 	return "{\"model\":\"" + JsonEscape(config.model) + "\",\"input\":\"" + JsonEscape(input) + "\"}";
 }
 
+std::string EmbeddingPayload(const ProviderConfig &config, const std::vector<std::string> &inputs) {
+	if (inputs.size() == 1) {
+		return EmbeddingPayload(config, inputs[0]);
+	}
+	std::string payload = "{\"model\":\"" + JsonEscape(config.model) + "\",\"input\":[";
+	for (idx_t i = 0; i < inputs.size(); i++) {
+		if (i > 0) {
+			payload += ",";
+		}
+		payload += "\"" + JsonEscape(inputs[i]) + "\"";
+	}
+	payload += "]}";
+	return payload;
+}
+
 std::vector<double> FindEmbeddingArray(const std::string &body, const std::string &key) {
 	std::string error;
 	auto doc = ReadYyjsonDocument(body, error);
@@ -2309,6 +2889,44 @@ std::vector<double> FindEmbeddingArray(const std::string &body, const std::strin
 		return values;
 	}
 	return {};
+}
+
+std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &config, const std::string &body) {
+	std::string error;
+	auto doc = ReadYyjsonDocument(body, error);
+	if (!doc) {
+		return {};
+	}
+	auto root = duckdb_yyjson::yyjson_doc_get_root(doc.get());
+	std::vector<std::vector<double>> embeddings;
+	if (config.protocol == "ollama_embed") {
+		auto embedding_values = YyjsonObjectGet(root, "embeddings");
+		if (duckdb_yyjson::yyjson_is_arr(embedding_values)) {
+			duckdb_yyjson::yyjson_val *entry;
+			size_t index;
+			size_t max;
+			yyjson_arr_foreach(embedding_values, index, max, entry) {
+				std::vector<double> values;
+				if (YyjsonNumericArray(entry, values)) {
+					embeddings.push_back(std::move(values));
+				}
+			}
+		}
+		return embeddings;
+	}
+	auto data = YyjsonObjectGet(root, "data");
+	if (duckdb_yyjson::yyjson_is_arr(data)) {
+		duckdb_yyjson::yyjson_val *entry;
+		size_t index;
+		size_t max;
+		yyjson_arr_foreach(data, index, max, entry) {
+			std::vector<double> values;
+			if (YyjsonDirectNumberArray(entry, "embedding", values)) {
+				embeddings.push_back(std::move(values));
+			}
+		}
+	}
+	return embeddings;
 }
 
 EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response) {
@@ -2323,13 +2941,55 @@ EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpRes
 	result.raw_response = response.body;
 	result.http_status = response.status;
 	result.elapsed_ms = response.elapsed_ms;
+	result.retries = response.retries;
+	result.cache_hit = response.cache_hit;
 	result.prompt_tokens = FindJsonIntegerValue(response.body, "prompt_tokens");
 	result.total_tokens = FindJsonIntegerValue(response.body, "total_tokens");
 	return result;
 }
 
+std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config, const HttpResponse &response,
+                                                   idx_t expected_count) {
+	auto values = ParseEmbeddingArrays(config, response.body);
+	if (values.size() != expected_count) {
+		if (expected_count == 1) {
+			return {ParseEmbeddingResult(config, response)};
+		}
+		throw IOException("AI provider embedding response returned %llu embeddings for %llu inputs",
+		                  static_cast<unsigned long long>(values.size()),
+		                  static_cast<unsigned long long>(expected_count));
+	}
+	auto prompt_tokens = FindJsonIntegerValue(response.body, "prompt_tokens");
+	auto total_tokens = FindJsonIntegerValue(response.body, "total_tokens");
+	std::vector<EmbeddingResult> results;
+	results.reserve(values.size());
+	for (idx_t i = 0; i < values.size(); i++) {
+		EmbeddingResult result;
+		result.values = std::move(values[i]);
+		result.raw_response = response.body;
+		result.http_status = response.status;
+		result.elapsed_ms = response.elapsed_ms;
+		result.retries = response.retries;
+		result.cache_hit = response.cache_hit;
+		if (prompt_tokens >= 0) {
+			result.prompt_tokens = static_cast<int64_t>(
+			    std::ceil(static_cast<double>(prompt_tokens) / static_cast<double>(std::max<idx_t>(1, values.size()))));
+		} else {
+			result.prompt_tokens = -1;
+		}
+		if (total_tokens >= 0) {
+			result.total_tokens = static_cast<int64_t>(
+			    std::ceil(static_cast<double>(total_tokens) / static_cast<double>(std::max<idx_t>(1, values.size()))));
+		} else {
+			result.total_tokens = -1;
+		}
+		results.push_back(std::move(result));
+	}
+	return results;
+}
+
 std::vector<std::string> RequestHeaders(const ProviderConfig &config) {
-	std::vector<std::string> headers {"Content-Type: application/json"};
+	std::vector<std::string> headers {"Content-Type: application/json", "User-Agent: " + ExtensionUserAgent()};
 	if (config.protocol == "anthropic_messages") {
 		headers.push_back("anthropic-version: 2023-06-01");
 		headers.push_back("x-api-key: " + config.api_key);
@@ -2359,6 +3019,47 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config) {
 
 std::string ExtractCompletionText(const ProviderConfig &config, const std::string &body) {
 	std::string value;
+	std::string error;
+	auto doc = ReadYyjsonDocument(body, error);
+	if (doc) {
+		auto root = duckdb_yyjson::yyjson_doc_get_root(doc.get());
+		if (config.protocol == "privacy_filter") {
+			if (YyjsonDirectString(root, "redacted_text", value) || YyjsonDirectString(root, "masked_text", value) ||
+			    YyjsonDirectString(root, "text", value) || YyjsonDirectString(root, "output", value)) {
+				return value;
+			}
+		} else if (config.protocol == "anthropic_messages") {
+			auto content = YyjsonObjectGet(root, "content");
+			if (duckdb_yyjson::yyjson_is_arr(content)) {
+				duckdb_yyjson::yyjson_val *entry;
+				size_t index;
+				size_t max;
+				yyjson_arr_foreach(content, index, max, entry) {
+					std::string type;
+					if (YyjsonDirectString(entry, "type", type) && type != "text") {
+						continue;
+					}
+					if (YyjsonDirectString(entry, "text", value)) {
+						return value;
+					}
+				}
+			}
+		} else if (config.protocol == "ollama_chat") {
+			auto message = YyjsonObjectGet(root, "message");
+			if (YyjsonDirectString(message, "content", value)) {
+				return value;
+			}
+		} else {
+			auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
+			auto message = YyjsonObjectGet(first_choice, "message");
+			if (YyjsonDirectString(message, "content", value)) {
+				return value;
+			}
+			if (YyjsonDirectString(message, "refusal", value)) {
+				throw IOException("AI provider response contained a refusal instead of completion text: %s", value);
+			}
+		}
+	}
 	if (config.protocol == "privacy_filter") {
 		if (FindJsonStringValue(body, "redacted_text", value) || FindJsonStringValue(body, "masked_text", value) ||
 		    FindJsonStringValue(body, "text", value) || FindJsonStringValue(body, "output", value)) {
@@ -2380,29 +3081,62 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.raw_response = response.body;
 	result.http_status = response.status;
 	result.elapsed_ms = response.elapsed_ms;
-	result.prompt_tokens = FindJsonIntegerValue(response.body, "prompt_tokens");
-	result.completion_tokens = FindJsonIntegerValue(response.body, "completion_tokens");
-	result.total_tokens = FindJsonIntegerValue(response.body, "total_tokens");
+	result.retries = response.retries;
+	result.cache_hit = response.cache_hit;
+	result.prompt_tokens = -1;
+	result.completion_tokens = -1;
+	result.total_tokens = -1;
+	result.cached_prompt_tokens = -1;
+	result.cache_creation_prompt_tokens = -1;
 
+	std::string error;
+	auto doc = ReadYyjsonDocument(response.body, error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
 	if (config.protocol == "anthropic_messages") {
-		result.prompt_tokens = FindJsonIntegerValue(response.body, "input_tokens");
-		result.completion_tokens = FindJsonIntegerValue(response.body, "output_tokens");
+		auto usage = YyjsonObjectGet(root, "usage");
+		result.prompt_tokens = YyjsonIntegerOrMissing(usage, "input_tokens");
+		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
+		result.cached_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_read_input_tokens");
+		result.cache_creation_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_creation_input_tokens");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
 			result.total_tokens = result.prompt_tokens + result.completion_tokens;
 		}
+		YyjsonDirectString(root, "stop_reason", result.finish_reason);
+		if (result.finish_reason == "max_tokens") {
+			throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or "
+			                  "request a shorter response");
+		}
+		return result;
 	}
 	if (config.protocol == "ollama_chat") {
-		result.prompt_tokens = FindJsonIntegerValue(response.body, "prompt_eval_count");
-		result.completion_tokens = FindJsonIntegerValue(response.body, "eval_count");
+		result.prompt_tokens = YyjsonIntegerOrMissing(root, "prompt_eval_count");
+		result.completion_tokens = YyjsonIntegerOrMissing(root, "eval_count");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
 			result.total_tokens = result.prompt_tokens + result.completion_tokens;
 		}
+		YyjsonDirectString(root, "done_reason", result.finish_reason);
+		return result;
+	}
+	auto usage = YyjsonObjectGet(root, "usage");
+	result.prompt_tokens = YyjsonIntegerOrMissing(usage, "prompt_tokens");
+	result.completion_tokens = YyjsonIntegerOrMissing(usage, "completion_tokens");
+	result.total_tokens = YyjsonIntegerOrMissing(usage, "total_tokens");
+	auto prompt_token_details = YyjsonObjectGet(usage, "prompt_tokens_details");
+	result.cached_prompt_tokens = YyjsonIntegerOrMissing(prompt_token_details, "cached_tokens");
+	auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
+	YyjsonDirectString(first_choice, "finish_reason", result.finish_reason);
+	if (result.finish_reason == "length") {
+		throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or request a "
+		                  "shorter response");
 	}
 	return result;
 }
 
 double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionOptions &options,
                                  const CompletionResult &result) {
+	if (result.cache_hit) {
+		return 0;
+	}
 	auto has_input_price = options.has_input_token_price_per_million;
 	auto input_price = options.input_token_price_per_million;
 	auto has_output_price = options.has_output_token_price_per_million;
@@ -2423,14 +3157,25 @@ double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionO
 	if (!has_input_price || !has_output_price || result.prompt_tokens < 0 || result.completion_tokens < 0) {
 		return -1;
 	}
-	auto cost = (static_cast<double>(result.prompt_tokens) * input_price +
-	             static_cast<double>(result.completion_tokens) * output_price) /
-	            1000000.0;
+	auto cached_prompt_tokens = std::max<int64_t>(0, result.cached_prompt_tokens);
+	auto cache_creation_prompt_tokens = std::max<int64_t>(0, result.cache_creation_prompt_tokens);
+	auto billable_prompt_tokens =
+	    std::max<int64_t>(0, result.prompt_tokens - cached_prompt_tokens - cache_creation_prompt_tokens);
+	auto cached_input_multiplier = config.protocol == "anthropic_messages" ? 0.1 : 0.5;
+	auto cache_creation_multiplier = config.protocol == "anthropic_messages" ? 1.25 : 1.0;
+	auto input_cost = static_cast<double>(billable_prompt_tokens) * input_price;
+	input_cost += static_cast<double>(cached_prompt_tokens) * input_price * cached_input_multiplier;
+	input_cost += static_cast<double>(cache_creation_prompt_tokens) * input_price * cache_creation_multiplier;
+	auto output_cost = static_cast<double>(result.completion_tokens) * output_price;
+	auto cost = (input_cost + output_cost) / 1000000.0;
 	return HasEstimatedCost(cost) ? cost : -1;
 }
 
 double EstimateEmbeddingCostUsd(const ProviderConfig &config, const CompletionOptions &options,
                                 const EmbeddingResult &result) {
+	if (result.cache_hit) {
+		return 0;
+	}
 	auto has_input_price = options.has_input_token_price_per_million;
 	auto input_price = options.input_token_price_per_million;
 	if (BuiltinModelPricingEnabled(options)) {
@@ -2462,6 +3207,8 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 	UsageEvent event;
 	event.created_at = CurrentTimestamp();
 	event.event = "ai_completion";
+	event.function_name = options.function_name;
+	event.query_id = options.query_id;
 	event.provider = config.provider;
 	event.protocol = config.protocol;
 	event.model = config.model;
@@ -2472,9 +3219,44 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 	event.prompt_tokens = result.prompt_tokens;
 	event.completion_tokens = result.completion_tokens;
 	event.total_tokens = result.total_tokens;
+	event.cached_prompt_tokens = result.cached_prompt_tokens;
+	event.cache_creation_prompt_tokens = result.cache_creation_prompt_tokens;
 	event.elapsed_ms = result.elapsed_ms;
+	event.retries = result.retries;
 	event.http_status = result.http_status;
+	event.cache_hit = result.cache_hit;
+	event.status = "ok";
+	event.error = "";
 	event.estimated_cost_usd = EstimateCompletionCostUsd(config, options, result);
+	PushUsageEvent(RuntimeState(options), std::move(event));
+}
+
+void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options,
+                            long http_status, const std::string &error, int64_t retries) {
+	UsageEvent event;
+	event.created_at = CurrentTimestamp();
+	event.event = "ai_completion";
+	event.function_name = options.function_name;
+	event.query_id = options.query_id;
+	event.provider = config.provider;
+	event.protocol = config.protocol;
+	event.model = config.model;
+	event.prompt_chars = static_cast<int64_t>(prompt.size());
+	event.response_chars = 0;
+	event.input_chars = -1;
+	event.dimensions = -1;
+	event.prompt_tokens = -1;
+	event.completion_tokens = -1;
+	event.total_tokens = -1;
+	event.cached_prompt_tokens = -1;
+	event.cache_creation_prompt_tokens = -1;
+	event.elapsed_ms = -1;
+	event.retries = retries;
+	event.http_status = http_status;
+	event.cache_hit = false;
+	event.status = "error";
+	event.error = error;
+	event.estimated_cost_usd = -1;
 	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
@@ -2483,6 +3265,8 @@ void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &
 	UsageEvent event;
 	event.created_at = CurrentTimestamp();
 	event.event = "ai_embedding";
+	event.function_name = options.function_name;
+	event.query_id = options.query_id;
 	event.provider = config.provider;
 	event.protocol = config.protocol;
 	event.model = config.model;
@@ -2493,9 +3277,45 @@ void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &
 	event.prompt_tokens = result.prompt_tokens;
 	event.completion_tokens = -1;
 	event.total_tokens = result.total_tokens;
+	event.cached_prompt_tokens = -1;
+	event.cache_creation_prompt_tokens = -1;
 	event.elapsed_ms = result.elapsed_ms;
+	event.retries = result.retries;
 	event.http_status = result.http_status;
+	event.cache_hit = result.cache_hit;
+	event.status = "ok";
+	event.error = "";
 	event.estimated_cost_usd = EstimateEmbeddingCostUsd(config, options, result);
+	PushUsageEvent(RuntimeState(options), std::move(event));
+}
+
+void RecordFailedEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input,
+                                     const CompletionOptions &options, long http_status, const std::string &error,
+                                     int64_t retries) {
+	UsageEvent event;
+	event.created_at = CurrentTimestamp();
+	event.event = "ai_embedding";
+	event.function_name = options.function_name;
+	event.query_id = options.query_id;
+	event.provider = config.provider;
+	event.protocol = config.protocol;
+	event.model = config.model;
+	event.prompt_chars = static_cast<int64_t>(input.size());
+	event.response_chars = 0;
+	event.input_chars = static_cast<int64_t>(input.size());
+	event.dimensions = -1;
+	event.prompt_tokens = -1;
+	event.completion_tokens = -1;
+	event.total_tokens = -1;
+	event.cached_prompt_tokens = -1;
+	event.cache_creation_prompt_tokens = -1;
+	event.elapsed_ms = -1;
+	event.retries = retries;
+	event.http_status = http_status;
+	event.cache_hit = false;
+	event.status = "error";
+	event.error = error;
+	event.estimated_cost_usd = -1;
 	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
@@ -2553,7 +3373,36 @@ std::string LogFormat(const CompletionOptions &options) {
 	if (format == "otlp" || format == "otlp_json") {
 		return "otlp_json";
 	}
-	throw InvalidInputException("DUCKDB_AI_LOG_FORMAT must be one of: generic_json, otlp_json");
+	throw InvalidInputException("DUCKDB_AI_LOG_FORMAT must be one of: generic, json, generic_json, otlp, otlp_json");
+}
+
+bool LogStrict(const CompletionOptions &options) {
+	return options.has_log_strict ? options.log_strict : EnvFlagEnabled("DUCKDB_AI_LOG_STRICT");
+}
+
+void SubmitUsageLog(const CompletionOptions &options, const std::string &log_endpoint, std::string payload,
+                    const std::string &error_prefix) {
+	auto log_strict = LogStrict(options);
+	try {
+		EnforceAllowedHost(log_endpoint, options);
+		if (log_strict) {
+			HttpPost(log_endpoint, payload, {"Content-Type: application/json"}, TimeoutSeconds(options), true,
+			         RetryCount(options), RetryBackoffMs(options), options.client_context);
+			return;
+		}
+		UsageLogJob job;
+		job.url = log_endpoint;
+		job.payload = std::move(payload);
+		job.headers = {"Content-Type: application/json"};
+		job.timeout_seconds = TimeoutSeconds(options);
+		job.retry_count = RetryCount(options);
+		job.retry_backoff_ms = RetryBackoffMs(options);
+		EnqueueUsageLog(RuntimeState(options), std::move(job));
+	} catch (std::exception &ex) {
+		if (log_strict) {
+			throw IOException("%s: %s", error_prefix, ex.what());
+		}
+	}
 }
 
 void AppendJsonAttribute(std::string &payload, bool &wrote, const std::string &attribute) {
@@ -2576,14 +3425,20 @@ std::string OtlpDoubleAttribute(const std::string &key, double value) {
 	return "{\"key\":\"" + JsonEscape(key) + "\",\"value\":{\"doubleValue\":" + JsonDouble(value) + "}}";
 }
 
-std::string OtlpLogPayload(const std::string &event, const std::string &provider, const std::string &protocol,
-                           const std::string &model, const std::string &log_tags, const std::string &text_name,
-                           const std::string &text_value, const std::string &extra_text_name,
-                           const std::string &extra_text_value, bool include_text,
+std::string OtlpLogPayload(const std::string &event, const std::string &function_name, const std::string &query_id,
+                           const std::string &provider, const std::string &protocol, const std::string &model,
+                           const std::string &log_tags, const std::string &text_name, const std::string &text_value,
+                           const std::string &extra_text_name, const std::string &extra_text_value, bool include_text,
                            const std::vector<std::pair<std::string, int64_t>> &metrics, double estimated_cost_usd) {
 	std::string attributes;
 	bool wrote_attribute = false;
 	AppendJsonAttribute(attributes, wrote_attribute, OtlpStringAttribute("ai.event", event));
+	if (!function_name.empty()) {
+		AppendJsonAttribute(attributes, wrote_attribute, OtlpStringAttribute("ai.function_name", function_name));
+	}
+	if (!query_id.empty()) {
+		AppendJsonAttribute(attributes, wrote_attribute, OtlpStringAttribute("ai.query_id", query_id));
+	}
 	AppendJsonAttribute(attributes, wrote_attribute, OtlpStringAttribute("ai.provider", provider));
 	AppendJsonAttribute(attributes, wrote_attribute, OtlpStringAttribute("ai.protocol", protocol));
 	AppendJsonAttribute(attributes, wrote_attribute, OtlpStringAttribute("ai.model", model));
@@ -2633,22 +3488,31 @@ void MaybePostUsageLog(const ProviderConfig &config, const std::string &prompt, 
 		    {"ai.prompt_tokens", result.prompt_tokens},
 		    {"ai.completion_tokens", result.completion_tokens},
 		    {"ai.total_tokens", result.total_tokens},
+		    {"ai.cached_prompt_tokens", result.cached_prompt_tokens},
+		    {"ai.cache_creation_prompt_tokens", result.cache_creation_prompt_tokens},
 		    {"ai.elapsed_ms", result.elapsed_ms},
+		    {"ai.retries", result.retries},
 		    {"http.status_code", result.http_status},
 		};
-		payload = OtlpLogPayload("ai_completion", config.provider, config.protocol, config.model, log_tags, "ai.prompt",
-		                         prompt, "ai.response", result.text, include_text, metrics, estimated_cost_usd);
+		payload = OtlpLogPayload("ai_completion", options.function_name, options.query_id, config.provider,
+		                         config.protocol, config.model, log_tags, "ai.prompt", prompt, "ai.response",
+		                         result.text, include_text, metrics, estimated_cost_usd);
 	} else {
 		payload = std::string("{") + "\"extension\":\"duckdb_ai\"," + "\"event\":\"ai_completion\"," +
-		          "\"provider\":\"" + JsonEscape(config.provider) + "\"," + "\"protocol\":\"" +
-		          JsonEscape(config.protocol) + "\"," + "\"model\":\"" + JsonEscape(config.model) + "\"," +
-		          "\"prompt_chars\":" + std::to_string(prompt.size()) + "," +
+		          "\"function_name\":\"" + JsonEscape(options.function_name) + "\"," + "\"query_id\":\"" +
+		          JsonEscape(options.query_id) + "\"," + "\"provider\":\"" + JsonEscape(config.provider) + "\"," +
+		          "\"protocol\":\"" + JsonEscape(config.protocol) + "\"," + "\"model\":\"" + JsonEscape(config.model) +
+		          "\"," + "\"prompt_chars\":" + std::to_string(prompt.size()) + "," +
 		          "\"response_chars\":" + std::to_string(result.text.size()) + "," +
 		          "\"prompt_tokens\":" + std::to_string(result.prompt_tokens) + "," +
 		          "\"completion_tokens\":" + std::to_string(result.completion_tokens) + "," +
 		          "\"total_tokens\":" + std::to_string(result.total_tokens) + "," +
+		          "\"cached_prompt_tokens\":" + std::to_string(result.cached_prompt_tokens) + "," +
+		          "\"cache_creation_prompt_tokens\":" + std::to_string(result.cache_creation_prompt_tokens) + "," +
 		          "\"elapsed_ms\":" + std::to_string(result.elapsed_ms) + "," +
-		          "\"http_status\":" + std::to_string(result.http_status);
+		          "\"retries\":" + std::to_string(result.retries) + "," +
+		          "\"http_status\":" + std::to_string(result.http_status) + "," +
+		          "\"cache_hit\":" + std::string(result.cache_hit ? "true" : "false") + "," + "\"status\":\"ok\"";
 
 		if (HasEstimatedCost(estimated_cost_usd)) {
 			payload += ",\"estimated_cost_usd\":" + JsonDouble(estimated_cost_usd);
@@ -2662,16 +3526,7 @@ void MaybePostUsageLog(const ProviderConfig &config, const std::string &prompt, 
 		payload += "}";
 	}
 
-	try {
-		EnforceAllowedHost(log_endpoint, options);
-		HttpPost(log_endpoint, payload, {"Content-Type: application/json"}, TimeoutSeconds(options), true,
-		         RetryCount(options), RetryBackoffMs(options), options.client_context);
-	} catch (std::exception &ex) {
-		auto log_strict = options.has_log_strict ? options.log_strict : EnvFlagEnabled("DUCKDB_AI_LOG_STRICT");
-		if (log_strict) {
-			throw IOException("AI usage log request failed: %s", ex.what());
-		}
-	}
+	SubmitUsageLog(options, log_endpoint, std::move(payload), "AI usage log request failed");
 }
 
 void MaybePostEmbeddingLog(const ProviderConfig &config, const std::string &input, const EmbeddingResult &result,
@@ -2696,20 +3551,25 @@ void MaybePostEmbeddingLog(const ProviderConfig &config, const std::string &inpu
 		    {"ai.prompt_tokens", result.prompt_tokens},
 		    {"ai.total_tokens", result.total_tokens},
 		    {"ai.elapsed_ms", result.elapsed_ms},
+		    {"ai.retries", result.retries},
 		    {"http.status_code", result.http_status},
 		};
-		payload = OtlpLogPayload("ai_embedding", config.provider, config.protocol, config.model, log_tags, "ai.input",
-		                         input, "", "", include_text, metrics, estimated_cost_usd);
+		payload = OtlpLogPayload("ai_embedding", options.function_name, options.query_id, config.provider,
+		                         config.protocol, config.model, log_tags, "ai.input", input, "", "", include_text,
+		                         metrics, estimated_cost_usd);
 	} else {
 		payload = std::string("{") + "\"extension\":\"duckdb_ai\"," + "\"event\":\"ai_embedding\"," +
-		          "\"provider\":\"" + JsonEscape(config.provider) + "\"," + "\"protocol\":\"" +
-		          JsonEscape(config.protocol) + "\"," + "\"model\":\"" + JsonEscape(config.model) + "\"," +
-		          "\"input_chars\":" + std::to_string(input.size()) + "," +
+		          "\"function_name\":\"" + JsonEscape(options.function_name) + "\"," + "\"query_id\":\"" +
+		          JsonEscape(options.query_id) + "\"," + "\"provider\":\"" + JsonEscape(config.provider) + "\"," +
+		          "\"protocol\":\"" + JsonEscape(config.protocol) + "\"," + "\"model\":\"" + JsonEscape(config.model) +
+		          "\"," + "\"input_chars\":" + std::to_string(input.size()) + "," +
 		          "\"dimensions\":" + std::to_string(result.values.size()) + "," +
 		          "\"prompt_tokens\":" + std::to_string(result.prompt_tokens) + "," +
 		          "\"total_tokens\":" + std::to_string(result.total_tokens) + "," +
 		          "\"elapsed_ms\":" + std::to_string(result.elapsed_ms) + "," +
-		          "\"http_status\":" + std::to_string(result.http_status);
+		          "\"retries\":" + std::to_string(result.retries) + "," +
+		          "\"http_status\":" + std::to_string(result.http_status) + "," +
+		          "\"cache_hit\":" + std::string(result.cache_hit ? "true" : "false") + "," + "\"status\":\"ok\"";
 
 		if (HasEstimatedCost(estimated_cost_usd)) {
 			payload += ",\"estimated_cost_usd\":" + JsonDouble(estimated_cost_usd);
@@ -2723,16 +3583,7 @@ void MaybePostEmbeddingLog(const ProviderConfig &config, const std::string &inpu
 		payload += "}";
 	}
 
-	try {
-		EnforceAllowedHost(log_endpoint, options);
-		HttpPost(log_endpoint, payload, {"Content-Type: application/json"}, TimeoutSeconds(options), true,
-		         RetryCount(options), RetryBackoffMs(options), options.client_context);
-	} catch (std::exception &ex) {
-		auto log_strict = options.has_log_strict ? options.log_strict : EnvFlagEnabled("DUCKDB_AI_LOG_STRICT");
-		if (log_strict) {
-			throw IOException("AI embedding log request failed: %s", ex.what());
-		}
-	}
+	SubmitUsageLog(options, log_endpoint, std::move(payload), "AI embedding log request failed");
 }
 
 } // namespace
@@ -2750,6 +3601,10 @@ ProviderConfig ResolveProvider(const std::string &provider, const std::string &m
 
 ProviderConfig ResolveProvider(const CompletionOptions &options) {
 	return ResolveProviderConfig(options, true);
+}
+
+void SnapshotEnvironmentOptions(CompletionOptions &options) {
+	SnapshotEnvironmentOptionsInternal(options);
 }
 
 std::string ProviderBaseUrl(const std::string &provider) {
@@ -2794,28 +3649,56 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	auto endpoint = RequestEndpoint(config);
 	auto payload = RequestPayload(config, prompt, options);
 	EnforceAllowedHost(endpoint, options);
-	auto response = [&]() {
-		if (ResponseCacheEnabled(options)) {
-			auto &runtime_state = RuntimeState(options);
-			auto cache_key = ResponseCacheKey("completion", config, endpoint, payload);
-			HttpResponse cached_response;
-			if (TryGetCachedResponse(runtime_state, cache_key, cached_response)) {
-				return cached_response;
+	HttpResponse response;
+	try {
+		response = [&]() {
+			if (ResponseCacheEnabled(options)) {
+				auto &runtime_state = RuntimeState(options);
+				auto cache_key = ResponseCacheKey("completion", config, endpoint, payload);
+				HttpResponse cached_response;
+				if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
+					return cached_response;
+				}
+				bool owns_request = false;
+				auto pending = BeginPendingCachedResponse(runtime_state, cache_key, owns_request);
+				if (!owns_request) {
+					return WaitForPendingCachedResponse(runtime_state, cache_key, pending);
+				}
+				try {
+					auto fresh_response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options,
+					                                       EstimatedCompletionTokens(prompt, options));
+					if (fresh_response.status >= 200 && fresh_response.status < 300) {
+						StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
+					}
+					FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
+					return fresh_response;
+				} catch (std::exception &ex) {
+					FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
+					throw;
+				} catch (...) {
+					FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
+					throw;
+				}
 			}
-			ProviderRequestGuard request_guard(options, EstimatedCompletionTokens(prompt, options));
-			auto fresh_response = HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false,
-			                               RetryCount(options), RetryBackoffMs(options), options.client_context);
-			if (fresh_response.status >= 200 && fresh_response.status < 300) {
-				StoreCachedResponse(runtime_state, cache_key, fresh_response);
-			}
-			return fresh_response;
-		}
-		ProviderRequestGuard request_guard(options, EstimatedCompletionTokens(prompt, options));
-		return HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false, RetryCount(options),
-		                RetryBackoffMs(options), options.client_context);
-	}();
-	ThrowIfProviderHttpError(config, response);
-	auto result = ParseCompletionResult(config, response);
+			return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options,
+			                        EstimatedCompletionTokens(prompt, options));
+		}();
+	} catch (std::exception &ex) {
+		RecordFailedUsageEvent(config, prompt, options, 0, ex.what(), 0);
+		throw;
+	}
+	if (response.status < 200 || response.status >= 300) {
+		auto error = ProviderErrorDetail(config, response);
+		RecordFailedUsageEvent(config, prompt, options, response.status, error, response.retries);
+		throw IOException("%s", error);
+	}
+	CompletionResult result;
+	try {
+		result = ParseCompletionResult(config, response);
+	} catch (std::exception &ex) {
+		RecordFailedUsageEvent(config, prompt, options, response.status, ex.what(), response.retries);
+		throw;
+	}
 	RecordUsageEvent(config, prompt, result, options);
 	MaybePostUsageLog(config, prompt, result, options);
 	return result;
@@ -2833,28 +3716,55 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	auto endpoint = RequestEndpoint(config);
 	auto payload = RequestPayload(config, text, options);
 	EnforceAllowedHost(endpoint, options);
-	auto response = [&]() {
-		if (ResponseCacheEnabled(options)) {
-			auto &runtime_state = RuntimeState(options);
-			auto cache_key = ResponseCacheKey("redaction", config, endpoint, payload);
-			HttpResponse cached_response;
-			if (TryGetCachedResponse(runtime_state, cache_key, cached_response)) {
-				return cached_response;
+	HttpResponse response;
+	try {
+		response = [&]() {
+			if (ResponseCacheEnabled(options)) {
+				auto &runtime_state = RuntimeState(options);
+				auto cache_key = ResponseCacheKey("redaction", config, endpoint, payload);
+				HttpResponse cached_response;
+				if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
+					return cached_response;
+				}
+				bool owns_request = false;
+				auto pending = BeginPendingCachedResponse(runtime_state, cache_key, owns_request);
+				if (!owns_request) {
+					return WaitForPendingCachedResponse(runtime_state, cache_key, pending);
+				}
+				try {
+					auto fresh_response =
+					    ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(text));
+					if (fresh_response.status >= 200 && fresh_response.status < 300) {
+						StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
+					}
+					FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
+					return fresh_response;
+				} catch (std::exception &ex) {
+					FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
+					throw;
+				} catch (...) {
+					FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
+					throw;
+				}
 			}
-			ProviderRequestGuard request_guard(options, EstimateTokenCount(text));
-			auto fresh_response = HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false,
-			                               RetryCount(options), RetryBackoffMs(options), options.client_context);
-			if (fresh_response.status >= 200 && fresh_response.status < 300) {
-				StoreCachedResponse(runtime_state, cache_key, fresh_response);
-			}
-			return fresh_response;
-		}
-		ProviderRequestGuard request_guard(options, EstimateTokenCount(text));
-		return HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false, RetryCount(options),
-		                RetryBackoffMs(options), options.client_context);
-	}();
-	ThrowIfProviderHttpError(config, response);
-	auto result = ParseCompletionResult(config, response);
+			return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(text));
+		}();
+	} catch (std::exception &ex) {
+		RecordFailedUsageEvent(config, text, options, 0, ex.what(), 0);
+		throw;
+	}
+	if (response.status < 200 || response.status >= 300) {
+		auto error = ProviderErrorDetail(config, response);
+		RecordFailedUsageEvent(config, text, options, response.status, error, response.retries);
+		throw IOException("%s", error);
+	}
+	CompletionResult result;
+	try {
+		result = ParseCompletionResult(config, response);
+	} catch (std::exception &ex) {
+		RecordFailedUsageEvent(config, text, options, response.status, ex.what(), response.retries);
+		throw;
+	}
 	RecordUsageEvent(config, text, result, options);
 	MaybePostUsageLog(config, text, result, options);
 	return result;
@@ -2887,31 +3797,115 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	auto endpoint = EmbeddingEndpoint(config);
 	auto payload = EmbeddingPayload(config, input);
 	EnforceAllowedHost(endpoint, options);
-	auto response = [&]() {
-		if (ResponseCacheEnabled(options)) {
-			auto &runtime_state = RuntimeState(options);
-			auto cache_key = ResponseCacheKey("embedding", config, endpoint, payload);
-			HttpResponse cached_response;
-			if (TryGetCachedResponse(runtime_state, cache_key, cached_response)) {
-				return cached_response;
+	HttpResponse response;
+	try {
+		response = [&]() {
+			if (ResponseCacheEnabled(options)) {
+				auto &runtime_state = RuntimeState(options);
+				auto cache_key = ResponseCacheKey("embedding", config, endpoint, payload);
+				HttpResponse cached_response;
+				if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
+					return cached_response;
+				}
+				bool owns_request = false;
+				auto pending = BeginPendingCachedResponse(runtime_state, cache_key, owns_request);
+				if (!owns_request) {
+					return WaitForPendingCachedResponse(runtime_state, cache_key, pending);
+				}
+				try {
+					auto fresh_response =
+					    ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(input));
+					if (fresh_response.status >= 200 && fresh_response.status < 300) {
+						StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
+					}
+					FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
+					return fresh_response;
+				} catch (std::exception &ex) {
+					FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
+					throw;
+				} catch (...) {
+					FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
+					throw;
+				}
 			}
-			ProviderRequestGuard request_guard(options, EstimateTokenCount(input));
-			auto fresh_response = HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false,
-			                               RetryCount(options), RetryBackoffMs(options), options.client_context);
-			if (fresh_response.status >= 200 && fresh_response.status < 300) {
-				StoreCachedResponse(runtime_state, cache_key, fresh_response);
-			}
-			return fresh_response;
-		}
-		ProviderRequestGuard request_guard(options, EstimateTokenCount(input));
-		return HttpPost(endpoint, payload, RequestHeaders(config), TimeoutSeconds(options), false, RetryCount(options),
-		                RetryBackoffMs(options), options.client_context);
-	}();
-	ThrowIfProviderHttpError(config, response);
-	auto result = ParseEmbeddingResult(config, response);
+			return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, EstimateTokenCount(input));
+		}();
+	} catch (std::exception &ex) {
+		RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+		throw;
+	}
+	if (response.status < 200 || response.status >= 300) {
+		auto error = ProviderErrorDetail(config, response);
+		RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+		throw IOException("%s", error);
+	}
+	EmbeddingResult result;
+	try {
+		result = ParseEmbeddingResult(config, response);
+	} catch (std::exception &ex) {
+		RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
+		throw;
+	}
 	RecordEmbeddingUsageEvent(config, input, result, options);
 	MaybePostEmbeddingLog(config, input, result, options);
 	return result;
+}
+
+std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, const CompletionOptions &options) {
+	if (inputs.empty()) {
+		return {};
+	}
+	if (inputs.size() == 1 || ResponseCacheEnabled(options)) {
+		std::vector<EmbeddingResult> results;
+		results.reserve(inputs.size());
+		for (auto &input : inputs) {
+			results.push_back(Embed(input, options));
+		}
+		return results;
+	}
+	for (auto &input : inputs) {
+		if (input.empty()) {
+			throw InvalidInputException("ai_embed input must not be empty");
+		}
+	}
+	auto config = ResolveEmbeddingProviderConfig(options, true);
+	auto endpoint = EmbeddingEndpoint(config);
+	auto payload = EmbeddingPayload(config, inputs);
+	EnforceAllowedHost(endpoint, options);
+	auto total_tokens = int64_t(0);
+	for (auto &input : inputs) {
+		total_tokens += EstimateTokenCount(input);
+	}
+	HttpResponse response;
+	try {
+		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, total_tokens);
+	} catch (std::exception &ex) {
+		for (auto &input : inputs) {
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+		}
+		throw;
+	}
+	if (response.status < 200 || response.status >= 300) {
+		auto error = ProviderErrorDetail(config, response);
+		for (auto &input : inputs) {
+			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+		}
+		throw IOException("%s", error);
+	}
+	std::vector<EmbeddingResult> results;
+	try {
+		results = ParseEmbeddingResults(config, response, inputs.size());
+	} catch (std::exception &ex) {
+		for (auto &input : inputs) {
+			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
+		}
+		throw;
+	}
+	for (idx_t i = 0; i < results.size(); i++) {
+		RecordEmbeddingUsageEvent(config, inputs[i], results[i], options);
+		MaybePostEmbeddingLog(config, inputs[i], results[i], options);
+	}
+	return results;
 }
 
 void InitializeProviderRuntime() {
@@ -2971,6 +3965,8 @@ void RecordLocalUsageEvent(ClientContext *context, const std::string &event_name
 	UsageEvent event;
 	event.created_at = CurrentTimestamp();
 	event.event = event_name;
+	event.function_name = event_name;
+	event.query_id = "";
 	event.provider = "local";
 	event.protocol = "duckdb";
 	event.model = "";
@@ -2981,8 +3977,14 @@ void RecordLocalUsageEvent(ClientContext *context, const std::string &event_name
 	event.prompt_tokens = -1;
 	event.completion_tokens = -1;
 	event.total_tokens = -1;
+	event.cached_prompt_tokens = -1;
+	event.cache_creation_prompt_tokens = -1;
 	event.elapsed_ms = 0;
+	event.retries = 0;
 	event.http_status = 0;
+	event.cache_hit = false;
+	event.status = "ok";
+	event.error = "";
 	event.estimated_cost_usd = -1;
 	auto &state = context ? RuntimeState(*context) : fallback_runtime_state;
 	PushUsageEvent(state, std::move(event));
@@ -3088,6 +4090,28 @@ bool ExtractJsonObjectFields(const std::string &input, const std::vector<std::st
 		}
 		extracted = ExtractJsonValue(field->second);
 		values.push_back(std::move(extracted));
+	}
+	return true;
+}
+
+bool ExtractJsonStringArray(const std::string &input, std::vector<std::string> &values, std::string &error) {
+	JsonValue value;
+	if (!ParseJsonValueDocument(input, value, error)) {
+		return false;
+	}
+	if (value.type != JsonValueType::ARRAY) {
+		error = "expected top-level JSON array";
+		return false;
+	}
+	values.clear();
+	values.reserve(value.array_value.size());
+	for (auto &item : value.array_value) {
+		if (item.type != JsonValueType::STRING) {
+			error = "expected JSON array entries to be strings";
+			values.clear();
+			return false;
+		}
+		values.push_back(item.string_value);
 	}
 	return true;
 }

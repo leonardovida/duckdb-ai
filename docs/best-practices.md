@@ -14,7 +14,7 @@ Use the most constrained provider that fits the job:
 | Workload | Recommended path | Why |
 | --- | --- | --- |
 | Local development without hosted credentials | `ollama` | Keeps prompts local and avoids provider costs. |
-| Production chat, extraction, classification, and SQL assistant calls | A managed LLM provider such as `openai`, `azure`, `databricks`, `snowflake`, `claude`, `gemini`, `mistral`, `deepseek`, `zai`, or `openrouter` | Gives managed reliability, model access, and governance controls. |
+| Production chat, extraction, classification, and SQL assistant calls | A managed LLM provider such as `openai`, `azure`, `databricks`, `snowflake`, `anthropic`, `gemini`, `mistral`, `deepseek`, `zai`, or `openrouter` | Gives managed reliability, model access, and governance controls. |
 | OpenAI-compatible gateways, vLLM, LM Studio, LiteLLM, or local Ollama `/v1` | `openai_compatible` or `local` | Uses the common chat-completions request shape. |
 | PII redaction where raw text should stay local | `openai_privacy_filter` with local hosting | Sends raw text to a dedicated redaction service instead of a general chat model. |
 | PII redaction shared across teams | `openai_privacy_filter` with a private cloud service | Centralizes deployment, auth, scaling, and audit controls while preserving the dedicated redaction contract. |
@@ -47,7 +47,7 @@ Use provider-specific environment variables for local development:
 | --- | --- | --- |
 | `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | `azure` | `AZURE_OPENAI_API_KEY` | `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_ENDPOINT` |
-| `claude` / `anthropic` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | `CLAUDE_BASE_URL` |
+| `anthropic` / `claude` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | `ANTHROPIC_BASE_URL` or `CLAUDE_BASE_URL` |
 | `gemini` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
 | `mistral` | `MISTRAL_API_KEY` | `MISTRAL_BASE_URL` |
 | `zai` | `ZAI_API_KEY` | `ZAI_BASE_URL` |
@@ -78,7 +78,7 @@ models:
 ```sql
 SET duckdb_ai_completion_model = 'gpt-4o-mini';
 SET duckdb_ai_task_model = 'gpt-4o-mini';
-SET duckdb_ai_sql_model = 'gpt-4o';
+SET duckdb_ai_sql_assistant_model = 'gpt-4o';
 SET duckdb_ai_aggregate_model = 'gpt-4o-mini';
 SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 ```
@@ -117,7 +117,7 @@ log endpoints.
 Use request-preview functions in tests, reviews, and provider debugging:
 
 ```sql
-SELECT ai_request_json(
+SELECT ai_completion_request_json(
     'Summarize this.',
     provider := 'snowflake',
     model := 'snowflake-llama-3.3-70b'
@@ -281,14 +281,14 @@ SELECT ai_complete(
 Retry sleeps are interruptible and provider `Retry-After` headers take
 precedence over the configured backoff. Provider redirects are not followed.
 
-Use `fail_on_error := false` for exploratory enrichment where a missing output
+Use `on_error := 'null'` for exploratory enrichment where a missing output
 is acceptable:
 
 ```sql
 SELECT ai_classify(
     subject,
     'billing, support, sales, other',
-    fail_on_error := false
+    on_error := 'null'
 )
 FROM support_tickets;
 ```
@@ -323,12 +323,70 @@ WHERE result.error IS NOT NULL;
 Use the same rejected-row `SELECT` inside `COPY (...) TO 'failed_rows.parquet'`
 or an `s3://...` target when failures should live outside the DuckDB database.
 
+## Export provider-native batch requests for offline jobs
+
+`duckdb_ai` runs provider calls synchronously inside the DuckDB query. For
+overnight jobs that should use provider-native Batch APIs, materialize request
+bodies with the request-preview functions, then submit and poll them with your
+job runner or provider SDK:
+
+```sql
+COPY (
+    SELECT
+        ticket_id AS custom_id,
+        ai_completion_request_json(
+            subject || chr(10) || body,
+            provider := 'openai',
+            model := 'gpt-4o-mini',
+            system_prompt := 'Summarize this support ticket in one sentence.'
+        ) AS body
+    FROM support_tickets
+) TO 'openai-batch-requests.jsonl' (FORMAT json);
+```
+
+Store `custom_id` with the provider response and join it back to the source
+table after the batch finishes. Keep `response_schema` or downstream DuckDB
+validation in the exported request path so the offline job has the same shape
+checks as interactive SQL enrichment.
+
+## Use provider-side prompt caching for stable prefixes
+
+Keep static instructions, schemas, and catalog context byte-stable across rows.
+`ai_complete_json` and `ai_complete_record` put their JSON instructions and
+schema in the system message so the row-specific text stays last. Task wrappers
+put their static task instructions in the system message, and SQL assistant
+functions put their static rules and schema context there for the same reason.
+
+For providers that expose cache controls, opt in with `prompt_cache := true` or
+`DUCKDB_AI_PROMPT_CACHE=1`:
+
+```sql
+SELECT ai_complete_json(
+    body,
+    provider := 'openai',
+    prompt_cache := true,
+    response_schema := '{"type":"object","properties":{"summary":{"type":"string"}}}'
+)
+FROM documents;
+```
+
+OpenAI-compatible prompt caching generally needs a stable prefix of at least
+1,024 tokens before cached-token discounts appear. Anthropic cache reads and
+writes are exposed in `ai_usage()` as `cached_prompt_tokens` and
+`cache_creation_prompt_tokens`.
+
+This is separate from the extension's exact-response cache. Use `cache := true`
+when identical prompts may repeat inside or across chunks in the same database
+process. Concurrent identical misses are coalesced into one provider request,
+and `cache_ttl_seconds := ...` or `DUCKDB_AI_CACHE_TTL_SECONDS` can expire
+entries by age.
+
 ## Log usage without leaking text
 
 `ai_usage()` keeps recent events in process:
 
 ```sql
-SELECT provider, model, elapsed_ms, http_status, estimated_cost_usd
+SELECT function_name, query_id, provider, model, elapsed_ms, http_status, estimated_cost_usd
 FROM ai_usage()
 ORDER BY event_id DESC;
 ```
@@ -349,9 +407,9 @@ reason:
 SET duckdb_ai_log_include_text = true;
 ```
 
-Use `duckdb_ai_log_strict = true` only when losing a usage log must fail the SQL
-query. For most analytics workflows, keep strict logging off so the collector
-does not become a query dependency.
+By default, outbound usage logs are queued asynchronously and sent on a
+best-effort basis. Use `duckdb_ai_log_strict = true` only when losing a usage log
+must fail the SQL query; strict logs are posted synchronously.
 
 ## Corporate proxy and TLS
 
@@ -368,9 +426,9 @@ built-in catalog when it covers your model:
 
 ```sql
 SET duckdb_ai_use_builtin_model_prices = true;
-SELECT * FROM ai_models();
+SELECT * FROM ai_model_prices();
 ```
 
-Treat `ai_models()` as a convenience catalog, not a billing source of truth.
+Treat `ai_model_prices()` as a convenience catalog, not a billing source of truth.
 Provider pricing and regional availability change; verify prices with the
 provider before using estimates for chargeback or budgeting.

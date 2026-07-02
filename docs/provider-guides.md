@@ -21,7 +21,7 @@ runs. If you prefer a fully DuckDB-managed secret, add `API_KEY '...'` to the
 After any provider call, inspect the local usage buffer:
 
 ```sql
-SELECT provider, protocol, model, http_status, elapsed_ms
+SELECT function_name, provider, protocol, model, http_status, elapsed_ms
 FROM ai_usage()
 ORDER BY event_id DESC
 LIMIT 1;
@@ -34,7 +34,7 @@ LIMIT 1;
 | `ollama` | Ollama chat and embeddings | `llama3.2`; embeddings use `nomic-embed-text` | Optional `OLLAMA_API_KEY` | Defaults to `http://localhost:11434`; `OLLAMA_HOST` overrides it. |
 | `openai` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
 | `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
-| `claude` / `anthropic` | Anthropic Messages | `claude-3-5-haiku-latest` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
+| `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
 | `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-2.5-flash`; embeddings use `text-embedding-004` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
 | `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://open.bigmodel.cn/api/paas/v4`. |
@@ -173,7 +173,7 @@ LOAD duckdb_ai;
 CREATE OR REPLACE SECRET claude_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'anthropic',
-    MODEL 'claude-3-5-haiku-latest'
+    MODEL 'claude-haiku-4-5'
 );
 
 SELECT ai_complete(
