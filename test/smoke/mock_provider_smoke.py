@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -42,6 +43,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             request = json.loads(body)
             self.completion_requests.append(request)
             prompt = request["messages"][-1]["content"]
+            full_prompt = "\n".join(message["content"] for message in request["messages"])
             if "force provider error" in prompt:
                 self._send_json(
                     {
@@ -68,13 +70,19 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                         status=500,
                     )
                     return
+            if prompt == "cache dogpile":
+                time.sleep(0.2)
             content = "mock completion"
             if prompt == "retry once":
                 content = "mock retry completion"
+            elif prompt == "cache dogpile":
+                content = "mock dogpile completion"
             elif "return invalid schema JSON" in prompt:
                 content = '{"summary":123}'
             elif "return constrained schema JSON" in prompt:
                 content = '{"summary":"mock structured","score":0.5,"tags":["duck","ai"]}'
+            elif "return scalar record JSON object" in prompt:
+                content = '{"summary":"mock scalar record","profile":{"company":"DuckDB Labs"}}'
             elif "return record JSON object" in prompt:
                 content = (
                     '{"summary":"mock record","score":0.75,"tags":["duck","sql"],'
@@ -89,16 +97,20 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = '{"tags":["duck","duck"]}'
             elif "return oneOf violation JSON" in prompt:
                 content = '{"a":1,"b":2}'
-            elif request.get("response_format") or "Return only valid JSON" in prompt:
+            elif request.get("response_format") or "Return only valid JSON" in full_prompt:
                 content = '{"summary":"mock structured"}'
-            elif "Explain the DuckDB SQL query" in prompt:
+            elif "Explain the DuckDB SQL query" in full_prompt:
                 content = "This query returns a single row with 42."
-            elif "Correct the DuckDB SQL query" in prompt:
+            elif "Correct the DuckDB SQL query" in full_prompt:
                 content = "```sql\nSELECT 42\n```"
-            elif "Correct one line in the DuckDB SQL query" in prompt:
+            elif "Correct one line in the DuckDB SQL query" in full_prompt:
                 content = "SELECT 42"
-            elif "Generate one DuckDB SQL SELECT statement" in prompt:
+            elif "Generate one DuckDB SQL SELECT statement" in full_prompt:
                 content = "```sql\nSELECT 42\n```"
+            elif "Return only a JSON array of chosen labels" in full_prompt:
+                content = '["billing, overdue","performance"]'
+            elif "Score candidate relevance to the search query" in full_prompt:
+                content = "0.82"
             payload = {
                 "choices": [{"message": {"content": content}}],
                 "usage": {
@@ -112,12 +124,15 @@ class MockProviderHandler(BaseHTTPRequestHandler):
 
         if self.path == "/embeddings":
             self.authorization_headers.append(self.headers.get("authorization"))
-            self.embedding_requests.append(json.loads(body))
+            request = json.loads(body)
+            self.embedding_requests.append(request)
+            inputs = request.get("input")
+            input_count = len(inputs) if isinstance(inputs, list) else 1
             payload = {
-                "data": [{"embedding": [0.25, -0.5, 1.25]}],
+                "data": [{"embedding": [0.25, -0.5, 1.25]} for _ in range(input_count)],
                 "usage": {
-                    "prompt_tokens": 2,
-                    "total_tokens": 2,
+                    "prompt_tokens": 2 * input_count,
+                    "total_tokens": 2 * input_count,
                 },
             }
             self._send_json(payload)
@@ -187,7 +202,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SET duckdb_ai_task_model = 'mock-task-model';
         SET duckdb_ai_aggregate_model = 'mock-aggregate-model';
         SET duckdb_ai_embedding_model = 'mock-embedding-default';
-        SET duckdb_ai_sql_model = 'mock-sql-model';
+        SET duckdb_ai_sql_assistant_model = 'mock-sql-model';
         SET duckdb_ai_base_url = '{base_url}';
         SET duckdb_ai_log_endpoint = '{base_url}/log';
         SET duckdb_ai_timeout_seconds = 5;
@@ -272,12 +287,17 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SELECT ai_fix_grammar('duckdb are fast') AS fixed_grammar;
         SELECT ai_redact('email alice@example.com token fake-token') AS masked_text;
         SELECT ai_translate('hello', 'Dutch') AS translation;
-        SELECT ai_classify('invoice overdue', 'billing, support') AS classification;
+        SELECT ai_classify('invoice overdue', ['billing, overdue', 'support']) AS classification;
+        SELECT ai_classify_labels('invoice overdue and slow app', ['billing, overdue', 'performance', 'support']) AS labels;
         SELECT ai_extract('name: DuckDB', 'name') AS extracted;
         SELECT ai_sql(
             'count rows',
             schema_context := 'CREATE TABLE smoke_table(id INTEGER)'
         ) AS generated_sql;
+        SELECT * FROM ai_query_data(
+            'count rows',
+            schema_context := 'CREATE TABLE smoke_table(id INTEGER)'
+        );
         SELECT * FROM ai_query_data(
             'count rows',
             schema_context := 'CREATE TABLE smoke_table(id INTEGER)'
@@ -293,8 +313,9 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             schema_context := 'CREATE TABLE smoke_table(id INTEGER)'
         );
         SELECT line_number, replacement_line
-        FROM ai_fix_sql_line(
+        FROM ai_fix_sql(
             'SEELECT 42',
+            mode := 'line',
             error := 'Parser Error: syntax error at or near "SEELECT" LINE 1: SEELECT 42',
             schema_context := 'CREATE TABLE smoke_table(id INTEGER)'
         );
@@ -340,6 +361,13 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         ) AS snowflake_completion;
         SELECT result.response, result.error IS NULL
         FROM (SELECT ai_try_complete('try complete smoke', max_tokens := 5) AS result);
+        SELECT extracted.summary, extracted.profile.company
+        FROM (
+            SELECT ai_extract_record(
+                'return scalar record JSON object',
+                '{{"type":"object","properties":{{"summary":{{"type":"string"}},"profile":{{"type":"object","properties":{{"company":{{"type":"string"}}}},"required":["company"],"additionalProperties":false}}}},"required":["summary","profile"],"additionalProperties":false}}'
+            ) AS extracted
+        );
         SELECT ai_redact(
             'email alice@example.com token fake-token',
             secret := 'smoke_privacy_filter_ai',
@@ -347,7 +375,15 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             model := 'openai/privacy-filter'
         ) AS privacy_filter_redaction;
         SELECT ai_embed('embed smoke')[1] AS first_embedding_value;
+        SELECT sum(embedding[1]) AS batched_embedding_sum
+        FROM (
+            SELECT ai_embed(value) AS embedding
+            FROM (VALUES ('embed batch one'), ('embed batch two'), ('embed batch three')) AS input(value)
+        );
         SELECT round(ai_similarity('same left', 'same right'), 6) AS similarity;
+        SELECT round(sum(ai_similarity('constant query', candidate)), 6) AS constant_similarity_sum
+        FROM (VALUES ('candidate one'), ('candidate two'), ('candidate three')) AS input(candidate);
+        SELECT ai_rerank('analytics database', 'DuckDB runs analytical SQL') AS rerank_score;
         SELECT event, provider, protocol, model, prompt_chars, response_chars, input_chars,
                dimensions, prompt_tokens, completion_tokens, total_tokens, http_status,
                estimated_cost_usd
@@ -416,6 +452,12 @@ def run_duckdb_cache_and_allowlist(duckdb_path: Path, base_url: str) -> str:
         );
         SELECT ai_complete('cache smoke', cache := true) AS first_completion;
         SELECT ai_complete('cache smoke', cache := true) AS second_completion;
+        SELECT count(*) AS dogpile_cached_rows
+        FROM (
+            SELECT ai_complete('cache dogpile', cache := true, max_concurrent_requests := 8) AS completion
+            FROM range(16)
+        )
+        WHERE completion = 'mock dogpile completion';
         SELECT count(*) AS usage_events FROM ai_usage();
     """
     env = os.environ.copy()
@@ -464,6 +506,38 @@ def run_duckdb_allowlist_error(duckdb_path: Path, base_url: str) -> str:
     return result.stdout
 
 
+def run_duckdb_strict_log_error(duckdb_path: Path, base_url: str, port: int) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_model = 'mock-model';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_allowed_hosts = '{base_url}';
+        SET duckdb_ai_log_endpoint = 'http://localhost:{port}/log';
+        SET duckdb_ai_log_strict = true;
+        SET duckdb_ai_timeout_seconds = 5;
+        CREATE OR REPLACE SECRET smoke_strict_log_duckdb_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai'
+        );
+        SELECT ai_complete('strict log blocked');
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"duckdb strict log smoke unexpectedly succeeded\n{result.stdout}")
+    return result.stdout
+
+
 def assert_provider_error(output: str):
     required = [
         'AI provider "openai" (openai_chat, model "mock-model") returned HTTP 401',
@@ -479,19 +553,27 @@ def assert_provider_error(output: str):
 
 
 def assert_cache_and_allowlist_result(output: str):
-    required = ["first_completion", "second_completion", "mock completion", "usage_events", "2"]
+    required = [
+        "first_completion",
+        "second_completion",
+        "mock completion",
+        "dogpile_cached_rows",
+        "16",
+        "usage_events",
+        "18",
+    ]
     missing = [value for value in required if value not in output]
     if missing:
         raise AssertionError(f"cache output missing {missing}\n{output}")
-    if len(MockProviderHandler.completion_requests) != 1:
+    if len(MockProviderHandler.completion_requests) != 2:
         raise AssertionError(
-            f"expected 1 cached completion request, got {len(MockProviderHandler.completion_requests)}"
+            f"expected 2 cached completion requests, got {len(MockProviderHandler.completion_requests)}"
         )
-    if len(MockProviderHandler.authorization_headers) != 1:
-        raise AssertionError(f"expected 1 cached auth header, got {len(MockProviderHandler.authorization_headers)}")
-    prompt = MockProviderHandler.completion_requests[0]["messages"][-1]["content"]
-    if prompt != "cache smoke":
-        raise AssertionError(f"unexpected cache prompt: {prompt}")
+    if len(MockProviderHandler.authorization_headers) != 2:
+        raise AssertionError(f"expected 2 cached auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    prompts = [request["messages"][-1]["content"] for request in MockProviderHandler.completion_requests]
+    if prompts != ["cache smoke", "cache dogpile"]:
+        raise AssertionError(f"unexpected cache prompts: {prompts}")
 
 
 def assert_allowlist_error(output: str):
@@ -500,6 +582,17 @@ def assert_allowlist_error(output: str):
     if MockProviderHandler.completion_requests:
         raise AssertionError(
             f"allowlist should block before provider request: {MockProviderHandler.completion_requests}"
+        )
+
+
+def assert_strict_log_error(output: str):
+    if "AI usage log request failed" not in output or "not allowed by duckdb_ai_allowed_hosts" not in output:
+        raise AssertionError(f"strict log error missing expected message\n{output}")
+    if len(MockProviderHandler.completion_requests) != 1:
+        raise AssertionError(f"strict log should call provider once: {MockProviderHandler.completion_requests}")
+    if MockProviderHandler.log_requests:
+        raise AssertionError(
+            f"strict log allowlist should block before log request: {MockProviderHandler.log_requests}"
         )
 
 
@@ -533,8 +626,8 @@ def assert_smoke_result(output: str):
         "mock-completion-model",
         "mock-task-model",
         "mock-sql-model",
-        "mock-aggregate-model",
         "mock-embedding-default",
+        "ai_query_data_cache_hit",
         "openai_privacy_filter",
         "privacy_filter",
         "databricks",
@@ -542,8 +635,12 @@ def assert_smoke_result(output: str):
         "databricks-llama-4-maverick",
         "snowflake-llama-3.3-70b",
         "email [PRIVATE_EMAIL] token [SECRET]",
+        "billing, overdue",
+        "performance",
+        "0.82",
         "0.25",
         "1.0",
+        "3.0",
         "16",
         "15",
         "7",
@@ -555,10 +652,10 @@ def assert_smoke_result(output: str):
     if missing:
         raise AssertionError(f"duckdb output missing {missing}\n{output}")
 
-    if len(MockProviderHandler.completion_requests) != 31:
-        raise AssertionError(f"expected 31 completion requests, got {len(MockProviderHandler.completion_requests)}")
-    if len(MockProviderHandler.authorization_headers) != 35:
-        raise AssertionError(f"expected 35 auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if len(MockProviderHandler.completion_requests) != 34:
+        raise AssertionError(f"expected 34 completion requests, got {len(MockProviderHandler.completion_requests)}")
+    if len(MockProviderHandler.authorization_headers) != 43:
+        raise AssertionError(f"expected 43 auth headers, got {len(MockProviderHandler.authorization_headers)}")
     for header in MockProviderHandler.authorization_headers:
         if header != "Bearer test-key":
             raise AssertionError(f"unexpected authorization header: {header}")
@@ -566,14 +663,14 @@ def assert_smoke_result(output: str):
     completion_models = [request["model"] for request in MockProviderHandler.completion_requests]
     if completion_models[0:9] != ["mock-completion-model"] * 9:
         raise AssertionError(f"unexpected completion default models: {completion_models[0:9]}")
-    if completion_models[9:16] != ["mock-task-model"] * 7:
-        raise AssertionError(f"unexpected task default models: {completion_models[9:16]}")
-    if completion_models[16:21] != ["mock-sql-model"] * 5:
-        raise AssertionError(f"unexpected SQL assistant default models: {completion_models[16:21]}")
-    if completion_models[21:23] != ["mock-aggregate-model"] * 2:
-        raise AssertionError(f"unexpected aggregate default models: {completion_models[21:23]}")
-    if completion_models[23:27] != ["mock-completion-model"] * 4:
-        raise AssertionError(f"unexpected later completion default models: {completion_models[23:27]}")
+    if completion_models[9:17] != ["mock-task-model"] * 8:
+        raise AssertionError(f"unexpected task default models: {completion_models[9:17]}")
+    if completion_models[17:22] != ["mock-sql-model"] * 5:
+        raise AssertionError(f"unexpected SQL assistant default models: {completion_models[17:22]}")
+    if completion_models[22:24] != ["mock-aggregate-model"] * 2:
+        raise AssertionError(f"unexpected aggregate default models: {completion_models[22:24]}")
+    if completion_models[24:28] != ["mock-completion-model"] * 4:
+        raise AssertionError(f"unexpected later completion default models: {completion_models[24:28]}")
 
     completion_request = MockProviderHandler.completion_requests[0]
     if completion_request["model"] != "mock-completion-model":
@@ -593,8 +690,11 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected structured response format: {structured_request}")
     if response_format.get("json_schema", {}).get("schema", {}).get("type") != "object":
         raise AssertionError(f"unexpected structured response schema: {structured_request}")
+    structured_system = structured_request["messages"][0]["content"]
+    if "Return only valid JSON" not in structured_system:
+        raise AssertionError(f"unexpected structured system prompt: {structured_request}")
     structured_prompt = structured_request["messages"][-1]["content"]
-    if "Return only valid JSON" not in structured_prompt or "return a smoke JSON object" not in structured_prompt:
+    if structured_prompt != "return a smoke JSON object":
         raise AssertionError(f"unexpected structured prompt: {structured_prompt}")
 
     invalid_schema_prompt = MockProviderHandler.completion_requests[2]["messages"][-1]["content"]
@@ -620,86 +720,130 @@ def assert_smoke_result(output: str):
         if fragment not in prompt:
             raise AssertionError(f"schema failure prompt missing {fragment!r}: {prompt}")
 
-    task_prompts = [request["messages"][-1]["content"] for request in MockProviderHandler.completion_requests[9:16]]
-    expected_prompt_fragments = [
+    task_messages = [request["messages"] for request in MockProviderHandler.completion_requests[9:17]]
+    expected_system_fragments = [
         "Summarize the following text concisely",
-        "positive, neutral, or negative",
+        "positive, neutral, negative",
         "Fix grammar, spelling, and punctuation",
         "Mask direct personal data",
         "Translate the following text to Dutch",
-        "exactly one of these labels: billing, support",
+        'exactly one of these labels: "billing, overdue", "support"',
+        'zero or more of these labels: "billing, overdue", "performance", "support"',
+        "Extract the requested information",
+    ]
+    expected_user_fragments = [
+        "Text:\nDuckDB executes analytical SQL quickly",
+        "Text:\nI love DuckDB",
+        "Text:\nduckdb are fast",
+        "Text:\nemail alice@example.com token fake-token",
+        "Text:\nhello",
+        "Text:\ninvoice overdue",
+        "Text:\ninvoice overdue and slow app",
         "Extraction request:\nname",
     ]
-    for fragment, prompt in zip(expected_prompt_fragments, task_prompts):
-        if fragment not in prompt:
-            raise AssertionError(f"task prompt missing {fragment!r}: {prompt}")
+    for system_fragment, user_fragment, messages in zip(
+        expected_system_fragments, expected_user_fragments, task_messages
+    ):
+        system_prompt = messages[0]["content"]
+        user_prompt = messages[-1]["content"]
+        if system_fragment not in system_prompt:
+            raise AssertionError(f"task system prompt missing {system_fragment!r}: {system_prompt}")
+        if user_fragment not in user_prompt:
+            raise AssertionError(f"task user prompt missing {user_fragment!r}: {user_prompt}")
 
-    ai_sql_prompt = MockProviderHandler.completion_requests[16]["messages"][-1]["content"]
-    if "Generate one DuckDB SQL SELECT statement" not in ai_sql_prompt:
-        raise AssertionError(f"unexpected ai_sql prompt: {ai_sql_prompt}")
-    if "CREATE TABLE smoke_table(id INTEGER)" not in ai_sql_prompt:
-        raise AssertionError(f"ai_sql prompt missing schema context: {ai_sql_prompt}")
-    ai_query_data_prompt = MockProviderHandler.completion_requests[17]["messages"][-1]["content"]
-    if "Generate one DuckDB SQL SELECT statement" not in ai_query_data_prompt:
-        raise AssertionError(f"unexpected ai_query_data prompt: {ai_query_data_prompt}")
-    if "CREATE TABLE smoke_table(id INTEGER)" not in ai_query_data_prompt:
-        raise AssertionError(f"ai_query_data prompt missing schema context: {ai_query_data_prompt}")
-    ai_explain_sql_prompt = MockProviderHandler.completion_requests[18]["messages"][-1]["content"]
-    if "Explain the DuckDB SQL query" not in ai_explain_sql_prompt:
-        raise AssertionError(f"unexpected ai_explain_sql prompt: {ai_explain_sql_prompt}")
+    ai_sql_messages = MockProviderHandler.completion_requests[17]["messages"]
+    ai_sql_system = ai_sql_messages[0]["content"]
+    ai_sql_prompt = ai_sql_messages[-1]["content"]
+    if "Generate one DuckDB SQL SELECT statement" not in ai_sql_system:
+        raise AssertionError(f"unexpected ai_sql system prompt: {ai_sql_system}")
+    if "CREATE TABLE smoke_table(id INTEGER)" not in ai_sql_system:
+        raise AssertionError(f"ai_sql system prompt missing schema context: {ai_sql_system}")
+    if "Request:\ncount rows" not in ai_sql_prompt:
+        raise AssertionError(f"ai_sql user prompt missing request: {ai_sql_prompt}")
+    ai_query_data_messages = MockProviderHandler.completion_requests[18]["messages"]
+    ai_query_data_system = ai_query_data_messages[0]["content"]
+    ai_query_data_prompt = ai_query_data_messages[-1]["content"]
+    if "Generate one DuckDB SQL SELECT statement" not in ai_query_data_system:
+        raise AssertionError(f"unexpected ai_query_data system prompt: {ai_query_data_system}")
+    if "CREATE TABLE smoke_table(id INTEGER)" not in ai_query_data_system:
+        raise AssertionError(f"ai_query_data system prompt missing schema context: {ai_query_data_system}")
+    if "Request:\ncount rows" not in ai_query_data_prompt:
+        raise AssertionError(f"ai_query_data user prompt missing request: {ai_query_data_prompt}")
+    ai_explain_sql_messages = MockProviderHandler.completion_requests[19]["messages"]
+    ai_explain_sql_system = ai_explain_sql_messages[0]["content"]
+    ai_explain_sql_prompt = ai_explain_sql_messages[-1]["content"]
+    if "Explain the DuckDB SQL query" not in ai_explain_sql_system:
+        raise AssertionError(f"unexpected ai_explain_sql system prompt: {ai_explain_sql_system}")
     if "SELECT 42" not in ai_explain_sql_prompt:
         raise AssertionError(f"ai_explain_sql prompt missing SQL: {ai_explain_sql_prompt}")
-    ai_fix_sql_prompt = MockProviderHandler.completion_requests[19]["messages"][-1]["content"]
-    if "Correct the DuckDB SQL query" not in ai_fix_sql_prompt:
-        raise AssertionError(f"unexpected ai_fix_sql prompt: {ai_fix_sql_prompt}")
+    ai_fix_sql_messages = MockProviderHandler.completion_requests[20]["messages"]
+    ai_fix_sql_system = ai_fix_sql_messages[0]["content"]
+    ai_fix_sql_prompt = ai_fix_sql_messages[-1]["content"]
+    if "Correct the DuckDB SQL query" not in ai_fix_sql_system:
+        raise AssertionError(f"unexpected ai_fix_sql system prompt: {ai_fix_sql_system}")
     if "SEELECT 42" not in ai_fix_sql_prompt:
         raise AssertionError(f"ai_fix_sql prompt missing broken SQL: {ai_fix_sql_prompt}")
-    ai_fix_sql_line_prompt = MockProviderHandler.completion_requests[20]["messages"][-1]["content"]
-    if "Correct one line in the DuckDB SQL query" not in ai_fix_sql_line_prompt:
-        raise AssertionError(f"unexpected ai_fix_sql_line prompt: {ai_fix_sql_line_prompt}")
-    if "Line to correct: 1" not in ai_fix_sql_line_prompt:
-        raise AssertionError(f"ai_fix_sql_line prompt missing line number: {ai_fix_sql_line_prompt}")
-    summarize_agg_prompt = MockProviderHandler.completion_requests[21]["messages"][-1]["content"]
+    ai_fix_sql_line_mode_messages = MockProviderHandler.completion_requests[21]["messages"]
+    ai_fix_sql_line_mode_system = ai_fix_sql_line_mode_messages[0]["content"]
+    ai_fix_sql_line_mode_prompt = ai_fix_sql_line_mode_messages[-1]["content"]
+    if "Correct one line in the DuckDB SQL query" not in ai_fix_sql_line_mode_system:
+        raise AssertionError(f"unexpected ai_fix_sql line-mode system prompt: {ai_fix_sql_line_mode_system}")
+    if "Line to correct: 1" not in ai_fix_sql_line_mode_prompt:
+        raise AssertionError(f"ai_fix_sql line-mode prompt missing line number: {ai_fix_sql_line_mode_prompt}")
+    summarize_agg_prompt = MockProviderHandler.completion_requests[22]["messages"][-1]["content"]
     if "Summarize the following SQL aggregate input values" not in summarize_agg_prompt:
         raise AssertionError(f"unexpected ai_summarize_agg prompt: {summarize_agg_prompt}")
     if "first row" not in summarize_agg_prompt or "second row" not in summarize_agg_prompt:
         raise AssertionError(f"ai_summarize_agg prompt missing aggregate values: {summarize_agg_prompt}")
-    agg_prompt = MockProviderHandler.completion_requests[22]["messages"][-1]["content"]
+    agg_prompt = MockProviderHandler.completion_requests[23]["messages"][-1]["content"]
     if "Return the most important word" not in agg_prompt:
         raise AssertionError(f"unexpected ai_agg prompt: {agg_prompt}")
     if "duck" not in agg_prompt or "database" not in agg_prompt:
         raise AssertionError(f"ai_agg prompt missing aggregate values: {agg_prompt}")
-    suppressed_prompt = MockProviderHandler.completion_requests[23]["messages"][-1]["content"]
+    suppressed_prompt = MockProviderHandler.completion_requests[24]["messages"][-1]["content"]
     if suppressed_prompt != "sample suppressed":
         raise AssertionError(f"unexpected suppressed completion prompt: {suppressed_prompt}")
-    retry_prompts = [request["messages"][-1]["content"] for request in MockProviderHandler.completion_requests[24:26]]
+    retry_prompts = [request["messages"][-1]["content"] for request in MockProviderHandler.completion_requests[25:27]]
     if retry_prompts != ["retry once", "retry once"]:
         raise AssertionError(f"unexpected retry prompts: {retry_prompts}")
     if MockProviderHandler.retry_completion_attempts != 2:
         raise AssertionError(f"expected 2 retry attempts, got {MockProviderHandler.retry_completion_attempts}")
-    otlp_prompt = MockProviderHandler.completion_requests[26]["messages"][-1]["content"]
+    otlp_prompt = MockProviderHandler.completion_requests[27]["messages"][-1]["content"]
     if otlp_prompt != "otlp log smoke":
         raise AssertionError(f"unexpected OTLP completion prompt: {otlp_prompt}")
-    builtin_price_request = MockProviderHandler.completion_requests[27]
+    builtin_price_request = MockProviderHandler.completion_requests[28]
     if builtin_price_request.get("model") != "gpt-5.4-mini":
         raise AssertionError(f"unexpected builtin pricing model: {builtin_price_request}")
     if builtin_price_request["messages"][-1]["content"] != "builtin pricing smoke":
         raise AssertionError(f"unexpected builtin pricing prompt: {builtin_price_request}")
-    databricks_request = MockProviderHandler.completion_requests[28]
+    databricks_request = MockProviderHandler.completion_requests[29]
     if databricks_request.get("model") != "databricks-llama-4-maverick":
         raise AssertionError(f"unexpected Databricks model: {databricks_request}")
     if databricks_request["messages"][-1]["content"] != "hello databricks":
         raise AssertionError(f"unexpected Databricks prompt: {databricks_request}")
-    snowflake_request = MockProviderHandler.completion_requests[29]
+    snowflake_request = MockProviderHandler.completion_requests[30]
     if snowflake_request.get("model") != "snowflake-llama-3.3-70b":
         raise AssertionError(f"unexpected Snowflake model: {snowflake_request}")
     if snowflake_request["messages"][-1]["content"] != "hello snowflake":
         raise AssertionError(f"unexpected Snowflake prompt: {snowflake_request}")
-    try_complete_request = MockProviderHandler.completion_requests[30]
+    try_complete_request = MockProviderHandler.completion_requests[31]
     if try_complete_request["messages"][-1]["content"] != "try complete smoke":
         raise AssertionError(f"unexpected try completion prompt: {try_complete_request}")
     if try_complete_request.get("max_tokens") != 5:
         raise AssertionError(f"unexpected try completion max tokens: {try_complete_request}")
+    extract_record_request = MockProviderHandler.completion_requests[32]
+    if extract_record_request["messages"][-1]["content"] != "return scalar record JSON object":
+        raise AssertionError(f"unexpected extract record prompt: {extract_record_request}")
+    if "Return only valid JSON" not in extract_record_request["messages"][0]["content"]:
+        raise AssertionError(f"unexpected extract record system prompt: {extract_record_request}")
+    rerank_request = MockProviderHandler.completion_requests[33]
+    if "Score candidate relevance" not in rerank_request["messages"][0]["content"]:
+        raise AssertionError(f"unexpected rerank system prompt: {rerank_request}")
+    if (
+        rerank_request["messages"][-1]["content"]
+        != "Query:\nanalytics database\n\nCandidate:\nDuckDB runs analytical SQL"
+    ):
+        raise AssertionError(f"unexpected rerank prompt: {rerank_request}")
     if len(MockProviderHandler.privacy_filter_requests) != 1:
         raise AssertionError(
             f"expected 1 Privacy Filter request, got {len(MockProviderHandler.privacy_filter_requests)}"
@@ -741,33 +885,44 @@ def assert_smoke_result(output: str):
     if MockProviderHandler.claude_versions != ["2023-06-01"]:
         raise AssertionError(f"unexpected Claude version headers: {MockProviderHandler.claude_versions}")
 
-    if len(MockProviderHandler.embedding_requests) != 3:
-        raise AssertionError(f"expected 3 embedding requests, got {len(MockProviderHandler.embedding_requests)}")
+    if len(MockProviderHandler.embedding_requests) != 8:
+        raise AssertionError(f"expected 8 embedding requests, got {len(MockProviderHandler.embedding_requests)}")
     embedding_request = MockProviderHandler.embedding_requests[0]
     if embedding_request["model"] != "mock-embedding-default":
         raise AssertionError(f"unexpected embedding model: {embedding_request}")
     if embedding_request["input"] != "embed smoke":
         raise AssertionError(f"unexpected embedding input: {embedding_request}")
-    similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[1:]]
+    batched_embedding_request = MockProviderHandler.embedding_requests[1]
+    if batched_embedding_request["input"] != ["embed batch one", "embed batch two", "embed batch three"]:
+        raise AssertionError(f"unexpected batched embedding input: {batched_embedding_request}")
+    similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[2:4]]
     if similarity_inputs != ["same left", "same right"]:
         raise AssertionError(f"unexpected similarity embedding inputs: {similarity_inputs}")
-    similarity_models = [request["model"] for request in MockProviderHandler.embedding_requests[1:]]
+    similarity_models = [request["model"] for request in MockProviderHandler.embedding_requests[2:4]]
     if similarity_models != ["mock-embedding-default", "mock-embedding-default"]:
         raise AssertionError(f"unexpected similarity embedding models: {similarity_models}")
+    constant_similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[4:]]
+    if constant_similarity_inputs.count("constant query") != 1:
+        raise AssertionError(f"expected one constant-side embedding, got {constant_similarity_inputs}")
+    if set(constant_similarity_inputs) != {"constant query", "candidate one", "candidate two", "candidate three"}:
+        raise AssertionError(f"unexpected constant similarity embedding inputs: {constant_similarity_inputs}")
 
-    if len(MockProviderHandler.log_requests) != 35:
-        raise AssertionError(f"expected 35 log requests, got {len(MockProviderHandler.log_requests)}")
+    log_deadline = time.time() + 5
+    while len(MockProviderHandler.log_requests) < 45 and time.time() < log_deadline:
+        time.sleep(0.05)
+    if len(MockProviderHandler.log_requests) != 45:
+        raise AssertionError(f"expected 45 log requests, got {len(MockProviderHandler.log_requests)}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 31 or len(embedding_logs) != 3:
+    if len(completion_logs) != 34 or len(embedding_logs) != 10:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")
     logged_providers = {request.get("provider") for request in completion_logs}
-    if not {"openai", "ollama", "claude", "databricks", "snowflake", "openai_privacy_filter"}.issubset(
+    if not {"openai", "ollama", "anthropic", "databricks", "snowflake", "openai_privacy_filter"}.issubset(
         logged_providers
     ):
         raise AssertionError(f"missing provider logs: {completion_logs}")
@@ -789,6 +944,7 @@ def assert_smoke_result(output: str):
         otlp_attrs[attribute["key"]] = value.get("stringValue", value.get("intValue"))
     expected_otlp_attrs = {
         "ai.event": "ai_completion",
+        "ai.function_name": "ai_complete",
         "ai.provider": "openai",
         "ai.protocol": "openai_chat",
         "ai.model": "mock-completion-model",
@@ -803,11 +959,14 @@ def assert_smoke_result(output: str):
             raise AssertionError(f"unexpected OTLP attribute {key}: expected {expected!r}, got {actual!r}")
     if "ai.prompt" in otlp_attrs or "ai.response" in otlp_attrs:
         raise AssertionError(f"OTLP log unexpectedly included prompt/response text: {otlp_attrs}")
+    if not otlp_attrs.get("ai.query_id", "").startswith("duckdb_ai_query_"):
+        raise AssertionError(f"OTLP log missing query id: {otlp_attrs}")
 
     log_request = completion_logs[0]
     expected_log_fields = {
         "extension": "duckdb_ai",
         "event": "ai_completion",
+        "function_name": "ai_complete",
         "provider": "openai",
         "protocol": "openai_chat",
         "model": "mock-completion-model",
@@ -823,6 +982,8 @@ def assert_smoke_result(output: str):
         actual = log_request.get(key)
         if actual != expected:
             raise AssertionError(f"unexpected log field {key}: expected {expected!r}, got {actual!r}")
+    if not log_request.get("query_id", "").startswith("duckdb_ai_query_"):
+        raise AssertionError(f"log request missing query id: {log_request}")
     estimated_cost = log_request.get("estimated_cost_usd")
     if estimated_cost is None or abs(estimated_cost - 0.000013) > 0.000000001:
         raise AssertionError(f"unexpected estimated cost: {log_request}")
@@ -855,6 +1016,7 @@ def assert_smoke_result(output: str):
     expected_embedding_log_fields = {
         "extension": "duckdb_ai",
         "event": "ai_embedding",
+        "function_name": "ai_embed",
         "provider": "openai",
         "protocol": "openai_embeddings",
         "model": "mock-embedding-default",
@@ -868,6 +1030,8 @@ def assert_smoke_result(output: str):
         actual = embedding_log_request.get(key)
         if actual != expected:
             raise AssertionError(f"unexpected embedding log field {key}: expected {expected!r}, got {actual!r}")
+    if not embedding_log_request.get("query_id", "").startswith("duckdb_ai_query_"):
+        raise AssertionError(f"embedding log missing query id: {embedding_log_request}")
     if "input" in embedding_log_request:
         raise AssertionError(f"embedding log request unexpectedly included input text: {embedding_log_request}")
 
@@ -899,6 +1063,9 @@ def main():
         MockProviderHandler.reset()
         allowlist_error_output = run_duckdb_allowlist_error(args.duckdb, f"http://127.0.0.1:{port}")
         assert_allowlist_error(allowlist_error_output)
+        MockProviderHandler.reset()
+        strict_log_error_output = run_duckdb_strict_log_error(args.duckdb, f"http://127.0.0.1:{port}", port)
+        assert_strict_log_error(strict_log_error_output)
     finally:
         server.shutdown()
         thread.join(timeout=5)

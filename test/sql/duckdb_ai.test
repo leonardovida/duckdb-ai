@@ -4,9 +4,9 @@
 
 # Before we load the extension, this will fail
 statement error
-SELECT ai_request_json('hello');
+SELECT ai_completion_request_json('hello');
 ----
-Catalog Error: Scalar Function with name ai_request_json does not exist!
+Catalog Error: Scalar Function with name ai_completion_request_json does not exist!
 
 # Require statement will ensure this test is run with this extension loaded
 require duckdb_ai
@@ -28,17 +28,17 @@ SELECT count(*) FROM ai_usage();
 0
 
 query I
-SELECT count(*) >= 8 FROM ai_models();
+SELECT count(*) >= 8 FROM ai_model_prices();
 ----
 true
 
 query IIIII
-SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_models() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
 ----
 openrouter	openai/gpt-4o-mini	completion	0.15	0.60
 
 query I
-SELECT contains(source_url, 'openrouter.ai') FROM ai_models() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
+SELECT contains(source_url, 'openrouter.ai') FROM ai_model_prices() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
 ----
 true
 
@@ -171,43 +171,58 @@ SELECT summary FROM ai_schema_prompt(sample_rows := 101);
 ----
 Binder Error: ai_schema_prompt sample_rows must be between 0 and 100
 
-query I
-SELECT event FROM ai_usage() ORDER BY event_id DESC LIMIT 1;
+query II
+SELECT event, function_name FROM ai_usage() ORDER BY event_id DESC LIMIT 1;
 ----
-ai_schema_prompt
+ai_schema_prompt	ai_schema_prompt
 
 query I
-SELECT ai_request_json('hello', 'gpt-test', 'openai') LIKE '%"model":"gpt-test"%';
-----
-true
-
-query I
-SELECT ai_request_json('hello', provider := 'openai', model := 'gpt-test') LIKE '%"model":"gpt-test"%';
+SELECT ai_completion_request_json('hello', 'gpt-test', 'openai') LIKE '%"model":"gpt-test"%';
 ----
 true
 
 query I
-SELECT contains(ai_request_json(x, provider := 'openai', model := 'gpt-test'), '"content":"hello"') FROM (VALUES ('hello')) t(x);
+SELECT ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test') LIKE '%"model":"gpt-test"%';
 ----
 true
 
 query I
-SELECT contains(ai_request_json('hello', provider := 'openai', system_prompt := 'system'), '"role":"system"');
+SELECT contains(ai_completion_request_json(x, provider := 'openai', model := 'gpt-test'), '"content":"hello"') FROM (VALUES ('hello')) t(x);
 ----
 true
 
 query I
-SELECT contains(ai_request_json('hello', provider := 'openai', temperature := 0.7, max_tokens := 42), '"temperature":0.7,"max_tokens":42');
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', system_prompt := 'system'), '"role":"system"');
 ----
 true
 
 query I
-SELECT contains(ai_request_json('hello', provider := 'openai', model := 'gpt-test', use_builtin_model_prices := true), '"model":"gpt-test"');
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', system_prompt := 'system', prompt_cache := true), '"prompt_cache_key":"duckdb-ai-');
 ----
 true
 
 query I
-SELECT contains(ai_request_json('hello', provider := 'openai', model := 'gpt-test', cache := true, allowed_hosts := 'api.openai.com:443'), '"model":"gpt-test"');
+SELECT contains(ai_completion_request_json('hello', provider := 'anthropic', system_prompt := 'system', prompt_cache := true), '"cache_control":{"type":"ephemeral"}');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', temperature := 0.7, max_tokens := 42), '"temperature":0.7,"max_tokens":42');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test', use_builtin_model_prices := true), '"model":"gpt-test"');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test', cache := true, allowed_hosts := 'api.openai.com:443'), '"model":"gpt-test"');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test', cache_ttl_seconds := 60), '"model":"gpt-test"');
 ----
 true
 
@@ -218,7 +233,7 @@ statement ok
 SET duckdb_ai_allowed_hosts = 'https://api.openai.com/v1';
 
 query I
-SELECT contains(ai_request_json('hello from guarded settings', provider := 'openai', model := 'gpt-test'), '"model":"gpt-test"');
+SELECT contains(ai_completion_request_json('hello from guarded settings', provider := 'openai', model := 'gpt-test'), '"model":"gpt-test"');
 ----
 true
 
@@ -229,37 +244,37 @@ statement ok
 RESET duckdb_ai_allowed_hosts;
 
 query I
-SELECT contains(ai_request_json('json please', provider := 'openai', model := 'gpt-test', response_format := 'json_object'), '"response_format":{"type":"json_object"}');
+SELECT contains(ai_completion_request_json('json please', provider := 'openai', model := 'gpt-test', response_format := 'json_object'), '"response_format":{"type":"json_object"}');
 ----
 true
 
 query I
-SELECT contains(request, '"response_format":{"type":"json_schema"') AND contains(request, '"schema":{"type":"object","properties"') AND contains(request, '"strict":true') FROM (SELECT ai_request_json('extract', provider := 'openai', model := 'gpt-test', response_schema := '{"type":"object","properties":{"summary":{"type":"string"}}}') AS request);
+SELECT contains(request, '"response_format":{"type":"json_schema"') AND contains(request, '"schema":{"type":"object","properties"') AND contains(request, '"strict":true') FROM (SELECT ai_completion_request_json('extract', provider := 'openai', model := 'gpt-test', response_schema := '{"type":"object","properties":{"summary":{"type":"string"}}}') AS request);
 ----
 true
 
 query I
-SELECT contains(request, '"type":"array"') AND contains(request, '"type":"boolean"') FROM (SELECT ai_request_json('extract', provider := 'openai', model := 'gpt-test', response_schema := '{"type":"object","properties":{"items":{"type":"array","items":{"type":"string"}},"ok":{"type":"boolean"}}}') AS request);
+SELECT contains(request, '"type":"array"') AND contains(request, '"type":"boolean"') FROM (SELECT ai_completion_request_json('extract', provider := 'openai', model := 'gpt-test', response_schema := '{"type":"object","properties":{"items":{"type":"array","items":{"type":"string"}},"ok":{"type":"boolean"}}}') AS request);
 ----
 true
 
 query I
-SELECT contains(ai_request_json('json please', 'llama3', 'ollama', response_format := 'json_object'), '"format":"json"');
+SELECT contains(ai_completion_request_json('json please', 'llama3', 'ollama', response_format := 'json_object'), '"format":"json"');
 ----
 true
 
 query I
-SELECT ai_request_json('redact email alice@example.com', provider := 'openai_privacy_filter');
+SELECT ai_completion_request_json('redact email alice@example.com', provider := 'openai_privacy_filter');
 ----
 {"text":"redact email alice@example.com","model":"openai/privacy-filter"}
 
 query I
-SELECT ai_request_json('hello databricks', provider := 'databricks');
+SELECT ai_completion_request_json('hello databricks', provider := 'databricks');
 ----
 {"model":"databricks-llama-4-maverick","messages":[{"role":"user","content":"hello databricks"}],"temperature":0.1}
 
 query I
-SELECT ai_request_json('hello snowflake', provider := 'snowflake');
+SELECT ai_completion_request_json('hello snowflake', provider := 'snowflake');
 ----
 {"model":"snowflake-llama-3.3-70b","messages":[{"role":"user","content":"hello snowflake"}],"temperature":0.1}
 
@@ -270,7 +285,7 @@ statement ok
 SET duckdb_ai_model = 'settings-model';
 
 query I
-SELECT contains(ai_request_json('hello from settings'), '"model":"settings-model"');
+SELECT contains(ai_completion_request_json('hello from settings'), '"model":"settings-model"');
 ----
 true
 
@@ -278,12 +293,12 @@ statement ok
 SET duckdb_ai_completion_model = 'completion-settings-model';
 
 query I
-SELECT contains(ai_request_json('hello from completion settings'), '"model":"completion-settings-model"');
+SELECT contains(ai_completion_request_json('hello from completion settings'), '"model":"completion-settings-model"');
 ----
 true
 
 query I
-SELECT contains(ai_request_json('hello with explicit model', model := 'explicit-model'), '"model":"explicit-model"');
+SELECT contains(ai_completion_request_json('hello with explicit model', model := 'explicit-model'), '"model":"explicit-model"');
 ----
 true
 
@@ -326,7 +341,7 @@ SELECT provider, has_api_key FROM ai_secrets() WHERE name = 'ai_test_openai';
 openai	true
 
 query I
-SELECT contains(ai_request_json('hello from scoped secret', provider := 'openai'), '"model":"secret-model"');
+SELECT contains(ai_completion_request_json('hello from scoped secret', provider := 'openai'), '"model":"secret-model"');
 ----
 true
 
@@ -334,22 +349,22 @@ statement ok
 CREATE OR REPLACE SECRET ai_named_gemini (TYPE duckdb_ai, AI_PROVIDER 'gcp', API_KEY 'gemini-key', MODEL 'gemini-secret-model');
 
 query I
-SELECT contains(ai_request_json('hello from named secret', secret := 'ai_named_gemini'), '"model":"gemini-secret-model"');
+SELECT contains(ai_completion_request_json('hello from named secret', secret := 'ai_named_gemini'), '"model":"gemini-secret-model"');
 ----
 true
 
 query I
-SELECT ai_request_json('hello', secret := 'missing_secret', fail_on_error := false) IS NULL;
+SELECT ai_completion_request_json('hello', secret := 'missing_secret', fail_on_error := false) IS NULL;
 ----
 true
 
 query I
-SELECT contains(ai_request_json('hello "duck"', 'llama3', 'ollama'), chr(92) || chr(34) || 'duck' || chr(92) || chr(34));
+SELECT contains(ai_completion_request_json('hello "duck"', 'llama3', 'ollama'), chr(92) || chr(34) || 'duck' || chr(92) || chr(34));
 ----
 true
 
 query I
-SELECT contains(ai_request_json('line1' || chr(10) || 'line2' || chr(9) || 'tab' || chr(92) || 'slash', provider := 'openai', model := 'gpt-test'), 'line1' || chr(92) || 'nline2' || chr(92) || 'ttab' || chr(92) || chr(92) || 'slash');
+SELECT contains(ai_completion_request_json('line1' || chr(10) || 'line2' || chr(9) || 'tab' || chr(92) || 'slash', provider := 'openai', model := 'gpt-test'), 'line1' || chr(92) || 'nline2' || chr(92) || 'ttab' || chr(92) || chr(92) || 'slash');
 ----
 true
 
@@ -369,7 +384,17 @@ SELECT ai_similarity('duck', 'db', provider := 'claude', fail_on_error := false)
 true
 
 query I
+SELECT ai_rerank('duck', 'analytical database', provider := 'not-a-provider', fail_on_error := false) IS NULL;
+----
+true
+
+query I
 SELECT ai_complete('hello', provider := 'not-a-provider', fail_on_error := false) IS NULL;
+----
+true
+
+query I
+SELECT ai_complete('hello', provider := 'not-a-provider', on_error := 'null') IS NULL;
 ----
 true
 
@@ -424,6 +449,16 @@ SELECT ai_classify('great', 'positive, negative', provider := 'not-a-provider', 
 true
 
 query I
+SELECT ai_classify('great', ['positive, favorable', 'negative'], provider := 'not-a-provider', fail_on_error := false) IS NULL;
+----
+true
+
+query I
+SELECT ai_classify_labels('great', ['positive, favorable', 'negative'], provider := 'not-a-provider', fail_on_error := false) IS NULL;
+----
+true
+
+query I
 SELECT ai_extract('name: DuckDB', 'name', provider := 'not-a-provider', fail_on_error := false) IS NULL;
 ----
 true
@@ -459,7 +494,7 @@ SELECT sql IS NULL FROM ai_fix_sql('SEELECT 42', provider := 'not-a-provider', f
 true
 
 query I
-SELECT line_number IS NULL AND replacement_line IS NULL FROM ai_fix_sql_line('SEELECT 42', error := 'Parser Error: syntax error at or near "SEELECT" LINE 1: SEELECT 42', provider := 'not-a-provider', fail_on_error := false);
+SELECT line_number IS NULL AND replacement_line IS NULL FROM ai_fix_sql('SEELECT 42', mode := 'line', error := 'Parser Error: syntax error at or near "SEELECT" LINE 1: SEELECT 42', provider := 'not-a-provider', fail_on_error := false);
 ----
 true
 
@@ -474,57 +509,67 @@ SELECT * FROM ai_query_data('count rows', sample_rows := 101);
 Binder Error: ai_query_data sample_rows must be between 0 and 100
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', temperature := 3.0);
+SELECT ai_completion_request_json('hello', provider := 'openai', temperature := 3.0);
 ----
 Binder Error: AI option "temperature" must be between 0 and 2
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', log_sample_rate := 1.5);
+SELECT ai_completion_request_json('hello', provider := 'openai', log_sample_rate := 1.5);
 ----
 Binder Error: AI option "log_sample_rate" must be between 0 and 1
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', log_format := 'xml');
+SELECT ai_completion_request_json('hello', provider := 'openai', log_format := 'xml');
 ----
-Binder Error: AI option "log_format" must be one of: generic_json, otlp_json
+Binder Error: AI option "log_format" must be one of: generic, json, generic_json, otlp, otlp_json
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', retry_count := 11);
+SELECT ai_completion_request_json('hello', provider := 'openai', on_error := 'ignore');
+----
+Binder Error: AI option "on_error" must be one of: fail, null, capture
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai', retry_count := 11);
 ----
 Binder Error: AI option "retry_count" must be between 0 and 10
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', retry_backoff_ms := 60001);
+SELECT ai_completion_request_json('hello', provider := 'openai', retry_backoff_ms := 60001);
 ----
 Binder Error: AI option "retry_backoff_ms" must be between 0 and 60000
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', max_concurrent_requests := -1);
+SELECT ai_completion_request_json('hello', provider := 'openai', max_concurrent_requests := -1);
 ----
-Binder Error: AI option "max_concurrent_requests" must be between 0 and 1024
+Binder Error: AI option "max_concurrent_requests" must be between 0 and 64
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', min_request_interval_ms := 60001);
+SELECT ai_completion_request_json('hello', provider := 'openai', min_request_interval_ms := 60001);
 ----
 Binder Error: AI option "min_request_interval_ms" must be between 0 and 60000
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', token_limit_per_minute := -1);
+SELECT ai_completion_request_json('hello', provider := 'openai', token_limit_per_minute := -1);
 ----
 Binder Error: AI option "token_limit_per_minute" must be between 0 and 10000000000
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', token_limit_per_minute := 10000000001);
+SELECT ai_completion_request_json('hello', provider := 'openai', token_limit_per_minute := 10000000001);
 ----
 Binder Error: AI option "token_limit_per_minute" must be between 0 and 10000000000
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', input_token_price_per_million := -0.1);
+SELECT ai_completion_request_json('hello', provider := 'openai', cache_ttl_seconds := -1);
+----
+Binder Error: AI option "cache_ttl_seconds" must be between 0 and 31536000
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai', input_token_price_per_million := -0.1);
 ----
 Binder Error: AI option "input_token_price_per_million" must be greater than or equal to 0
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', output_token_price_per_million := -0.1);
+SELECT ai_completion_request_json('hello', provider := 'openai', output_token_price_per_million := -0.1);
 ----
 Binder Error: AI option "output_token_price_per_million" must be greater than or equal to 0
 
@@ -532,7 +577,7 @@ statement ok
 SET duckdb_ai_log_sample_rate = 2.0;
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai');
+SELECT ai_completion_request_json('hello', provider := 'openai');
 ----
 Binder Error: Setting duckdb_ai_log_sample_rate must be between 0 and 1
 
@@ -543,9 +588,9 @@ statement ok
 SET duckdb_ai_log_format = 'xml';
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai');
+SELECT ai_completion_request_json('hello', provider := 'openai');
 ----
-Binder Error: Setting duckdb_ai_log_format must be one of: generic_json, otlp_json
+Binder Error: Setting duckdb_ai_log_format must be one of: generic, json, generic_json, otlp, otlp_json
 
 statement ok
 RESET duckdb_ai_log_format;
@@ -554,7 +599,7 @@ statement ok
 SET duckdb_ai_retry_count = 11;
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai');
+SELECT ai_completion_request_json('hello', provider := 'openai');
 ----
 Binder Error: Setting duckdb_ai_retry_count must be between 0 and 10
 
@@ -562,12 +607,12 @@ statement ok
 RESET duckdb_ai_retry_count;
 
 statement ok
-SET duckdb_ai_max_concurrent_requests = 1025;
+SET duckdb_ai_max_concurrent_requests = 65;
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai');
+SELECT ai_completion_request_json('hello', provider := 'openai');
 ----
-Binder Error: Setting duckdb_ai_max_concurrent_requests must be between 0 and 1024, or -1 to disable
+Binder Error: Setting duckdb_ai_max_concurrent_requests must be between 0 and 64, or -1 to disable
 
 statement ok
 RESET duckdb_ai_max_concurrent_requests;
@@ -576,7 +621,7 @@ statement ok
 SET duckdb_ai_min_request_interval_ms = 60001;
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai');
+SELECT ai_completion_request_json('hello', provider := 'openai');
 ----
 Binder Error: Setting duckdb_ai_min_request_interval_ms must be between 0 and 60000, or -1 to disable
 
@@ -587,7 +632,7 @@ statement ok
 SET duckdb_ai_token_limit_per_minute = 10000000001;
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai');
+SELECT ai_completion_request_json('hello', provider := 'openai');
 ----
 Binder Error: Setting duckdb_ai_token_limit_per_minute must be between 0 and 10000000000, or -1 to disable
 
@@ -598,7 +643,7 @@ statement ok
 SET duckdb_ai_input_token_price_per_million = -2.0;
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai');
+SELECT ai_completion_request_json('hello', provider := 'openai');
 ----
 Binder Error: Setting duckdb_ai_input_token_price_per_million must be greater than or equal to 0, or -1 to disable
 
@@ -606,17 +651,17 @@ statement ok
 RESET duckdb_ai_input_token_price_per_million;
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', response_format := 'xml');
+SELECT ai_completion_request_json('hello', provider := 'openai', response_format := 'xml');
 ----
 Binder Error: AI option "response_format" must be one of: text, json_object, json_schema
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', response_schema := 'not-json');
+SELECT ai_completion_request_json('hello', provider := 'openai', response_schema := 'not-json');
 ----
 Binder Error: AI option "response_schema" must be valid JSON:
 
 statement error
-SELECT ai_request_json('hello', provider := 'openai', response_schema := '{"type":"object"} trailing');
+SELECT ai_completion_request_json('hello', provider := 'openai', response_schema := '{"type":"object"} trailing');
 ----
 Binder Error: AI option "response_schema" must be valid JSON:
 

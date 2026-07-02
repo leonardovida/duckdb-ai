@@ -24,16 +24,19 @@ FROM ai_usage();
 | `ai_try_complete(prompt[, model[, provider]])` | Scalar | Calls a completion model and returns `STRUCT(response, error)` for row-level failure capture. |
 | `ai_complete_json(prompt[, model[, provider]])` | Scalar | Calls a completion model and validates the response as a JSON object or array. |
 | `ai_complete_record(prompt, response_schema[, model[, provider]])` | Table | Calls a completion model and projects a JSON object into typed columns from a JSON Schema. |
-| `ai_request_json(prompt[, model[, provider]])` | Scalar | Returns the completion request JSON without making a network call. |
+| `ai_extract_record(text, response_schema[, model[, provider]])` | Scalar | Extracts one typed `STRUCT` per row from text using a JSON Schema. |
+| `ai_completion_request_json(prompt[, model[, provider]])` | Scalar | Returns the completion request JSON without making a network call. |
 | `ai_embed(text[, model[, provider]])` | Scalar | Calls an embedding model and returns `DOUBLE[]`. |
 | `ai_embedding_request_json(text[, model[, provider]])` | Scalar | Returns the embedding request JSON without making a network call. |
 | `ai_similarity(left_text, right_text[, model[, provider]])` | Scalar | Embeds two strings and returns cosine similarity. |
+| `ai_rerank(query, candidate[, model[, provider]])` | Scalar | Uses a completion model to score candidate relevance from `0` to `1`. |
 | `ai_summarize(text[, model[, provider]])` | Scalar | Summarizes text with a completion model. |
 | `ai_sentiment(text[, model[, provider]])` | Scalar | Classifies text as positive, neutral, or negative. |
 | `ai_fix_grammar(text[, model[, provider]])` | Scalar | Rewrites text with corrected grammar, spelling, and punctuation. |
 | `ai_redact(text[, model[, provider]])` | Scalar | Masks direct personal data, credentials, secrets, and payment identifiers. |
 | `ai_translate(text, target_language[, model[, provider]])` | Scalar | Translates text to the target language. |
-| `ai_classify(text, labels[, model[, provider]])` | Scalar | Chooses one label from a comma-separated label list. |
+| `ai_classify(text, labels[, model[, provider]])` | Scalar | Chooses one label from a comma-separated `VARCHAR` or `VARCHAR[]` label list. |
+| `ai_classify_labels(text, labels[, model[, provider]])` | Scalar | Chooses zero or more labels from a comma-separated `VARCHAR` or `VARCHAR[]` label list. |
 | `ai_extract(text, instruction[, model[, provider]])` | Scalar | Extracts requested information from text. |
 | `ai_filter(text, predicate[, model[, provider]])` | Scalar | Evaluates a natural-language predicate and returns `BOOLEAN`. |
 | `ai_agg(text, instruction[, model[, provider]])` | Aggregate | Runs one completion over grouped text values and an instruction. |
@@ -42,8 +45,7 @@ FROM ai_usage();
 | `ai_query_data(question[, schema_context[, model[, provider]]])` | Table | Generates one read-only `SELECT` at bind time and executes it as a subquery. |
 | `ai_schema_prompt([include_tables])` | Table | Returns deterministic local catalog context for prompting SQL models. |
 | `ai_explain_sql(sql[, ...])` | Table | Explains one read-only DuckDB `SELECT` statement. |
-| `ai_fix_sql(sql[, ...])` | Table | Rewrites a broken query as one corrected read-only DuckDB `SELECT`. |
-| `ai_fix_sql_line(sql[, error][, ...])` | Table | Rewrites only the line identified by an error message. |
+| `ai_fix_sql(sql[, ...])` | Table | Rewrites a broken query as one corrected read-only DuckDB `SELECT`, or rewrites one line with `mode := 'line'`. |
 | `ai_is_read_only_sql(sql)` | Scalar | Returns whether SQL is one parser-valid read-only `SELECT`. |
 | `ai_validate_read_only_sql(sql)` | Scalar | Returns normalized SQL or raises if it is not one read-only `SELECT`. |
 | `ai_count_tokens(text[, model[, provider]])` | Scalar | Returns a local approximate token count. |
@@ -52,9 +54,9 @@ FROM ai_usage();
 | `ai_provider_protocol(provider)` | Scalar | Returns the internal provider protocol. |
 | `ai_usage()` | Table | Returns recent per-database AI usage events. |
 | `ai_clear_usage()` | Table | Clears the per-database usage event buffer. |
-| `ai_clear_cache()` | Table | Clears the per-database in-memory response cache. |
+| `ai_clear_cache()` | Table | Clears per-database in-memory response and generated-SQL caches. |
 | `ai_secrets()` | Table | Lists configured `duckdb_ai` secrets with credentials redacted. |
-| `ai_models()` | Table | Returns the built-in provider/model pricing catalog. |
+| `ai_model_prices()` | Table | Returns the built-in provider/model pricing catalog. |
 
 ## Completion functions
 
@@ -135,7 +137,41 @@ FROM ai_complete_record(
 
 Result: one row with columns derived from `response_schema`
 
-#### `ai_request_json(prompt[, model[, provider]])`
+#### `ai_extract_record(text, response_schema[, model[, provider]])`
+
+Description: Scalar function that calls a completion provider for each input row
+and returns a typed `STRUCT` projected from the top-level object properties in
+`response_schema`. The schema must be constant so DuckDB can bind the return
+type.
+
+Example:
+
+```sql
+SELECT
+    ticket_id,
+    extracted.product_area,
+    extracted.urgency_score
+FROM (
+    SELECT
+        ticket_id,
+        ai_extract_record(
+            subject || ': ' || body,
+            '{
+              "type": "object",
+              "properties": {
+                "product_area": {"type": "string"},
+                "urgency_score": {"type": "integer"}
+              },
+              "required": ["product_area", "urgency_score"]
+            }'
+        ) AS extracted
+    FROM support_tickets
+);
+```
+
+Result: one `STRUCT` value whose fields are derived from `response_schema`
+
+#### `ai_completion_request_json(prompt[, model[, provider]])`
 
 Description: Builds the provider completion request body and returns it without
 making a network call. Use this for deterministic tests and provider debugging.
@@ -143,7 +179,7 @@ making a network call. Use this for deterministic tests and provider debugging.
 Example:
 
 ```sql
-SELECT ai_request_json(
+SELECT ai_completion_request_json(
     'Summarize this text.',
     provider := 'openai',
     model := 'gpt-4o-mini',
@@ -206,6 +242,24 @@ SELECT ai_similarity(
 
 Result: `DOUBLE`
 
+#### `ai_rerank(query, candidate[, model[, provider]])`
+
+Description: Uses a completion model to score how relevant `candidate` is for
+`query`. The provider response must be a single numeric score from `0` to `1`.
+Use it when you want LLM-based reranking over a short candidate set; use
+`ai_similarity` for embedding-based semantic comparison at larger scale.
+
+Example:
+
+```sql
+SELECT *
+FROM documents
+ORDER BY ai_rerank('analytics database', title || chr(10) || body) DESC
+LIMIT 10;
+```
+
+Result: `DOUBLE`
+
 ## Task wrappers
 
 #### `ai_summarize(text[, model[, provider]])`
@@ -222,7 +276,7 @@ Result: `VARCHAR`
 
 #### `ai_sentiment(text[, model[, provider]])`
 
-Description: Classifies the sentiment of text as positive, neutral, or negative.
+Description: Convenience wrapper for `ai_classify(text, 'positive, neutral, negative')`.
 
 Example:
 
@@ -280,15 +334,36 @@ Result: `VARCHAR`
 
 #### `ai_classify(text, labels[, model[, provider]])`
 
-Description: Classifies text into exactly one label from `labels`.
+Description: Classifies text into exactly one label from `labels`. `labels` can
+be a comma-separated `VARCHAR` or a `VARCHAR[]`; use `VARCHAR[]` when labels may
+contain commas.
 
 Example:
 
 ```sql
 SELECT ai_classify('invoice overdue', 'billing, support');
+
+SELECT ai_classify('invoice overdue', ['billing, overdue', 'support']);
 ```
 
 Result: `VARCHAR`
+
+#### `ai_classify_labels(text, labels[, model[, provider]])`
+
+Description: Classifies text into zero or more labels from `labels`. `labels`
+can be a comma-separated `VARCHAR` or a `VARCHAR[]`; use `VARCHAR[]` when labels
+may contain commas. The model must return a JSON array of label strings.
+
+Example:
+
+```sql
+SELECT ai_classify_labels(
+    'invoice overdue and app is slow',
+    ['billing, overdue', 'performance', 'support']
+);
+```
+
+Result: `VARCHAR[]`
 
 #### `ai_extract(text, instruction[, model[, provider]])`
 
@@ -334,7 +409,8 @@ Result: `VARCHAR`
 
 #### `ai_summarize_agg(text[, model[, provider]])`
 
-Description: Collects grouped input text and returns one summary per group.
+Description: Convenience wrapper around `ai_agg` with the built-in summarization
+instruction. It collects grouped input text and returns one summary per group.
 
 Example:
 
@@ -366,8 +442,10 @@ Result: `VARCHAR` containing a read-only DuckDB `SELECT`
 #### `ai_query_data(question[, schema_context[, model[, provider]]])`
 
 Description: Table function that generates one read-only DuckDB `SELECT` at bind
-time and executes it as a subquery. Use `fail_on_error := false` to return an
-empty error-shaped relation instead of failing the bind.
+time and executes it as a subquery. Successful generated SQL is cached in the
+current DuckDB database instance for repeated binds with the same question,
+schema context, and output-affecting options. Use `on_error := 'null'` to return
+an empty error-shaped relation instead of failing the bind.
 
 Example:
 
@@ -421,7 +499,9 @@ Result: one `explanation VARCHAR` column
 #### `ai_fix_sql(sql[, ...])`
 
 Description: Table function that asks the model to rewrite a broken query as one
-corrected read-only DuckDB `SELECT` statement.
+corrected read-only DuckDB `SELECT` statement. With `mode := 'line'`, it rewrites
+only the line identified by an error message and returns the detected line number
+plus replacement line.
 
 Example:
 
@@ -432,23 +512,18 @@ FROM ai_fix_sql('SEELECT status, count(*) FRUM orders GROUP BY status');
 
 Result: one `sql VARCHAR` column
 
-#### `ai_fix_sql_line(sql[, error][, ...])`
-
-Description: Table function that asks the model to rewrite only the line
-identified by an error message. The result includes the detected line number and
-replacement line.
-
 Example:
 
 ```sql
 SELECT line_number, replacement_line
-FROM ai_fix_sql_line(
+FROM ai_fix_sql(
     'SEELECT status FROM orders',
+    mode := 'line',
     error := 'Parser Error: syntax error at or near "SEELECT" LINE 1'
 );
 ```
 
-Result: `line_number BIGINT`, `replacement_line VARCHAR`
+Line-mode result: `line_number BIGINT`, `replacement_line VARCHAR`
 
 ## SQL validation functions
 
@@ -549,9 +624,10 @@ FROM ai_usage()
 ORDER BY event_id DESC;
 ```
 
-Result columns: `event_id`, `created_at`, `event`, `provider`, `protocol`,
-`model`, character counts, token counts, elapsed time, HTTP status, and
-estimated cost.
+Result columns: `event_id`, `created_at`, `event`, `function_name`, `query_id`,
+`provider`, `protocol`, `model`, character counts, token counts,
+cached-token counts, elapsed time, retry count, HTTP status, cache hit flag,
+status, error, and estimated cost.
 
 #### `ai_clear_usage()`
 
@@ -570,7 +646,8 @@ Result: one `cleared BOOLEAN` column
 #### `ai_clear_cache()`
 
 Description: Clears the current DuckDB database instance's opt-in in-memory
-response cache and returns one confirmation row.
+response cache and `ai_query_data()` generated-SQL cache, then returns one
+confirmation row.
 
 Example:
 
@@ -596,7 +673,7 @@ FROM ai_secrets();
 Result columns: `name`, `provider`, `model`, `base_url`, `scope`,
 `has_api_key`
 
-#### `ai_models()`
+#### `ai_model_prices()`
 
 Description: Returns the small built-in provider/model pricing catalog used by
 opt-in cost estimation.
@@ -605,7 +682,7 @@ Example:
 
 ```sql
 SELECT provider, model, operation, input_token_price_per_million
-FROM ai_models();
+FROM ai_model_prices();
 ```
 
 Result columns: `provider`, `model`, `operation`,
@@ -630,22 +707,25 @@ not from direct API key arguments.
 | `timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP timeout. Must be greater than 0. |
 | `retry_count` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Retry count from 0 to 10 for curl failures and retryable HTTP status codes. Retries honor `Retry-After` on 429/5xx responses when present. |
 | `retry_backoff_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Base retry backoff from 0 to 60000 milliseconds; exponential jitter is added per retry. |
-| `max_concurrent_requests` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database request concurrency cap from 0 to 1024. |
+| `max_concurrent_requests` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database request concurrency cap from 0 to 64. |
 | `min_request_interval_ms` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database minimum interval between provider request starts. |
 | `token_limit_per_minute` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Per-database estimated token cap per rolling minute. `0` disables the token cap. |
 | `cache` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables the current database instance's in-memory response cache for successful provider responses. |
+| `cache_ttl_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Optional response-cache expiration from 0 to 31536000 seconds. `0` means entries do not expire by age. The `DUCKDB_AI_CACHE_TTL_SECONDS` environment variable sets the default. |
+| `prompt_cache` | `BOOLEAN` | Completion, task wrappers, and SQL assistant | Emits provider-side prompt-cache controls where supported. OpenAI requests include a stable `prompt_cache_key`; Anthropic requests attach ephemeral cache control to the system prompt. The `DUCKDB_AI_PROMPT_CACHE` environment variable enables this by default. |
 | `allowed_hosts` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Comma-separated provider/logging host allowlist. Entries may be hostnames, `host:port`, full URLs, `*.example.com`, or `*`. |
-| `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | If false, supported functions return `NULL` or an empty result instead of raising provider errors. |
+| `on_error` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Error handling mode: `fail`, `null`, or `capture`. `capture` is used by `ai_try_complete`; scalar/table functions that cannot return an error field use `NULL` behavior. |
+| `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Compatibility alias: `true` maps to `on_error := 'fail'`, `false` maps to `on_error := 'null'`. |
 | `response_format` | `VARCHAR` | Completion and SQL assistant | `text`, `json_object`, or `json_schema`. |
 | `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for structured output hints and validation. |
 | `input_token_price_per_million` | `DOUBLE` | Completion, embedding, SQL assistant, aggregate | Manual input-token price for cost estimation. |
 | `output_token_price_per_million` | `DOUBLE` | Completion, SQL assistant, aggregate | Manual output-token price for cost estimation. |
-| `use_builtin_model_prices` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables lookup from `ai_models()` when manual prices are not supplied. |
-| `log_format` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | `generic_json` or `otlp_json`. |
+| `use_builtin_model_prices` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables lookup from `ai_model_prices()` when manual prices are not supplied. |
+| `log_format` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | `generic`, `json`, `generic_json`, `otlp`, or `otlp_json`. |
 | `log_tags` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Comma-separated tags copied into usage log payloads. |
 | `log_sample_rate` | `DOUBLE` | Completion, embedding, SQL assistant, aggregate | Stable sampling rate from 0 to 1. |
 | `log_include_text` | `BOOLEAN` | `ai_complete_record`; all families through `duckdb_ai_log_include_text` or `DUCKDB_AI_LOG_INCLUDE_TEXT` | Include prompt/output text in outbound usage logs. Defaults to false. |
-| `log_strict` | `BOOLEAN` | `ai_complete_record`; all families through `duckdb_ai_log_strict` or `DUCKDB_AI_LOG_STRICT` | Fail the SQL query when outbound usage logging fails. |
+| `log_strict` | `BOOLEAN` | `ai_complete_record`; all families through `duckdb_ai_log_strict` or `DUCKDB_AI_LOG_STRICT` | Post outbound usage logs synchronously and fail the SQL query when logging fails. Without strict logging, outbound logs are queued asynchronously on a best-effort basis. |
 
 See [Runtime behavior](runtime-behavior.md) for the execution semantics behind
 volatility, per-database state, concurrency, cancellation, retries, response
@@ -659,7 +739,8 @@ SQL assistant table functions also accept:
 | `include_tables` | `VARCHAR[]` | Limit generated local catalog context to matching tables. |
 | `exclude_tables` | `VARCHAR[]` | Remove matching tables from generated local catalog context. |
 | `sample_rows` | `BIGINT` | Include up to 100 sample rows per local table. |
-| `error` | `VARCHAR` | `ai_fix_sql_line` only. Error text used to identify the target line. |
+| `mode` | `VARCHAR` | `ai_fix_sql` only. `query` or `full` rewrites the full query; `line` rewrites one error line. |
+| `error` | `VARCHAR` | `ai_fix_sql` line mode only. Error text used to identify the target line. |
 
 Aggregate functions also accept:
 
@@ -678,7 +759,7 @@ Supported provider names and aliases are:
 | `ollama` | none | Yes | Yes | `llama3.2` |
 | `openai` | none | Yes | Yes | `gpt-4o-mini` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
-| `claude` | `anthropic` | Yes | No | `claude-3-5-haiku-latest` |
+| `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
 | `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-2.5-flash` |
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
 | `zai` | `zhipu` | Yes | Yes | `glm-4-flash` |
@@ -707,10 +788,10 @@ highest precedence:
 
 | Setting | Applies to |
 | --- | --- |
-| `duckdb_ai_completion_model` | `ai_complete`, `ai_complete_json`, `ai_complete_record`, `ai_request_json` |
-| `duckdb_ai_task_model` | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_extract`, `ai_filter` |
+| `duckdb_ai_completion_model` | `ai_complete`, `ai_complete_json`, `ai_complete_record`, `ai_completion_request_json`, `ai_rerank` |
+| `duckdb_ai_task_model` | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_classify_labels`, `ai_extract`, `ai_filter` |
 | `duckdb_ai_aggregate_model` | `ai_agg`, `ai_summarize_agg` |
-| `duckdb_ai_sql_model` | `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql`, `ai_fix_sql_line` |
+| `duckdb_ai_sql_assistant_model` | `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` |
 | `duckdb_ai_embedding_model` | `ai_embed`, `ai_embedding_request_json`, `ai_similarity` |
 
 Model resolution order is:

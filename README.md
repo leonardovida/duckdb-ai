@@ -256,11 +256,12 @@ These are the main functions most users should start with:
 | --- | --- |
 | `ai_complete` / `ai_try_complete` | General prompt-to-text completions from SQL, with optional row-level error capture. |
 | `ai_summarize` / `ai_summarize_agg` | Summarizing one text value or a grouped set of rows. |
-| `ai_classify` | Assigning one label from a controlled list. |
+| `ai_classify` / `ai_classify_labels` | Assigning one or more labels from a controlled list. |
 | `ai_filter` | Filtering rows with a natural-language predicate. |
 | `ai_extract` | Pulling compact structured facts from text. |
 | `ai_complete_record` | Returning model output as typed DuckDB columns from a JSON Schema. |
-| `ai_embed` / `ai_similarity` | Creating embeddings and comparing text semantically. |
+| `ai_extract_record` | Extracting typed `STRUCT` values per input row from a JSON Schema. |
+| `ai_embed` / `ai_similarity` / `ai_rerank` | Creating embeddings, comparing text semantically, and LLM-reranking short candidate sets. |
 | `ai_schema_prompt` | Building deterministic local table context for SQL generation. |
 | `ai_sql` / `ai_query_data` | Generating, validating, and optionally running read-only DuckDB `SELECT` statements. |
 | `ai_usage` | Inspecting recent model calls, latency, token estimates, and status. |
@@ -269,14 +270,14 @@ These are the main functions most users should start with:
 
 | Need | Functions |
 | --- | --- |
-| Completion text | `ai_complete`, `ai_try_complete`, `ai_request_json` |
-| Structured output | `ai_complete_json`, `ai_complete_record` |
-| Text tasks | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_extract`, `ai_filter` |
+| Completion text | `ai_complete`, `ai_try_complete`, `ai_completion_request_json` |
+| Structured output | `ai_complete_json`, `ai_complete_record`, `ai_extract_record` |
+| Text tasks | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_classify_labels`, `ai_extract`, `ai_filter` |
 | Aggregates | `ai_summarize_agg`, `ai_agg` |
-| Embeddings | `ai_embed`, `ai_embedding_request_json`, `ai_similarity` |
-| SQL assistant | `ai_schema_prompt`, `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql`, `ai_fix_sql_line` |
+| Embeddings and ranking | `ai_embed`, `ai_embedding_request_json`, `ai_similarity`, `ai_rerank` |
+| SQL assistant | `ai_schema_prompt`, `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` |
 | SQL safety checks | `ai_is_read_only_sql`, `ai_validate_read_only_sql` |
-| Provider metadata | `ai_provider_base_url`, `ai_provider_protocol`, `ai_models` |
+| Provider metadata | `ai_provider_base_url`, `ai_provider_protocol`, `ai_model_prices` |
 | Usage and secrets | `ai_usage`, `ai_clear_usage`, `ai_clear_cache`, `ai_secrets` |
 | Local utility | `ai_count_tokens`, `ai_recommended_batch_size` |
 
@@ -299,7 +300,7 @@ End-to-end setup examples for each provider are in
 | Provider | Use it with | Default base URL / key |
 | --- | --- | --- |
 | `azure` | Azure OpenAI deployments | Set `BASE_URL` or `AZURE_OPENAI_BASE_URL`; `AZURE_OPENAI_API_KEY` |
-| `claude` / `anthropic` | Anthropic Claude models | `https://api.anthropic.com/v1`; `ANTHROPIC_API_KEY` |
+| `anthropic` / `claude` | Anthropic Claude models | `https://api.anthropic.com/v1`; `ANTHROPIC_API_KEY` |
 | `databricks` | Databricks Model Serving and Unity AI Gateway chat endpoints | Set `BASE_URL` or `DATABRICKS_HOST`; `DATABRICKS_TOKEN` |
 | `deepseek` | DeepSeek chat models | `https://api.deepseek.com`; `DEEPSEEK_API_KEY` |
 | `gemini` / `gcp` / `google` | Gemini through the OpenAI-compatible endpoint | `GEMINI_API_KEY` |
@@ -352,7 +353,7 @@ still overrides both:
 SET duckdb_ai_completion_model = 'gpt-4o-mini';
 SET duckdb_ai_task_model = 'gpt-4o-mini';
 SET duckdb_ai_aggregate_model = 'gpt-4o-mini';
-SET duckdb_ai_sql_model = 'gpt-4o';
+SET duckdb_ai_sql_assistant_model = 'gpt-4o';
 SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 ```
 
@@ -381,7 +382,7 @@ arrays become `STRUCT` and `LIST` values.
 
 ## Safety And Privacy
 
-- Request-preview functions such as `ai_request_json` and
+- Request-preview functions such as `ai_completion_request_json` and
   `ai_embedding_request_json` build provider request bodies without making a
   network call.
 - API keys are resolved from environment variables or DuckDB secrets, not direct
@@ -395,20 +396,25 @@ arrays become `STRUCT` and `LIST` values.
   read-only DuckDB `SELECT`.
 
 By default, provider errors fail the SQL query. For exploratory workflows, use
-`fail_on_error := false` to return `NULL` instead:
+`on_error := 'null'` to return `NULL` instead:
 
 ```sql
 SELECT ai_complete(
     'Try this with a best-effort provider call.',
     provider := 'openai',
-    fail_on_error := false
+    on_error := 'null'
 );
 ```
+
+`fail_on_error := false` is still accepted as a compatibility alias for
+`on_error := 'null'`. Use `ai_try_complete` when you need row-level error text
+instead of a bare `NULL`.
 
 ## Usage And Cost Visibility
 
 Successful completions, embeddings, and local `ai_schema_prompt` calls are kept
-in a local in-process ring buffer:
+in a local in-process ring buffer with function name, query id, provider,
+latency, token, cache, status, error, and cost metadata:
 
 ```sql
 SELECT * FROM ai_usage();
@@ -421,7 +427,7 @@ model price catalog:
 
 ```sql
 SET duckdb_ai_use_builtin_model_prices = true;
-SELECT * FROM ai_models();
+SELECT * FROM ai_model_prices();
 ```
 
 Provider pricing changes often, so treat the built-in catalog as a convenience

@@ -53,6 +53,14 @@ struct CompletionOptions {
 	bool use_builtin_model_prices = false;
 	bool has_cache = false;
 	bool cache = false;
+	bool has_cache_ttl_seconds = false;
+	int64_t cache_ttl_seconds = 0;
+	bool has_response_cache_max_entries = false;
+	int64_t response_cache_max_entries = 0;
+	bool has_prompt_cache = false;
+	bool prompt_cache = false;
+	bool has_connect_timeout_seconds = false;
+	int64_t connect_timeout_seconds = 0;
 	std::string allowed_hosts;
 	std::string log_endpoint;
 	std::string log_format;
@@ -64,8 +72,11 @@ struct CompletionOptions {
 	bool has_log_sample_rate = false;
 	double log_sample_rate = 1;
 	bool fail_on_error = true;
+	std::string on_error;
 	std::string response_format;
 	std::string response_schema;
+	std::string function_name;
+	std::string query_id;
 	ClientContext *client_context = nullptr;
 	void *runtime_state = nullptr;
 };
@@ -78,7 +89,12 @@ struct CompletionResult {
 	int64_t prompt_tokens;
 	int64_t completion_tokens;
 	int64_t total_tokens;
+	int64_t cached_prompt_tokens;
+	int64_t cache_creation_prompt_tokens;
 	int64_t elapsed_ms;
+	int64_t retries;
+	bool cache_hit;
+	std::string finish_reason;
 };
 
 //! Parsed result from an embedding provider response.
@@ -89,6 +105,8 @@ struct EmbeddingResult {
 	int64_t prompt_tokens;
 	int64_t total_tokens;
 	int64_t elapsed_ms;
+	int64_t retries;
+	bool cache_hit;
 };
 
 //! In-process usage record exposed through ai_usage().
@@ -96,6 +114,8 @@ struct UsageEvent {
 	uint64_t event_id;
 	std::string created_at;
 	std::string event;
+	std::string function_name;
+	std::string query_id;
 	std::string provider;
 	std::string protocol;
 	std::string model;
@@ -106,12 +126,18 @@ struct UsageEvent {
 	int64_t prompt_tokens;
 	int64_t completion_tokens;
 	int64_t total_tokens;
+	int64_t cached_prompt_tokens;
+	int64_t cache_creation_prompt_tokens;
 	int64_t elapsed_ms;
+	int64_t retries;
 	long http_status;
+	bool cache_hit;
+	std::string status;
+	std::string error;
 	double estimated_cost_usd;
 };
 
-//! Built-in model pricing row exposed through ai_models().
+//! Built-in model pricing row exposed through ai_model_prices().
 struct ModelPrice {
 	std::string provider;
 	std::string model;
@@ -153,7 +179,9 @@ struct JsonExtractedValue {
 ProviderConfig ResolveProvider(const std::string &provider, const std::string &model);
 //! Resolve provider configuration from a full option set.
 ProviderConfig ResolveProvider(const CompletionOptions &options);
-//! Normalize provider aliases such as anthropic -> claude and local -> openai_compatible.
+//! Snapshot non-secret environment defaults into options once for a query bind.
+void SnapshotEnvironmentOptions(CompletionOptions &options);
+//! Normalize provider aliases such as claude -> anthropic and local -> openai_compatible.
 std::string NormalizeProviderName(const std::string &provider);
 //! Return the default base URL for a supported provider.
 std::string ProviderBaseUrl(const std::string &provider);
@@ -179,6 +207,8 @@ std::string BuildEmbeddingRequestJson(const std::string &input, const Completion
 EmbeddingResult Embed(const std::string &input, const std::string &model, const std::string &provider);
 //! Execute an embedding request from a full option set.
 EmbeddingResult Embed(const std::string &input, const CompletionOptions &options);
+//! Execute a batched embedding request from a full option set.
+std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, const CompletionOptions &options);
 //! Return the effective max_concurrent_requests value from options or env.
 int64_t EffectiveMaxConcurrentRequests(const CompletionOptions &options);
 //! Initialize provider runtime dependencies such as libcurl.
@@ -214,6 +244,8 @@ bool ExtractJsonSchemaProperties(const std::string &schema, std::vector<JsonSche
 //! Extract named fields from a top-level JSON object for typed projection.
 bool ExtractJsonObjectFields(const std::string &input, const std::vector<std::string> &field_names,
                              std::vector<JsonExtractedValue> &values, std::string &error);
+//! Extract strings from a top-level JSON array.
+bool ExtractJsonStringArray(const std::string &input, std::vector<std::string> &values, std::string &error);
 
 } // namespace duckdb_ai
 } // namespace duckdb

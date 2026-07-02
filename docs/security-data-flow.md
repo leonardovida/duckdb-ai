@@ -38,20 +38,25 @@ endpoints.
 
 | Function family | Data sent |
 | --- | --- |
-| `ai_complete`, `ai_try_complete`, `ai_complete_json`, task wrappers, aggregates, and SQL assistant functions | Prompt text, configured system prompt, model name, response-format hints, and provider options needed by the selected provider API. |
+| `ai_complete`, `ai_try_complete`, `ai_complete_json`, `ai_rerank`, task wrappers, aggregates, and SQL assistant functions | Prompt text, configured system prompt, model name, response-format hints, and provider options needed by the selected provider API. |
 | `ai_complete_record` | Prompt text plus the supplied JSON Schema. |
-| `ai_embed` and `ai_similarity` | Input text to embed and model name. `ai_similarity` sends both input strings as separate embedding requests. |
+| `ai_embed` and `ai_similarity` | Input text to embed and model name. `ai_embed` may batch multiple rows with the same options into one provider request; `ai_similarity` reuses a constant-side embedding within a chunk and sends non-constant inputs as embedding requests. |
 | `ai_redact` with `openai_privacy_filter` | Raw input text and model name to `POST /redact`. |
-| `ai_request_json`, `ai_embedding_request_json`, `ai_schema_prompt`, `ai_is_read_only_sql`, `ai_validate_read_only_sql`, `ai_count_tokens`, `ai_recommended_batch_size`, metadata functions, and catalog table functions | No provider network call. |
-| `ai_query_data` | The natural-language question and generated schema context are sent during bind; generated SQL is validated as one read-only DuckDB `SELECT` before execution. |
+| `ai_completion_request_json`, `ai_embedding_request_json`, `ai_schema_prompt`, `ai_is_read_only_sql`, `ai_validate_read_only_sql`, `ai_count_tokens`, `ai_recommended_batch_size`, metadata functions, and catalog table functions | No provider network call. |
+| `ai_query_data` | The natural-language question and generated schema context are sent during bind; generated SQL is validated as one read-only DuckDB `SELECT` before execution. SQL assistant schema context is sent in the provider system message when the provider protocol supports it. Successful generated SQL is cached in memory for repeated binds with the same question, schema context, and output-affecting options. |
 
 ## Logging
 
 Outbound usage logs are disabled unless a log endpoint is configured. Default
-payloads contain provider, protocol, model, character counts, token counts,
-elapsed time, HTTP status, optional tags, and optional estimated cost. Text
-fields are included only when `duckdb_ai_log_include_text` or
+payloads contain function name, query id, provider, protocol, model, character
+counts, token counts, elapsed time, HTTP status, optional tags, and optional
+estimated cost. Text fields are included only when `duckdb_ai_log_include_text` or
 `DUCKDB_AI_LOG_INCLUDE_TEXT=1` is enabled.
+
+When strict logging is disabled, outbound usage logs are queued in memory and
+sent asynchronously on a best-effort basis. Enabling `duckdb_ai_log_strict` or
+`DUCKDB_AI_LOG_STRICT=1` posts logs synchronously and fails the SQL query if the
+collector request fails.
 
 ## Proxy and TLS
 
