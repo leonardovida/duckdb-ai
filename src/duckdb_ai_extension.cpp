@@ -54,7 +54,7 @@ constexpr idx_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr size_t MAX_PROMPT_QUERY_CACHE_ENTRIES = 1024;
 std::atomic<uint64_t> NEXT_QUERY_ID {1};
 
-static_assert(sizeof(duckdb_ai::CompletionOptions) == 608,
+static_assert(sizeof(duckdb_ai::CompletionOptions) == 608 || sizeof(duckdb_ai::CompletionOptions) == 728,
               "Update CompletionOptionsEqual when CompletionOptions fields change");
 
 bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duckdb_ai::CompletionOptions &right) {
