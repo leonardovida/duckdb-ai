@@ -7,6 +7,15 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-02
+
+### SQL API changes
+
+- Renamed the extension from `duckdb_ai` to `ai` ahead of the community
+  extension submission: use `INSTALL ai FROM community; LOAD ai;`. Function
+  names, `TYPE duckdb_ai` secrets, `duckdb_ai_*` settings, and `DUCKDB_AI_*`
+  environment variables are unchanged.
+
 ## 0.2.0 - 2026-07-02
 
 ### SQL API changes

@@ -1,9 +1,9 @@
 # This file is included by DuckDB's build system. It specifies which extension to load
 
 # Extension from this repo
-duckdb_extension_load(duckdb_ai
+duckdb_extension_load(ai
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
-    EXTENSION_VERSION 0.2.0
+    EXTENSION_VERSION 0.3.0
 )
 
 # Any extra extensions that should be built

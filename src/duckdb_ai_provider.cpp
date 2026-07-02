@@ -579,10 +579,10 @@ std::string JsonDouble(double input) {
 uint64_t StableHash(const std::string &input);
 
 std::string ExtensionUserAgent() {
-#ifdef EXT_VERSION_DUCKDB_AI
-	return std::string("duckdb_ai/") + EXT_VERSION_DUCKDB_AI;
+#ifdef EXT_VERSION_AI
+	return std::string("duckdb-ai/") + EXT_VERSION_AI;
 #else
-	return "duckdb_ai/dev";
+	return "duckdb-ai/dev";
 #endif
 }
 

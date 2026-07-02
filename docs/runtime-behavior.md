@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Runtime behavior
 
-This page documents how `duckdb_ai` executes provider calls at runtime. It is
+This page documents how the `ai` extension executes provider calls at runtime. It is
 the operational reference for the provider hardening, caching, concurrency, and
 egress controls used by the SQL functions.
 

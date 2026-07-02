@@ -13,7 +13,7 @@ functions. No pipeline to a separate application, no data leaving your
 machine unless you choose a hosted provider.
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 SELECT ai_summarize(
     'DuckDB is an analytical database built for fast local queries.',
@@ -55,7 +55,7 @@ One extension covers both ends of the spectrum:
 
 ## Quick Start
 
-`duckdb_ai` is not published in the DuckDB community extension repository yet
+The `ai` extension is not published in the DuckDB community extension repository yet
 (submission in progress). Until then, build and load it from this source tree
 (requires a C++ toolchain, CMake, and ninja):
 
@@ -67,7 +67,7 @@ GEN=ninja make release
 Then load the extension:
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 ```
 
 Confirm that the extension loaded:
@@ -86,7 +86,7 @@ ollama pull gemma4:e4b
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 SET duckdb_ai_provider = 'ollama';
 SET duckdb_ai_model = 'gemma4:e4b';
@@ -97,7 +97,7 @@ SELECT ai_complete('Write one sentence about DuckDB.');
 For OpenAI, store the API key in a DuckDB secret:
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,

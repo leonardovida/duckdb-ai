@@ -4,7 +4,7 @@ sidebar_position: 6
 
 # Security and data flow
 
-`duckdb_ai` is a network-calling DuckDB extension. Treat every provider call as
+The `ai` extension is a network-calling DuckDB extension. Treat every provider call as
 an explicit data egress path from DuckDB to the configured provider or gateway.
 
 ## Defaults

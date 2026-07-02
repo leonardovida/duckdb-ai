@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for improving `duckdb_ai`. This repository follows DuckDB extension
+Thanks for improving the `ai` extension. This repository follows DuckDB extension
 tooling, keeps public SQL behavior stable, and makes provider interactions
 deterministic in the default test suite.
 

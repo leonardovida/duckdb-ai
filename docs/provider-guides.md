@@ -60,7 +60,7 @@ ollama pull nomic-embed-text
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET ollama_ai (
     TYPE duckdb_ai,
@@ -92,7 +92,7 @@ export OPENAI_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
@@ -136,7 +136,7 @@ export AZURE_OPENAI_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET azure_ai (
     TYPE duckdb_ai,
@@ -168,7 +168,7 @@ export ANTHROPIC_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET claude_ai (
     TYPE duckdb_ai,
@@ -202,7 +202,7 @@ export GEMINI_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET gemini_ai (
     TYPE duckdb_ai,
@@ -232,7 +232,7 @@ export MISTRAL_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET mistral_ai (
     TYPE duckdb_ai,
@@ -260,7 +260,7 @@ export ZAI_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET zai_ai (
     TYPE duckdb_ai,
@@ -290,7 +290,7 @@ export DEEPSEEK_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET deepseek_ai (
     TYPE duckdb_ai,
@@ -321,7 +321,7 @@ export OPENROUTER_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET openrouter_ai (
     TYPE duckdb_ai,
@@ -357,7 +357,7 @@ export DATABRICKS_HOST='https://<workspace>.cloud.databricks.com'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET databricks_ai (
     TYPE duckdb_ai,
@@ -390,7 +390,7 @@ export SNOWFLAKE_ACCOUNT_URL='https://<account-identifier>.snowflakecomputing.co
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET snowflake_ai (
     TYPE duckdb_ai,
@@ -430,7 +430,7 @@ export OPF_CHECKPOINT="$HOME/.opf/privacy_filter"
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET privacy_filter_local (
     TYPE duckdb_ai,
@@ -500,7 +500,7 @@ ollama pull llama3.2
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET local_openai_ai (
     TYPE duckdb_ai,
@@ -523,7 +523,7 @@ export OPENAI_COMPATIBLE_API_KEY='...'
 ```
 
 ```sql
-LOAD duckdb_ai;
+LOAD ai;
 
 CREATE OR REPLACE SECRET gateway_ai (
     TYPE duckdb_ai,
