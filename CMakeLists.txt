@@ -24,6 +24,13 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
+if(WIN32)
+  # curl.h pulls in windows.h, whose min/max macros break std::min/std::max and
+  # std::numeric_limits<T>::max() under MSVC.
+  target_compile_definitions(${EXTENSION_NAME} PRIVATE NOMINMAX)
+  target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE NOMINMAX)
+endif()
+
 if(TARGET CURL::libcurl)
   target_link_libraries(${EXTENSION_NAME} CURL::libcurl)
   target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
