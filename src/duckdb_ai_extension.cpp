@@ -38,12 +38,14 @@
 #include <deque>
 #include <exception>
 #include <future>
+#include <initializer_list>
 #include <limits>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 namespace duckdb {
 
@@ -98,6 +100,14 @@ bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duck
 	       left.on_error == right.on_error && left.response_format == right.response_format &&
 	       left.response_schema == right.response_schema && left.function_name == right.function_name &&
 	       left.query_id == right.query_id;
+}
+
+void AddTableColumns(vector<LogicalType> &return_types, vector<string> &names,
+                     std::initializer_list<std::pair<const char *, LogicalType>> columns) {
+	for (auto &column : columns) {
+		names.emplace_back(column.first);
+		return_types.emplace_back(column.second);
+	}
 }
 
 void StampProviderFunction(duckdb_ai::CompletionOptions &options, const std::string &function_name) {
@@ -4673,30 +4683,15 @@ bool SecretHasNonEmptyValue(const KeyValueSecret &secret, const std::string &key
 
 unique_ptr<FunctionData> AiSecretsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                        vector<string> &names) {
-	names.emplace_back("name");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("provider");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("model");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("base_url");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("scope");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("storage");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("persistent");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-
-	names.emplace_back("has_api_key");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-
+	AddTableColumns(return_types, names,
+	                {{"name", LogicalType::VARCHAR},
+	                 {"provider", LogicalType::VARCHAR},
+	                 {"model", LogicalType::VARCHAR},
+	                 {"base_url", LogicalType::VARCHAR},
+	                 {"scope", LogicalType::VARCHAR},
+	                 {"storage", LogicalType::VARCHAR},
+	                 {"persistent", LogicalType::BOOLEAN},
+	                 {"has_api_key", LogicalType::BOOLEAN}});
 	return nullptr;
 }
 
@@ -4742,78 +4737,31 @@ void AiSecretsFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 
 unique_ptr<FunctionData> AiUsageBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                      vector<string> &names) {
-	names.emplace_back("event_id");
-	return_types.emplace_back(LogicalType::UBIGINT);
-
-	names.emplace_back("created_at");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("event");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("function_name");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("query_id");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("provider");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("protocol");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("model");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("prompt_chars");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("response_chars");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("input_chars");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("dimensions");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("prompt_tokens");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("completion_tokens");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("total_tokens");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("cached_prompt_tokens");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("cache_creation_prompt_tokens");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("elapsed_ms");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("retries");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("http_status");
-	return_types.emplace_back(LogicalType::BIGINT);
-
-	names.emplace_back("cache_hit");
-	return_types.emplace_back(LogicalType::BOOLEAN);
-
-	names.emplace_back("status");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("error");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("estimated_cost_usd");
-	return_types.emplace_back(LogicalType::DOUBLE);
-
+	AddTableColumns(return_types, names,
+	                {{"event_id", LogicalType::UBIGINT},
+	                 {"created_at", LogicalType::VARCHAR},
+	                 {"event", LogicalType::VARCHAR},
+	                 {"function_name", LogicalType::VARCHAR},
+	                 {"query_id", LogicalType::VARCHAR},
+	                 {"provider", LogicalType::VARCHAR},
+	                 {"protocol", LogicalType::VARCHAR},
+	                 {"model", LogicalType::VARCHAR},
+	                 {"prompt_chars", LogicalType::BIGINT},
+	                 {"response_chars", LogicalType::BIGINT},
+	                 {"input_chars", LogicalType::BIGINT},
+	                 {"dimensions", LogicalType::BIGINT},
+	                 {"prompt_tokens", LogicalType::BIGINT},
+	                 {"completion_tokens", LogicalType::BIGINT},
+	                 {"total_tokens", LogicalType::BIGINT},
+	                 {"cached_prompt_tokens", LogicalType::BIGINT},
+	                 {"cache_creation_prompt_tokens", LogicalType::BIGINT},
+	                 {"elapsed_ms", LogicalType::BIGINT},
+	                 {"retries", LogicalType::BIGINT},
+	                 {"http_status", LogicalType::BIGINT},
+	                 {"cache_hit", LogicalType::BOOLEAN},
+	                 {"status", LogicalType::VARCHAR},
+	                 {"error", LogicalType::VARCHAR},
+	                 {"estimated_cost_usd", LogicalType::DOUBLE}});
 	return nullptr;
 }
 
@@ -4870,8 +4818,7 @@ void AiUsageFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 
 unique_ptr<FunctionData> AiClearUsageBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                           vector<string> &names) {
-	names.emplace_back("cleared");
-	return_types.emplace_back(LogicalType::BOOLEAN);
+	AddTableColumns(return_types, names, {{"cleared", LogicalType::BOOLEAN}});
 	return nullptr;
 }
 
@@ -4904,30 +4851,15 @@ void AiClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, Da
 
 unique_ptr<FunctionData> AiModelPricesBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                            vector<string> &names) {
-	names.emplace_back("provider");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("model");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("operation");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("input_token_price_per_million");
-	return_types.emplace_back(LogicalType::DOUBLE);
-
-	names.emplace_back("output_token_price_per_million");
-	return_types.emplace_back(LogicalType::DOUBLE);
-
-	names.emplace_back("source_url");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("source_note");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
-	names.emplace_back("last_reviewed");
-	return_types.emplace_back(LogicalType::VARCHAR);
-
+	AddTableColumns(return_types, names,
+	                {{"provider", LogicalType::VARCHAR},
+	                 {"model", LogicalType::VARCHAR},
+	                 {"operation", LogicalType::VARCHAR},
+	                 {"input_token_price_per_million", LogicalType::DOUBLE},
+	                 {"output_token_price_per_million", LogicalType::DOUBLE},
+	                 {"source_url", LogicalType::VARCHAR},
+	                 {"source_note", LogicalType::VARCHAR},
+	                 {"last_reviewed", LogicalType::VARCHAR}});
 	return nullptr;
 }
 
