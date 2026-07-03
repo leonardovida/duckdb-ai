@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.3.2 - 2026-07-03
+
+### Fixed
+
+- Allowed embedding functions to use the documented `cache_ttl_seconds`,
+  `cache_max_entries`, and `connect_timeout_seconds` per-call options.
+
 ## 0.3.1 - 2026-07-02
 
 ### Fixed

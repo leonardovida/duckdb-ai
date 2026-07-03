@@ -375,6 +375,20 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             model := 'openai/privacy-filter'
         ) AS privacy_filter_redaction;
         SELECT ai_embed('embed smoke')[1] AS first_embedding_value;
+        SELECT ai_embed(
+            'embed cache controls',
+            cache := true,
+            cache_ttl_seconds := 60,
+            cache_max_entries := 2,
+            connect_timeout_seconds := 1
+        )[1] AS controlled_embedding_value;
+        SELECT ai_embed(
+            'embed cache controls',
+            cache := true,
+            cache_ttl_seconds := 60,
+            cache_max_entries := 2,
+            connect_timeout_seconds := 1
+        )[1] AS cached_controlled_embedding_value;
         SELECT sum(embedding[1]) AS batched_embedding_sum
         FROM (
             SELECT ai_embed(value) AS embedding
@@ -658,8 +672,8 @@ def assert_smoke_result(output: str):
 
     if len(MockProviderHandler.completion_requests) != 34:
         raise AssertionError(f"expected 34 completion requests, got {len(MockProviderHandler.completion_requests)}")
-    if len(MockProviderHandler.authorization_headers) != 43:
-        raise AssertionError(f"expected 43 auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if len(MockProviderHandler.authorization_headers) != 44:
+        raise AssertionError(f"expected 44 auth headers, got {len(MockProviderHandler.authorization_headers)}")
     for header in MockProviderHandler.authorization_headers:
         if header != "Bearer test-key":
             raise AssertionError(f"unexpected authorization header: {header}")
@@ -889,39 +903,42 @@ def assert_smoke_result(output: str):
     if MockProviderHandler.claude_versions != ["2023-06-01"]:
         raise AssertionError(f"unexpected Claude version headers: {MockProviderHandler.claude_versions}")
 
-    if len(MockProviderHandler.embedding_requests) != 8:
-        raise AssertionError(f"expected 8 embedding requests, got {len(MockProviderHandler.embedding_requests)}")
+    if len(MockProviderHandler.embedding_requests) != 9:
+        raise AssertionError(f"expected 9 embedding requests, got {len(MockProviderHandler.embedding_requests)}")
     embedding_request = MockProviderHandler.embedding_requests[0]
     if embedding_request["model"] != "mock-embedding-default":
         raise AssertionError(f"unexpected embedding model: {embedding_request}")
     if embedding_request["input"] != "embed smoke":
         raise AssertionError(f"unexpected embedding input: {embedding_request}")
-    batched_embedding_request = MockProviderHandler.embedding_requests[1]
+    controlled_embedding_request = MockProviderHandler.embedding_requests[1]
+    if controlled_embedding_request["input"] != "embed cache controls":
+        raise AssertionError(f"unexpected controlled embedding input: {controlled_embedding_request}")
+    batched_embedding_request = MockProviderHandler.embedding_requests[2]
     if batched_embedding_request["input"] != ["embed batch one", "embed batch two", "embed batch three"]:
         raise AssertionError(f"unexpected batched embedding input: {batched_embedding_request}")
-    similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[2:4]]
+    similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[3:5]]
     if similarity_inputs != ["same left", "same right"]:
         raise AssertionError(f"unexpected similarity embedding inputs: {similarity_inputs}")
-    similarity_models = [request["model"] for request in MockProviderHandler.embedding_requests[2:4]]
+    similarity_models = [request["model"] for request in MockProviderHandler.embedding_requests[3:5]]
     if similarity_models != ["mock-embedding-default", "mock-embedding-default"]:
         raise AssertionError(f"unexpected similarity embedding models: {similarity_models}")
-    constant_similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[4:]]
+    constant_similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[5:]]
     if constant_similarity_inputs.count("constant query") != 1:
         raise AssertionError(f"expected one constant-side embedding, got {constant_similarity_inputs}")
     if set(constant_similarity_inputs) != {"constant query", "candidate one", "candidate two", "candidate three"}:
         raise AssertionError(f"unexpected constant similarity embedding inputs: {constant_similarity_inputs}")
 
     log_deadline = time.time() + 5
-    while len(MockProviderHandler.log_requests) < 45 and time.time() < log_deadline:
+    while len(MockProviderHandler.log_requests) < 47 and time.time() < log_deadline:
         time.sleep(0.05)
-    if len(MockProviderHandler.log_requests) != 45:
-        raise AssertionError(f"expected 45 log requests, got {len(MockProviderHandler.log_requests)}")
+    if len(MockProviderHandler.log_requests) != 47:
+        raise AssertionError(f"expected 47 log requests, got {len(MockProviderHandler.log_requests)}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 34 or len(embedding_logs) != 10:
+    if len(completion_logs) != 34 or len(embedding_logs) != 12:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")
@@ -1038,6 +1055,11 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"embedding log missing query id: {embedding_log_request}")
     if "input" in embedding_log_request:
         raise AssertionError(f"embedding log request unexpectedly included input text: {embedding_log_request}")
+    controlled_embedding_logs = [request for request in embedding_logs if request.get("input_chars") == 20]
+    if len(controlled_embedding_logs) != 2:
+        raise AssertionError(f"expected two controlled embedding logs, got {controlled_embedding_logs}")
+    if sorted(request.get("cache_hit") for request in controlled_embedding_logs) != [False, True]:
+        raise AssertionError(f"expected controlled embedding cache miss and hit, got {controlled_embedding_logs}")
 
 
 def main():
