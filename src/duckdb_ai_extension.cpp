@@ -2110,6 +2110,7 @@ bool IsEmbeddingOption(const std::string &name) {
 	return name == "model" || name == "provider" || name == "profile" || name == "secret" || name == "secret_name" ||
 	       name == "base_url" || name == "timeout_seconds" || name == "retry_count" || name == "retry_backoff_ms" ||
 	       name == "max_concurrent_requests" || name == "min_request_interval_ms" || name == "token_limit_per_minute" ||
+	       name == "cache_ttl_seconds" || name == "cache_max_entries" || name == "connect_timeout_seconds" ||
 	       name == "input_token_price_per_million" || name == "output_token_price_per_million" ||
 	       name == "use_builtin_model_prices" || name == "cache" || name == "allowed_hosts" ||
 	       name == "fail_on_error" || name == "on_error" || name == "log_format" || name == "log_tags" ||
@@ -2149,8 +2150,9 @@ unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarF
 			    "Unsupported AI embedding option \"%s\". Supported options: model, provider, "
 			    "profile, secret, base_url, timeout_seconds, retry_count, retry_backoff_ms, fail_on_error, "
 			    "on_error, max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, "
-			    "cache, allowed_hosts, input_token_price_per_million, output_token_price_per_million, "
-			    "use_builtin_model_prices, log_format, log_tags, log_sample_rate",
+			    "cache, cache_ttl_seconds, cache_max_entries, allowed_hosts, connect_timeout_seconds, "
+			    "input_token_price_per_million, output_token_price_per_million, use_builtin_model_prices, "
+			    "log_format, log_tags, log_sample_rate",
 			    alias);
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
@@ -2203,8 +2205,9 @@ unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction
 			    "Unsupported AI similarity option \"%s\". Supported options: model, provider, "
 			    "profile, secret, base_url, timeout_seconds, retry_count, retry_backoff_ms, fail_on_error, "
 			    "on_error, max_concurrent_requests, min_request_interval_ms, token_limit_per_minute, cache, "
-			    "allowed_hosts, input_token_price_per_million, output_token_price_per_million, "
-			    "use_builtin_model_prices, log_format, log_tags, log_sample_rate",
+			    "cache_ttl_seconds, cache_max_entries, allowed_hosts, connect_timeout_seconds, "
+			    "input_token_price_per_million, output_token_price_per_million, use_builtin_model_prices, "
+			    "log_format, log_tags, log_sample_rate",
 			    alias);
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);

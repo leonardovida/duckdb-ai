@@ -379,6 +379,11 @@ SELECT ai_embedding_request_json('duck', provider := 'openai', model := 'embed-t
 true
 
 query I
+SELECT ai_embedding_request_json('duck', provider := 'openai', model := 'embed-test', cache_ttl_seconds := 60, cache_max_entries := 1, connect_timeout_seconds := 1) = '{"model":"embed-test","input":"duck"}';
+----
+true
+
+query I
 SELECT ai_embed('duck', provider := 'claude', fail_on_error := false) IS NULL;
 ----
 true
@@ -580,6 +585,21 @@ Binder Error: AI option "cache_max_entries" must be between 0 and 1000000
 
 statement error
 SELECT ai_completion_request_json('hello', provider := 'openai', connect_timeout_seconds := 0);
+----
+Binder Error: AI option "connect_timeout_seconds" must be between 1 and 31536000
+
+statement error
+SELECT ai_embedding_request_json('duck', provider := 'openai', cache_ttl_seconds := -1);
+----
+Binder Error: AI option "cache_ttl_seconds" must be between 0 and 31536000
+
+statement error
+SELECT ai_embedding_request_json('duck', provider := 'openai', cache_max_entries := -1);
+----
+Binder Error: AI option "cache_max_entries" must be between 0 and 1000000
+
+statement error
+SELECT ai_embedding_request_json('duck', provider := 'openai', connect_timeout_seconds := 0);
 ----
 Binder Error: AI option "connect_timeout_seconds" must be between 1 and 31536000
 
