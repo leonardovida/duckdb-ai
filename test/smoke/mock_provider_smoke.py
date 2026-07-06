@@ -105,6 +105,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = "```sql\nSELECT 42\n```"
             elif "Correct one line in the DuckDB SQL query" in full_prompt:
                 content = "SELECT 42"
+            elif "Generate one DuckDB SQL SELECT statement" in full_prompt and "self correct count" in full_prompt:
+                content = "SELECT broken_column FROM smoke_fix_missing"
             elif "Generate one DuckDB SQL SELECT statement" in full_prompt:
                 content = "```sql\nSELECT 42\n```"
             elif "Return only a JSON array of chosen labels" in full_prompt:
@@ -422,6 +424,99 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
     if result.returncode != 0:
         raise AssertionError(f"duckdb exited with {result.returncode}\n{result.stdout}")
     return result.stdout
+
+
+def run_duckdb_self_correction(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT * FROM ai_clear_usage();
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_model = 'mock-model';
+        SET duckdb_ai_sql_assistant_model = 'mock-sql-model';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_timeout_seconds = 5;
+        CREATE OR REPLACE SECRET smoke_fix_duckdb_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai'
+        );
+        SELECT * FROM ai_query_data(
+            'self correct count',
+            schema_context := 'CREATE TABLE smoke_fix(id INTEGER)',
+            fix_attempts := 2
+        );
+        SELECT ai_sql(
+            'self correct count',
+            schema_context := 'CREATE TABLE smoke_fix(id INTEGER)',
+            fix_attempts := 2
+        ) AS repaired_sql;
+        SELECT sql AS fixed_with_error
+        FROM ai_fix_sql(
+            'SELECT broken_column FROM smoke_fix_missing',
+            mode := 'query',
+            error := 'Catalog Error: Table with name smoke_fix_missing does not exist',
+            schema_context := 'CREATE TABLE smoke_fix(id INTEGER)'
+        );
+        SELECT event, count(*) AS events
+        FROM ai_usage()
+        WHERE event IN ('ai_query_data_fix_attempt', 'ai_sql_fix_attempt')
+        GROUP BY event
+        ORDER BY event;
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb self correction smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_self_correction_result(output: str):
+    required = [
+        "repaired_sql",
+        "SELECT 42",
+        "fixed_with_error",
+        "ai_query_data_fix_attempt",
+        "ai_sql_fix_attempt",
+    ]
+    missing = [value for value in required if value not in output]
+    if missing:
+        raise AssertionError(f"self correction output missing {missing}\n{output}")
+
+    if len(MockProviderHandler.completion_requests) != 5:
+        raise AssertionError(
+            f"expected 5 self correction completion requests, got {len(MockProviderHandler.completion_requests)}"
+        )
+    query_data_repair = "\n".join(
+        message["content"] for message in MockProviderHandler.completion_requests[1]["messages"]
+    )
+    for expected in (
+        "Correct the DuckDB SQL query",
+        "Original question:",
+        "self correct count",
+        "Error message:",
+        "smoke_fix_missing",
+        "Broken SQL query:",
+        "SELECT broken_column FROM smoke_fix_missing",
+    ):
+        if expected not in query_data_repair:
+            raise AssertionError(f"ai_query_data repair prompt missing {expected!r}\n{query_data_repair}")
+    fixup_prompt = "\n".join(message["content"] for message in MockProviderHandler.completion_requests[4]["messages"])
+    for expected in (
+        "Correct the DuckDB SQL query",
+        "Error message:",
+        "Catalog Error: Table with name smoke_fix_missing does not exist",
+        "Broken SQL query:",
+    ):
+        if expected not in fixup_prompt:
+            raise AssertionError(f"ai_fix_sql prompt missing {expected!r}\n{fixup_prompt}")
 
 
 def run_duckdb_provider_error(duckdb_path: Path, base_url: str) -> str:
@@ -1081,6 +1176,10 @@ def main():
     try:
         output = run_duckdb(args.duckdb, f"http://127.0.0.1:{port}")
         assert_smoke_result(output)
+        MockProviderHandler.reset()
+        self_correction_output = run_duckdb_self_correction(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_self_correction_result(self_correction_output)
+        MockProviderHandler.reset()
         provider_error_output = run_duckdb_provider_error(args.duckdb, f"http://127.0.0.1:{port}")
         assert_provider_error(provider_error_output)
         MockProviderHandler.reset()

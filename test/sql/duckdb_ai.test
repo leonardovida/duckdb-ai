@@ -138,6 +138,42 @@ SELECT ai_validate_read_only_sql('CREATE TABLE t(i INTEGER)');
 Invalid Input Error: AI generated SQL is not a single read-only SELECT statement:
 
 statement ok
+CREATE TABLE bind_check_table(id INTEGER, label VARCHAR);
+
+query I
+SELECT ai_is_read_only_sql('SELECT id FROM bind_check_table', true);
+----
+true
+
+query I
+SELECT ai_is_read_only_sql('SELECT missing_column FROM bind_check_table', true);
+----
+false
+
+query I
+SELECT ai_is_read_only_sql('SELECT * FROM missing_bind_check_table', true);
+----
+false
+
+query I
+SELECT ai_is_read_only_sql('SELECT missing_column FROM bind_check_table', false);
+----
+true
+
+query I
+SELECT ai_validate_read_only_sql('SELECT id FROM bind_check_table', true);
+----
+SELECT id FROM bind_check_table
+
+statement error
+SELECT ai_validate_read_only_sql('SELECT missing_column FROM bind_check_table', true);
+----
+Invalid Input Error: AI generated SQL does not bind:
+
+statement ok
+DROP TABLE bind_check_table;
+
+statement ok
 CREATE TABLE ai_schema_prompt_orders(id INTEGER NOT NULL, status VARCHAR DEFAULT 'new', note VARCHAR);
 
 statement ok
@@ -527,6 +563,45 @@ statement error
 SELECT * FROM ai_query_data('count rows', sample_rows := 101);
 ----
 Binder Error: ai_query_data sample_rows must be between 0 and 100
+
+statement error
+SELECT * FROM ai_query_data('count rows', fix_attempts := -1);
+----
+Binder Error: ai_query_data fix_attempts must be between 0 and 5
+
+statement error
+SELECT * FROM ai_query_data('count rows', fix_attempts := 6);
+----
+Binder Error: ai_query_data fix_attempts must be between 0 and 5
+
+statement error
+SELECT ai_sql('count rows', fix_attempts := 10);
+----
+Binder Error: ai_sql fix_attempts must be between 0 and 5
+
+query I
+SELECT count(*) FROM ai_query_data('count rows', fix_attempts := 2, provider := 'not-a-provider', fail_on_error := false);
+----
+0
+
+query I
+SELECT ai_sql('count rows', fix_attempts := 2, provider := 'not-a-provider', fail_on_error := false) IS NULL;
+----
+true
+
+query I
+SELECT sql IS NULL FROM ai_fix_sql('SEELECT 42', mode := 'query', error := 'Parser Error: syntax error at or near "SEELECT"', fix_attempts := 1, provider := 'not-a-provider', fail_on_error := false);
+----
+true
+
+statement error
+SELECT * FROM ai_fix_sql('SEELECT 42', mode := 'line', error := 'some error', fix_attempts := 1, provider := 'not-a-provider', fail_on_error := false);
+----
+Binder Error: ai_fix_sql only supports fix_attempts with mode query
+
+statement error
+SELECT * FROM ai_explain_sql('SELECT 42', fix_attempts := 1, provider := 'not-a-provider', fail_on_error := false);
+----
 
 statement error
 SELECT ai_completion_request_json('hello', provider := 'openai', temperature := 3.0);

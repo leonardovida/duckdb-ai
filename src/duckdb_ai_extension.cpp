@@ -24,6 +24,7 @@
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -57,6 +58,7 @@ namespace {
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr idx_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr size_t MAX_PROMPT_QUERY_CACHE_ENTRIES = 1024;
+constexpr int64_t MAX_SQL_FIX_ATTEMPTS = 5;
 std::atomic<uint64_t> NEXT_QUERY_ID {1};
 
 // Tripwire so CompletionOptionsEqual is updated when CompletionOptions gains fields. The size is
@@ -208,6 +210,7 @@ struct PromptAssistantBindData : public FunctionData {
 	std::string sql;
 	std::string error_message;
 	std::string schema_context;
+	int64_t fix_attempts = 0;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<PromptAssistantBindData>(kind);
@@ -215,13 +218,15 @@ struct PromptAssistantBindData : public FunctionData {
 		result->sql = sql;
 		result->error_message = error_message;
 		result->schema_context = schema_context;
+		result->fix_attempts = fix_attempts;
 		return std::move(result);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<PromptAssistantBindData>();
 		return kind == other.kind && CompletionOptionsEqual(options, other.options) && sql == other.sql &&
-		       error_message == other.error_message && schema_context == other.schema_context;
+		       error_message == other.error_message && schema_context == other.schema_context &&
+		       fix_attempts == other.fix_attempts;
 	}
 };
 
@@ -259,6 +264,7 @@ struct SchemaTableInfo {
 vector<std::string> ReadIncludeTablesValue(const Value &value_p, const std::string &name,
                                            const std::string &function_name);
 int64_t ReadSampleRowsValue(const Value &value_p, const std::string &function_name);
+int64_t ReadFixAttemptsValue(const Value &value_p, const std::string &function_name);
 
 struct AiCompletionBindData : public FunctionData {
 	explicit AiCompletionBindData(bool request_json_p, bool validate_json_output_p = false)
@@ -463,6 +469,7 @@ struct AiPromptSqlBindData : public FunctionData {
 	idx_t model_index = 0;
 	bool has_provider_arg = false;
 	idx_t provider_index = 0;
+	int64_t fix_attempts = 0;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<AiPromptSqlBindData>();
@@ -475,6 +482,7 @@ struct AiPromptSqlBindData : public FunctionData {
 		result->model_index = model_index;
 		result->has_provider_arg = has_provider_arg;
 		result->provider_index = provider_index;
+		result->fix_attempts = fix_attempts;
 		return std::move(result);
 	}
 
@@ -487,7 +495,7 @@ struct AiPromptSqlBindData : public FunctionData {
 		       has_schema_context_arg == other.has_schema_context_arg &&
 		       schema_context_index == other.schema_context_index && has_model_arg == other.has_model_arg &&
 		       model_index == other.model_index && has_provider_arg == other.has_provider_arg &&
-		       provider_index == other.provider_index;
+		       provider_index == other.provider_index && fix_attempts == other.fix_attempts;
 	}
 };
 
@@ -2828,6 +2836,12 @@ unique_ptr<FunctionData> AiPromptSqlBind(ClientContext &context, ScalarFunction 
 			bound_function.arguments.emplace_back(LogicalType::BIGINT);
 			continue;
 		}
+		if (alias == "fix_attempts") {
+			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::BIGINT);
+			bind_data->fix_attempts = ReadFixAttemptsValue(value, bound_function.name);
+			bound_function.arguments.emplace_back(LogicalType::BIGINT);
+			continue;
+		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
 		bound_function.arguments.emplace_back(PromptSqlOptionType(alias));
 	}
@@ -3899,6 +3913,24 @@ bool ValidateReadOnlySql(const std::string &sql, std::string &error) {
 	return true;
 }
 
+bool VerifySqlBinds(ClientContext &context, const std::string &sql, std::string &error) {
+	try {
+		Parser parser(context.GetParserOptions());
+		parser.ParseQuery(sql);
+		if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+			error = "expected exactly one SELECT statement";
+			return false;
+		}
+		auto binder = Binder::CreateBinder(context);
+		binder->Bind(*parser.statements[0]);
+		return true;
+	} catch (std::exception &ex) {
+		ErrorData error_data(ex);
+		error = error_data.Message();
+		return false;
+	}
+}
+
 void RequireReadOnlySql(const std::string &sql, const std::string &function_name) {
 	std::string error;
 	if (!ValidateReadOnlySql(sql, error)) {
@@ -3956,8 +3988,19 @@ std::string BuildPromptFixupSystemPrompt(const std::string &schema_context) {
 	return prompt;
 }
 
-std::string BuildPromptFixupPrompt(const std::string &sql) {
+std::string BuildPromptFixupPrompt(const std::string &sql, const std::string &error_message = "",
+                                   const std::string &question = "") {
 	std::string prompt;
+	if (!question.empty()) {
+		prompt += "\nOriginal question:\n";
+		prompt += question;
+		prompt += "\n";
+	}
+	if (!error_message.empty()) {
+		prompt += "\nError message:\n";
+		prompt += error_message;
+		prompt += "\n";
+	}
 	prompt += "\nBroken SQL query:\n";
 	prompt += sql;
 	return prompt;
@@ -4033,16 +4076,39 @@ std::string ReplaceSqlLine(const std::string &sql, idx_t one_based_line_number, 
 }
 
 std::string GeneratePromptFixupSql(const std::string &sql, const std::string &schema_context,
-                                   const duckdb_ai::CompletionOptions &options) {
+                                   const duckdb_ai::CompletionOptions &options, const std::string &error_message = "",
+                                   const std::string &question = "") {
 	auto request_options = options;
 	AppendSystemPrompt(request_options, BuildPromptFixupSystemPrompt(schema_context));
-	auto prompt = BuildPromptFixupPrompt(sql);
+	auto prompt = BuildPromptFixupPrompt(sql, error_message, question);
 	auto fixed_sql = StripMarkdownSqlFence(duckdb_ai::Complete(prompt, request_options).text);
 	std::string error;
 	if (!ValidateReadOnlySql(fixed_sql, error)) {
 		throw InvalidInputException("AI corrected SQL is not a single read-only SELECT statement: %s", error);
 	}
 	return fixed_sql;
+}
+
+std::string RepairGeneratedSql(ClientContext &context, const std::string &question, std::string generated_sql,
+                               const std::string &schema_context, const duckdb_ai::CompletionOptions &options,
+                               int64_t fix_attempts, const std::string &usage_event) {
+	if (fix_attempts <= 0) {
+		return generated_sql;
+	}
+	std::string bind_error;
+	for (int64_t attempt = 0; attempt < fix_attempts; attempt++) {
+		if (VerifySqlBinds(context, generated_sql, bind_error)) {
+			return generated_sql;
+		}
+		duckdb_ai::RecordLocalUsageEvent(&context, usage_event, static_cast<int64_t>(generated_sql.size()),
+		                                 static_cast<int64_t>(bind_error.size()));
+		generated_sql = GeneratePromptFixupSql(generated_sql, schema_context, options, bind_error, question);
+	}
+	if (!VerifySqlBinds(context, generated_sql, bind_error)) {
+		throw InvalidInputException("AI generated SQL still fails to bind after %lld fix attempt(s): %s", fix_attempts,
+		                            bind_error);
+	}
+	return generated_sql;
 }
 
 unique_ptr<TableRef> ParseReadOnlySubquery(const std::string &sql, const ParserOptions &options) {
@@ -4082,13 +4148,18 @@ std::string OptionalTableStringInput(const TableFunctionBindInput &input, idx_t 
 }
 
 void ApplyPromptQueryValueOption(duckdb_ai::CompletionOptions &options, std::string &schema_context,
-                                 PromptSchemaOptions &schema_options, const std::string &name, const Value &value_p) {
+                                 PromptSchemaOptions &schema_options, int64_t &fix_attempts, const std::string &name,
+                                 const Value &value_p) {
 	if (value_p.IsNull()) {
 		throw BinderException("ai_query_data option \"%s\" must not be NULL", name);
 	}
 	auto value = value_p;
 	if (name == "schema_context" || name == "schema") {
 		schema_context = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
+		return;
+	}
+	if (name == "fix_attempts") {
+		fix_attempts = ReadFixAttemptsValue(value, "ai_query_data");
 		return;
 	}
 	if (name == "include_tables") {
@@ -4206,6 +4277,7 @@ unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctio
 	auto question = RequiredTableStringInput(input, 0, "question");
 	auto schema_context = OptionalTableStringInput(input, 1);
 	PromptSchemaOptions schema_options;
+	int64_t fix_attempts = 0;
 	if (input.inputs.size() > 2) {
 		options.model = OptionalTableStringInput(input, 2);
 	}
@@ -4213,8 +4285,8 @@ unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctio
 		options.provider = OptionalTableStringInput(input, 3);
 	}
 	for (auto &named_parameter : input.named_parameters) {
-		ApplyPromptQueryValueOption(options, schema_context, schema_options, LowerAscii(named_parameter.first),
-		                            named_parameter.second);
+		ApplyPromptQueryValueOption(options, schema_context, schema_options, fix_attempts,
+		                            LowerAscii(named_parameter.first), named_parameter.second);
 	}
 	if (schema_context.empty()) {
 		schema_context = BuildPromptSchemaContext(context, schema_options);
@@ -4225,11 +4297,18 @@ unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctio
 		auto cache_key = PromptQueryCacheKey(question, schema_context, options);
 		std::string generated_sql;
 		if (TryGetPromptQueryCachedSql(context, cache_key, generated_sql)) {
-			duckdb_ai::RecordLocalUsageEvent(&context, "ai_query_data_cache_hit", static_cast<int64_t>(question.size()),
-			                                 static_cast<int64_t>(generated_sql.size()));
-			return ParseReadOnlySubquery(generated_sql, context.GetParserOptions());
+			std::string bind_error;
+			if (fix_attempts <= 0 || VerifySqlBinds(context, generated_sql, bind_error)) {
+				duckdb_ai::RecordLocalUsageEvent(&context, "ai_query_data_cache_hit",
+				                                 static_cast<int64_t>(question.size()),
+				                                 static_cast<int64_t>(generated_sql.size()));
+				return ParseReadOnlySubquery(generated_sql, context.GetParserOptions());
+			}
+			// the cached SQL no longer binds (e.g. the schema changed): fall through and regenerate
 		}
 		generated_sql = GeneratePromptSql(question, schema_context, options);
+		generated_sql = RepairGeneratedSql(context, question, std::move(generated_sql), schema_context, options,
+		                                   fix_attempts, "ai_query_data_fix_attempt");
 		StorePromptQueryCachedSql(context, cache_key, generated_sql);
 		return ParseReadOnlySubquery(generated_sql, context.GetParserOptions());
 	} catch (std::exception &ex) {
@@ -4305,6 +4384,21 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 	RunProviderJobs(
 	    jobs, [&](ProviderStringJob &job) { job.output = GeneratePromptSql(job.input, job.parameter, job.options); });
 
+	if (bind_data.fix_attempts > 0) {
+		// bind verification needs the client context, so repair runs serially after the parallel generation
+		for (auto &job : jobs) {
+			if (job.exception || !job.completed) {
+				continue;
+			}
+			try {
+				job.output = RepairGeneratedSql(state.GetContext(), job.input, std::move(job.output), job.parameter,
+				                                job.options, bind_data.fix_attempts, "ai_sql_fix_attempt");
+			} catch (std::exception &) {
+				job.exception = std::current_exception();
+			}
+		}
+	}
+
 	for (auto &job : jobs) {
 		if (job.exception) {
 			if (job.fail_on_error) {
@@ -4352,6 +4446,18 @@ int64_t ReadSampleRowsValue(const Value &value_p, const std::string &function_na
 		throw BinderException("%s sample_rows must be between 0 and 100", function_name);
 	}
 	return sample_rows;
+}
+
+int64_t ReadFixAttemptsValue(const Value &value_p, const std::string &function_name) {
+	if (value_p.IsNull()) {
+		throw BinderException("%s fix_attempts must not be NULL", function_name);
+	}
+	auto value = value_p;
+	auto fix_attempts = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
+	if (fix_attempts < 0 || fix_attempts > MAX_SQL_FIX_ATTEMPTS) {
+		throw BinderException("%s fix_attempts must be between 0 and %lld", function_name, MAX_SQL_FIX_ATTEMPTS);
+	}
+	return fix_attempts;
 }
 
 PromptSchemaOptions PromptSchemaOptionsFromInput(TableFunctionBindInput &input) {
@@ -4467,7 +4573,7 @@ void ApplyPromptAssistantValueOption(PromptAssistantBindData &bind_data, PromptS
 		return;
 	}
 	if (name == "error") {
-		if (bind_data.kind != PromptAssistantKind::FIX_LINE) {
+		if (bind_data.kind != PromptAssistantKind::FIX_LINE && bind_data.kind != PromptAssistantKind::FIXUP) {
 			throw BinderException("%s does not support an error option", function_name);
 		}
 		if (has_error) {
@@ -4475,6 +4581,13 @@ void ApplyPromptAssistantValueOption(PromptAssistantBindData &bind_data, PromptS
 		}
 		bind_data.error_message = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 		has_error = true;
+		return;
+	}
+	if (name == "fix_attempts") {
+		if (bind_data.kind != PromptAssistantKind::FIXUP) {
+			throw BinderException("%s only supports fix_attempts with mode query", function_name);
+		}
+		bind_data.fix_attempts = ReadFixAttemptsValue(value, function_name);
 		return;
 	}
 	if (name == "mode") {
@@ -4611,7 +4724,10 @@ void PromptAssistantFunction(ClientContext &context, TableFunctionInput &input, 
 			auto explanation = duckdb_ai::Complete(prompt, options).text;
 			output.SetValue(0, 0, Value(explanation));
 		} else if (bind_data.kind == PromptAssistantKind::FIXUP) {
-			auto fixed_sql = GeneratePromptFixupSql(bind_data.sql, bind_data.schema_context, options);
+			auto fixed_sql =
+			    GeneratePromptFixupSql(bind_data.sql, bind_data.schema_context, options, bind_data.error_message);
+			fixed_sql = RepairGeneratedSql(context, "", std::move(fixed_sql), bind_data.schema_context, options,
+			                               bind_data.fix_attempts, "ai_fix_sql_fix_attempt");
 			output.SetValue(0, 0, Value(fixed_sql));
 		} else {
 			auto line_number = ExtractLineNumber(bind_data.error_message);
@@ -4637,24 +4753,51 @@ void PromptAssistantFunction(ClientContext &context, TableFunctionInput &input, 
 	state.emitted = true;
 }
 
-void AiIsReadOnlySqlFunction(DataChunk &args, ExpressionState &, Vector &result) {
+void AiIsReadOnlySqlFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &sql_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, bool>(sql_vector, result, args.size(), [&](string_t sql) {
-		std::string error;
-		return ValidateReadOnlySql(sql.GetString(), error);
-	});
+	if (args.ColumnCount() < 2) {
+		UnaryExecutor::Execute<string_t, bool>(sql_vector, result, args.size(), [&](string_t sql) {
+			std::string error;
+			return ValidateReadOnlySql(sql.GetString(), error);
+		});
+		return;
+	}
+	BinaryExecutor::Execute<string_t, bool, bool>(
+	    sql_vector, args.data[1], result, args.size(), [&](string_t sql, bool check_binding) {
+		    auto sql_string = sql.GetString();
+		    std::string error;
+		    if (!ValidateReadOnlySql(sql_string, error)) {
+			    return false;
+		    }
+		    return !check_binding || VerifySqlBinds(state.GetContext(), sql_string, error);
+	    });
 }
 
-void AiValidateReadOnlySqlFunction(DataChunk &args, ExpressionState &, Vector &result) {
+void AiValidateReadOnlySqlFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &sql_vector = args.data[0];
-	UnaryExecutor::Execute<string_t, string_t>(sql_vector, result, args.size(), [&](string_t sql) {
-		auto sql_string = sql.GetString();
-		std::string error;
-		if (!ValidateReadOnlySql(sql_string, error)) {
-			throw InvalidInputException("AI generated SQL is not a single read-only SELECT statement: %s", error);
-		}
-		return StringVector::AddString(result, sql_string);
-	});
+	if (args.ColumnCount() < 2) {
+		UnaryExecutor::Execute<string_t, string_t>(sql_vector, result, args.size(), [&](string_t sql) {
+			auto sql_string = sql.GetString();
+			std::string error;
+			if (!ValidateReadOnlySql(sql_string, error)) {
+				throw InvalidInputException("AI generated SQL is not a single read-only SELECT statement: %s", error);
+			}
+			return StringVector::AddString(result, sql_string);
+		});
+		return;
+	}
+	BinaryExecutor::Execute<string_t, bool, string_t>(
+	    sql_vector, args.data[1], result, args.size(), [&](string_t sql, bool check_binding) {
+		    auto sql_string = sql.GetString();
+		    std::string error;
+		    if (!ValidateReadOnlySql(sql_string, error)) {
+			    throw InvalidInputException("AI generated SQL is not a single read-only SELECT statement: %s", error);
+		    }
+		    if (check_binding && !VerifySqlBinds(state.GetContext(), sql_string, error)) {
+			    throw InvalidInputException("AI generated SQL does not bind: %s", error);
+		    }
+		    return StringVector::AddString(result, sql_string);
+	    });
 }
 
 inline void AiProviderBaseUrl(DataChunk &args, ExpressionState &, Vector &result) {
@@ -5065,20 +5208,28 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
      "SELECT ai_agg(review, 'List the top complaints') FROM reviews;"},
     {"ai_summarize_agg", "Summarizes grouped text values with one completion call.",
      "SELECT ai_summarize_agg(review) FROM reviews;"},
-    {"ai_sql", "Generates one read-only DuckDB SELECT statement from a natural-language question.",
+    {"ai_sql",
+     "Generates one read-only DuckDB SELECT statement from a natural-language question. With fix_attempts := N it "
+     "verifies the SQL binds against the catalog and self-corrects using the bind error.",
      "SELECT ai_sql('total sales by region');"},
-    {"ai_query_data", "Generates one read-only SELECT at bind time and executes it as a subquery.",
+    {"ai_query_data",
+     "Generates one read-only SELECT at bind time and executes it as a subquery. With fix_attempts := N it verifies "
+     "the SQL binds against the catalog and self-corrects using the bind error.",
      "SELECT * FROM ai_query_data('total sales by region');"},
     {"ai_schema_prompt", "Returns deterministic local catalog context for prompting SQL models.",
      "SELECT * FROM ai_schema_prompt();"},
     {"ai_explain_sql", "Explains one read-only DuckDB SELECT statement.", "SELECT * FROM ai_explain_sql('SELECT 42');"},
     {"ai_fix_sql",
-     "Rewrites a broken query as one corrected read-only DuckDB SELECT, or rewrites one line with mode := 'line'.",
+     "Rewrites a broken query as one corrected read-only DuckDB SELECT, or rewrites one line with mode := 'line'. "
+     "Accepts error := to pass the failure message and fix_attempts := N for bind-verified self-correction.",
      "SELECT * FROM ai_fix_sql('SELEC 42');"},
-    {"ai_is_read_only_sql", "Returns whether SQL is one parser-valid read-only SELECT statement.",
+    {"ai_is_read_only_sql",
+     "Returns whether SQL is one parser-valid read-only SELECT statement. Pass true as the second argument to also "
+     "check that the SQL binds against the catalog.",
      "SELECT ai_is_read_only_sql('SELECT 42');"},
     {"ai_validate_read_only_sql",
-     "Returns normalized SQL or raises an error if it is not one read-only SELECT statement.",
+     "Returns normalized SQL or raises an error if it is not one read-only SELECT statement. Pass true as the second "
+     "argument to also check that the SQL binds against the catalog.",
      "SELECT ai_validate_read_only_sql('SELECT 42');"},
     {"ai_count_tokens", "Returns a local approximate token count for text.", "SELECT ai_count_tokens('hello world');"},
     {"ai_recommended_batch_size", "Returns a conservative row batch size for rate-limited AI jobs.",
@@ -5295,12 +5446,15 @@ void AddCompletionNamedParameters(TableFunction &function, bool include_response
 	}
 }
 
-void AddPromptQueryNamedParameters(TableFunction &function) {
+void AddPromptQueryNamedParameters(TableFunction &function, bool include_fix_attempts = true) {
 	function.named_parameters["schema_context"] = LogicalType::VARCHAR;
 	function.named_parameters["schema"] = LogicalType::VARCHAR;
 	function.named_parameters["include_tables"] = LogicalType::LIST(LogicalType::VARCHAR);
 	function.named_parameters["exclude_tables"] = LogicalType::LIST(LogicalType::VARCHAR);
 	function.named_parameters["sample_rows"] = LogicalType::BIGINT;
+	if (include_fix_attempts) {
+		function.named_parameters["fix_attempts"] = LogicalType::BIGINT;
+	}
 	AddCompletionNamedParameters(function, true, false);
 }
 
@@ -5315,7 +5469,7 @@ void AddAiRecordNamedParameters(TableFunction &function) {
 }
 
 void AddPromptAssistantNamedParameters(TableFunction &function, bool include_error) {
-	AddPromptQueryNamedParameters(function);
+	AddPromptQueryNamedParameters(function, include_error);
 	if (include_error) {
 		function.named_parameters["error"] = LogicalType::VARCHAR;
 		function.named_parameters["mode"] = LogicalType::VARCHAR;
@@ -5463,10 +5617,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPromptFixupFunction(loader, "ai_fix_sql");
 	RegisterPromptQueryFunction(loader, "ai_query_data");
 
-	RegisterDocumentedFunction(loader, ScalarFunction("ai_is_read_only_sql", {LogicalType::VARCHAR},
-	                                                  LogicalType::BOOLEAN, AiIsReadOnlySqlFunction));
-	RegisterDocumentedFunction(loader, ScalarFunction("ai_validate_read_only_sql", {LogicalType::VARCHAR},
-	                                                  LogicalType::VARCHAR, AiValidateReadOnlySqlFunction));
+	ScalarFunctionSet ai_is_read_only_sql("ai_is_read_only_sql");
+	ai_is_read_only_sql.AddFunction(
+	    ScalarFunction({LogicalType::VARCHAR}, LogicalType::BOOLEAN, AiIsReadOnlySqlFunction));
+	ai_is_read_only_sql.AddFunction(
+	    ScalarFunction({LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BOOLEAN, AiIsReadOnlySqlFunction));
+	RegisterDocumentedFunction(loader, std::move(ai_is_read_only_sql));
+	ScalarFunctionSet ai_validate_read_only_sql("ai_validate_read_only_sql");
+	ai_validate_read_only_sql.AddFunction(
+	    ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, AiValidateReadOnlySqlFunction));
+	ai_validate_read_only_sql.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BOOLEAN},
+	                                                     LogicalType::VARCHAR, AiValidateReadOnlySqlFunction));
+	RegisterDocumentedFunction(loader, std::move(ai_validate_read_only_sql));
 	RegisterDocumentedFunction(loader, ScalarFunction("ai_provider_base_url", {LogicalType::VARCHAR},
 	                                                  LogicalType::VARCHAR, AiProviderBaseUrl));
 	RegisterDocumentedFunction(loader, ScalarFunction("ai_provider_protocol", {LogicalType::VARCHAR},
