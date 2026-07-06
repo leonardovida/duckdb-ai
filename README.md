@@ -55,19 +55,19 @@ One extension covers both ends of the spectrum:
 
 ## Quick Start
 
-The `ai` extension is not published in the DuckDB community extension repository yet
-(submission in progress). Until then, build and load it from this source tree
-(requires a C++ toolchain, CMake, and ninja):
+The `ai` extension is published as a [DuckDB community extension](https://duckdb.org/community_extensions/extensions/ai).
+Install and load it from any DuckDB client:
+
+```sql
+INSTALL ai FROM community;
+LOAD ai;
+```
+
+To build from source instead (requires a C++ toolchain, CMake, and ninja):
 
 ```sh
 GEN=ninja make release
 ./build/release/duckdb
-```
-
-Then load the extension:
-
-```sql
-LOAD ai;
 ```
 
 Confirm that the extension loaded:
