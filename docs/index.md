@@ -10,6 +10,16 @@ currently focuses on deterministic request shaping, provider metadata,
 completion and embedding calls, structured JSON validation, generated read-only
 SQL, and usage logging.
 
+## Installation
+
+The extension is published as a
+[DuckDB community extension](https://duckdb.org/community_extensions/extensions/ai):
+
+```sql
+INSTALL ai FROM community;
+LOAD ai;
+```
+
 ## Start here
 
 - [SQL function reference](functions.md): every scalar, aggregate, and table
