@@ -741,3 +741,21 @@ statement error
 SELECT ai_provider_base_url('not-a-provider');
 ----
 Invalid Input Error: Unsupported AI provider "not-a-provider".
+
+# Every ai_* function exposes catalog documentation for duckdb_functions().
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE function_name LIKE 'ai\_%' ESCAPE '\'
+  AND function_type IN ('scalar', 'aggregate', 'table')
+  AND (description IS NULL OR len(examples) = 0);
+----
+0
+
+query I
+SELECT count(DISTINCT function_name) > 30
+FROM duckdb_functions()
+WHERE function_name LIKE 'ai\_%' ESCAPE '\'
+  AND description IS NOT NULL;
+----
+true

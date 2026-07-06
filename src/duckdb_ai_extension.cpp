@@ -17,6 +17,9 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -5013,6 +5016,131 @@ void RegisterAiProviderSecret(ExtensionLoader &loader) {
 	RegisterAiProviderSecretType(loader, "duckdb_ai");
 }
 
+struct AiFunctionDocumentation {
+	const char *name;
+	const char *description;
+	const char *example;
+};
+
+static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
+    {"ai_complete", "Calls a completion model and returns the response text.", "SELECT ai_complete('Say hello');"},
+    {"ai_try_complete",
+     "Calls a completion model and returns STRUCT(response, error) so row-level failures can be captured.",
+     "SELECT ai_try_complete('Say hello');"},
+    {"ai_complete_json", "Calls a completion model and validates the response as a JSON object or array.",
+     "SELECT ai_complete_json('Return a JSON object with one key named ok');"},
+    {"ai_complete_record",
+     "Calls a completion model and projects a JSON object response into typed columns from a JSON Schema.",
+     "SELECT * FROM ai_complete_record('Describe a duck', "
+     "'{\"type\": \"object\", \"properties\": {\"name\": {\"type\": \"string\"}}}');"},
+    {"ai_extract_record", "Extracts one typed STRUCT per row from text using a JSON Schema.",
+     "SELECT ai_extract_record('Anna is 31', "
+     "'{\"type\": \"object\", \"properties\": {\"age\": {\"type\": \"integer\"}}}');"},
+    {"ai_completion_request_json", "Returns the completion request JSON without making a network call.",
+     "SELECT ai_completion_request_json('Say hello');"},
+    {"ai_embed", "Calls an embedding model and returns the embedding as DOUBLE[].", "SELECT ai_embed('duck');"},
+    {"ai_embedding_request_json", "Returns the embedding request JSON without making a network call.",
+     "SELECT ai_embedding_request_json('duck');"},
+    {"ai_similarity", "Embeds two strings and returns their cosine similarity.",
+     "SELECT ai_similarity('duck', 'goose');"},
+    {"ai_rerank", "Uses a completion model to score candidate relevance to a query from 0 to 1.",
+     "SELECT ai_rerank('best analytics database', 'DuckDB is an in-process analytics database');"},
+    {"ai_summarize", "Summarizes text with a completion model.", "SELECT ai_summarize(review) FROM reviews;"},
+    {"ai_sentiment", "Classifies text sentiment as positive, neutral, or negative.",
+     "SELECT ai_sentiment(review) FROM reviews;"},
+    {"ai_fix_grammar", "Rewrites text with corrected grammar, spelling, and punctuation.",
+     "SELECT ai_fix_grammar('thes is a tst');"},
+    {"ai_redact", "Masks direct personal data, credentials, secrets, and payment identifiers in text.",
+     "SELECT ai_redact('Contact anna@example.com');"},
+    {"ai_translate", "Translates text to the target language.", "SELECT ai_translate('Hello', 'French');"},
+    {"ai_classify", "Chooses one label from a comma-separated VARCHAR or VARCHAR[] label list.",
+     "SELECT ai_classify(review, ['positive', 'negative']) FROM reviews;"},
+    {"ai_classify_labels", "Chooses zero or more labels from a comma-separated VARCHAR or VARCHAR[] label list.",
+     "SELECT ai_classify_labels(review, ['shipping', 'pricing', 'quality']) FROM reviews;"},
+    {"ai_extract", "Extracts requested information from text.",
+     "SELECT ai_extract('Anna is 31', 'the age of the person');"},
+    {"ai_filter", "Evaluates a natural-language predicate against text and returns BOOLEAN.",
+     "SELECT * FROM reviews WHERE ai_filter(review, 'mentions shipping problems');"},
+    {"ai_agg", "Runs one completion over grouped text values and an instruction.",
+     "SELECT ai_agg(review, 'List the top complaints') FROM reviews;"},
+    {"ai_summarize_agg", "Summarizes grouped text values with one completion call.",
+     "SELECT ai_summarize_agg(review) FROM reviews;"},
+    {"ai_sql", "Generates one read-only DuckDB SELECT statement from a natural-language question.",
+     "SELECT ai_sql('total sales by region');"},
+    {"ai_query_data", "Generates one read-only SELECT at bind time and executes it as a subquery.",
+     "SELECT * FROM ai_query_data('total sales by region');"},
+    {"ai_schema_prompt", "Returns deterministic local catalog context for prompting SQL models.",
+     "SELECT * FROM ai_schema_prompt();"},
+    {"ai_explain_sql", "Explains one read-only DuckDB SELECT statement.", "SELECT * FROM ai_explain_sql('SELECT 42');"},
+    {"ai_fix_sql",
+     "Rewrites a broken query as one corrected read-only DuckDB SELECT, or rewrites one line with mode := 'line'.",
+     "SELECT * FROM ai_fix_sql('SELEC 42');"},
+    {"ai_is_read_only_sql", "Returns whether SQL is one parser-valid read-only SELECT statement.",
+     "SELECT ai_is_read_only_sql('SELECT 42');"},
+    {"ai_validate_read_only_sql",
+     "Returns normalized SQL or raises an error if it is not one read-only SELECT statement.",
+     "SELECT ai_validate_read_only_sql('SELECT 42');"},
+    {"ai_count_tokens", "Returns a local approximate token count for text.", "SELECT ai_count_tokens('hello world');"},
+    {"ai_recommended_batch_size", "Returns a conservative row batch size for rate-limited AI jobs.",
+     "SELECT ai_recommended_batch_size(200, 100, 100000);"},
+    {"ai_provider_base_url", "Returns the default base URL for a supported provider.",
+     "SELECT ai_provider_base_url('openai');"},
+    {"ai_provider_protocol", "Returns the internal protocol used for a supported provider.",
+     "SELECT ai_provider_protocol('openai');"},
+    {"ai_usage", "Returns recent per-database AI usage events.", "SELECT * FROM ai_usage();"},
+    {"ai_clear_usage", "Clears the per-database usage event buffer.", "SELECT * FROM ai_clear_usage();"},
+    {"ai_clear_cache", "Clears per-database in-memory response and generated-SQL caches.",
+     "SELECT * FROM ai_clear_cache();"},
+    {"ai_secrets", "Lists configured duckdb_ai secrets with credentials redacted.", "SELECT * FROM ai_secrets();"},
+    {"ai_model_prices", "Returns the built-in provider/model pricing catalog.", "SELECT * FROM ai_model_prices();"},
+};
+
+void AttachAiFunctionDocumentation(CreateFunctionInfo &info) {
+	for (auto &doc : AI_FUNCTION_DOCUMENTATION) {
+		if (info.name == doc.name) {
+			FunctionDescription description;
+			description.description = doc.description;
+			description.examples.emplace_back(doc.example);
+			info.descriptions.push_back(std::move(description));
+			return;
+		}
+	}
+	throw InternalException("Missing documentation entry for AI function %s", info.name);
+}
+
+void RegisterDocumentedFunction(ExtensionLoader &loader, ScalarFunctionSet set) {
+	CreateScalarFunctionInfo info(std::move(set));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	AttachAiFunctionDocumentation(info);
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDocumentedFunction(ExtensionLoader &loader, ScalarFunction function) {
+	ScalarFunctionSet set(function.name);
+	set.AddFunction(std::move(function));
+	RegisterDocumentedFunction(loader, std::move(set));
+}
+
+void RegisterDocumentedFunction(ExtensionLoader &loader, AggregateFunctionSet set) {
+	CreateAggregateFunctionInfo info(std::move(set));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	AttachAiFunctionDocumentation(info);
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDocumentedFunction(ExtensionLoader &loader, TableFunctionSet set) {
+	CreateTableFunctionInfo info(std::move(set));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	AttachAiFunctionDocumentation(info);
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDocumentedFunction(ExtensionLoader &loader, TableFunction function) {
+	TableFunctionSet set(function.name);
+	set.AddFunction(std::move(function));
+	RegisterDocumentedFunction(loader, std::move(set));
+}
+
 void RegisterTaskFunction(ExtensionLoader &loader, const std::string &name, vector<LogicalType> arguments,
                           bind_scalar_function_t bind) {
 	auto function = ScalarFunction(name, std::move(arguments), LogicalType::VARCHAR, AiTaskFunction, bind);
@@ -5020,7 +5148,7 @@ void RegisterTaskFunction(ExtensionLoader &loader, const std::string &name, vect
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterClassifyFunction(ExtensionLoader &loader) {
@@ -5030,7 +5158,7 @@ void RegisterClassifyFunction(ExtensionLoader &loader) {
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterClassifyLabelsFunction(ExtensionLoader &loader) {
@@ -5041,7 +5169,7 @@ void RegisterClassifyLabelsFunction(ExtensionLoader &loader) {
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterCompletionFunction(ExtensionLoader &loader, const std::string &name, bind_scalar_function_t bind) {
@@ -5050,7 +5178,7 @@ void RegisterCompletionFunction(ExtensionLoader &loader, const std::string &name
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterTryCompletionFunction(ExtensionLoader &loader) {
@@ -5060,7 +5188,7 @@ void RegisterTryCompletionFunction(ExtensionLoader &loader) {
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterEmbeddingFunction(ExtensionLoader &loader, const std::string &name) {
@@ -5070,7 +5198,7 @@ void RegisterEmbeddingFunction(ExtensionLoader &loader, const std::string &name)
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterAiFilterFunction(ExtensionLoader &loader) {
@@ -5080,7 +5208,7 @@ void RegisterAiFilterFunction(ExtensionLoader &loader) {
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterPromptSqlFunction(ExtensionLoader &loader, const std::string &name) {
@@ -5090,7 +5218,7 @@ void RegisterPromptSqlFunction(ExtensionLoader &loader, const std::string &name)
 	function.SetFallible();
 	function.SetVolatile();
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(function);
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 AggregateFunction BuildAiAggregateFunction(const std::string &name, idx_t argument_count,
@@ -5119,7 +5247,7 @@ void RegisterAiAggregateFunction(ExtensionLoader &loader, const std::string &nam
 	for (idx_t argument_count = min_argument_count; argument_count <= max_argument_count; argument_count++) {
 		functions.AddFunction(BuildAiAggregateFunction(name, argument_count, bind));
 	}
-	loader.RegisterFunction(functions);
+	RegisterDocumentedFunction(loader, std::move(functions));
 }
 
 void AddCompletionNamedParameters(TableFunction &function, bool include_response_options,
@@ -5206,7 +5334,7 @@ void RegisterPromptSchemaFunction(ExtensionLoader &loader, const std::string &na
 		AddPromptSchemaNamedParameters(function);
 		ai_schema_prompt.AddFunction(std::move(function));
 	}
-	loader.RegisterFunction(std::move(ai_schema_prompt));
+	RegisterDocumentedFunction(loader, std::move(ai_schema_prompt));
 }
 
 void RegisterAiRecordFunction(ExtensionLoader &loader) {
@@ -5220,7 +5348,7 @@ void RegisterAiRecordFunction(ExtensionLoader &loader) {
 		AddAiRecordNamedParameters(function);
 		ai_complete_record.AddFunction(std::move(function));
 	}
-	loader.RegisterFunction(std::move(ai_complete_record));
+	RegisterDocumentedFunction(loader, std::move(ai_complete_record));
 
 	auto ai_extract_record = ScalarFunction("ai_extract_record", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                        LogicalType::ANY, AiExtractRecordFunction, AiExtractRecordBind);
@@ -5228,7 +5356,7 @@ void RegisterAiRecordFunction(ExtensionLoader &loader) {
 	ai_extract_record.SetFallible();
 	ai_extract_record.SetVolatile();
 	ai_extract_record.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(ai_extract_record);
+	RegisterDocumentedFunction(loader, std::move(ai_extract_record));
 }
 
 void RegisterPromptExplainFunction(ExtensionLoader &loader, const std::string &name) {
@@ -5236,7 +5364,7 @@ void RegisterPromptExplainFunction(ExtensionLoader &loader, const std::string &n
 	TableFunction function({LogicalType::VARCHAR}, PromptAssistantFunction, PromptExplainBind, PromptAssistantInit);
 	AddPromptAssistantNamedParameters(function, false);
 	ai_explain_sql.AddFunction(std::move(function));
-	loader.RegisterFunction(std::move(ai_explain_sql));
+	RegisterDocumentedFunction(loader, std::move(ai_explain_sql));
 }
 
 void RegisterPromptFixupFunction(ExtensionLoader &loader, const std::string &name) {
@@ -5250,7 +5378,7 @@ void RegisterPromptFixupFunction(ExtensionLoader &loader, const std::string &nam
 		AddPromptAssistantNamedParameters(function, true);
 		ai_fix_sql.AddFunction(std::move(function));
 	}
-	loader.RegisterFunction(std::move(ai_fix_sql));
+	RegisterDocumentedFunction(loader, std::move(ai_fix_sql));
 }
 
 void RegisterPromptQueryFunction(ExtensionLoader &loader, const std::string &name) {
@@ -5265,7 +5393,7 @@ void RegisterPromptQueryFunction(ExtensionLoader &loader, const std::string &nam
 		AddPromptQueryNamedParameters(function);
 		ai_query_data.AddFunction(std::move(function));
 	}
-	loader.RegisterFunction(std::move(ai_query_data));
+	RegisterDocumentedFunction(loader, std::move(ai_query_data));
 }
 
 } // namespace
@@ -5285,7 +5413,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ai_complete_json.SetFallible();
 	ai_complete_json.SetVolatile();
 	ai_complete_json.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(ai_complete_json);
+	RegisterDocumentedFunction(loader, std::move(ai_complete_json));
 	RegisterAiRecordFunction(loader);
 
 	RegisterEmbeddingFunction(loader, "ai_embed");
@@ -5297,7 +5425,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ai_embedding_request_json.SetFallible();
 	ai_embedding_request_json.SetVolatile();
 	ai_embedding_request_json.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(ai_embedding_request_json);
+	RegisterDocumentedFunction(loader, std::move(ai_embedding_request_json));
 
 	auto ai_similarity = ScalarFunction("ai_similarity", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                    LogicalType::DOUBLE, AiSimilarityFunction, AiSimilarityBind);
@@ -5305,7 +5433,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ai_similarity.SetFallible();
 	ai_similarity.SetVolatile();
 	ai_similarity.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(ai_similarity);
+	RegisterDocumentedFunction(loader, std::move(ai_similarity));
 
 	auto ai_rerank = ScalarFunction("ai_rerank", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::DOUBLE,
 	                                AiRerankFunction, AiRerankBind);
@@ -5313,7 +5441,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ai_rerank.SetFallible();
 	ai_rerank.SetVolatile();
 	ai_rerank.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(ai_rerank);
+	RegisterDocumentedFunction(loader, std::move(ai_rerank));
 
 	RegisterTaskFunction(loader, "ai_summarize", {LogicalType::VARCHAR}, AiSummarizeBind);
 	RegisterTaskFunction(loader, "ai_sentiment", {LogicalType::VARCHAR}, AiSentimentBind);
@@ -5335,20 +5463,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPromptFixupFunction(loader, "ai_fix_sql");
 	RegisterPromptQueryFunction(loader, "ai_query_data");
 
-	loader.RegisterFunction(
-	    ScalarFunction("ai_is_read_only_sql", {LogicalType::VARCHAR}, LogicalType::BOOLEAN, AiIsReadOnlySqlFunction));
-	loader.RegisterFunction(ScalarFunction("ai_validate_read_only_sql", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                       AiValidateReadOnlySqlFunction));
-	loader.RegisterFunction(
-	    ScalarFunction("ai_provider_base_url", {LogicalType::VARCHAR}, LogicalType::VARCHAR, AiProviderBaseUrl));
-	loader.RegisterFunction(
-	    ScalarFunction("ai_provider_protocol", {LogicalType::VARCHAR}, LogicalType::VARCHAR, AiProviderProtocol));
+	RegisterDocumentedFunction(loader, ScalarFunction("ai_is_read_only_sql", {LogicalType::VARCHAR},
+	                                                  LogicalType::BOOLEAN, AiIsReadOnlySqlFunction));
+	RegisterDocumentedFunction(loader, ScalarFunction("ai_validate_read_only_sql", {LogicalType::VARCHAR},
+	                                                  LogicalType::VARCHAR, AiValidateReadOnlySqlFunction));
+	RegisterDocumentedFunction(loader, ScalarFunction("ai_provider_base_url", {LogicalType::VARCHAR},
+	                                                  LogicalType::VARCHAR, AiProviderBaseUrl));
+	RegisterDocumentedFunction(loader, ScalarFunction("ai_provider_protocol", {LogicalType::VARCHAR},
+	                                                  LogicalType::VARCHAR, AiProviderProtocol));
 
 	auto ai_count_tokens = ScalarFunction("ai_count_tokens", {LogicalType::VARCHAR}, LogicalType::BIGINT,
 	                                      AiCountTokensFunction, AiCountTokensBind);
 	ai_count_tokens.varargs = LogicalType::ANY;
 	ai_count_tokens.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	loader.RegisterFunction(ai_count_tokens);
+	RegisterDocumentedFunction(loader, std::move(ai_count_tokens));
 
 	ScalarFunctionSet ai_recommended_batch_size("ai_recommended_batch_size");
 	for (idx_t argument_count = 3; argument_count <= 5; argument_count++) {
@@ -5361,16 +5489,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 		function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		ai_recommended_batch_size.AddFunction(std::move(function));
 	}
-	loader.RegisterFunction(std::move(ai_recommended_batch_size));
+	RegisterDocumentedFunction(loader, std::move(ai_recommended_batch_size));
 
-	loader.RegisterFunction(TableFunction("ai_usage", {}, AiUsageFunction, AiUsageBind, AiUsageInit));
-	loader.RegisterFunction(
-	    TableFunction("ai_clear_usage", {}, AiClearUsageFunction, AiClearUsageBind, AiClearUsageInit));
-	loader.RegisterFunction(
-	    TableFunction("ai_clear_cache", {}, AiClearCacheFunction, AiClearUsageBind, AiClearUsageInit));
-	loader.RegisterFunction(TableFunction("ai_secrets", {}, AiSecretsFunction, AiSecretsBind, AiSecretsInit));
-	loader.RegisterFunction(
-	    TableFunction("ai_model_prices", {}, AiModelPricesFunction, AiModelPricesBind, AiModelPricesInit));
+	RegisterDocumentedFunction(loader, TableFunction("ai_usage", {}, AiUsageFunction, AiUsageBind, AiUsageInit));
+	RegisterDocumentedFunction(
+	    loader, TableFunction("ai_clear_usage", {}, AiClearUsageFunction, AiClearUsageBind, AiClearUsageInit));
+	RegisterDocumentedFunction(
+	    loader, TableFunction("ai_clear_cache", {}, AiClearCacheFunction, AiClearUsageBind, AiClearUsageInit));
+	RegisterDocumentedFunction(loader,
+	                           TableFunction("ai_secrets", {}, AiSecretsFunction, AiSecretsBind, AiSecretsInit));
+	RegisterDocumentedFunction(
+	    loader, TableFunction("ai_model_prices", {}, AiModelPricesFunction, AiModelPricesBind, AiModelPricesInit));
 }
 
 void AiExtension::Load(ExtensionLoader &loader) {
