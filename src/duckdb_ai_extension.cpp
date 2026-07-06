@@ -5163,10 +5163,12 @@ struct AiFunctionDocumentation {
 	const char *name;
 	const char *description;
 	const char *example;
+	const char *second_example;
 };
 
 static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
-    {"ai_complete", "Calls a completion model and returns the response text.", "SELECT ai_complete('Say hello');"},
+    {"ai_complete", "Calls a completion model and returns the response text.", "SELECT ai_complete('Say hello');",
+     "SELECT ai_complete('Say hello', provider := 'ollama', model := 'llama3.2');"},
     {"ai_try_complete",
      "Calls a completion model and returns STRUCT(response, error) so row-level failures can be captured.",
      "SELECT ai_try_complete('Say hello');"},
@@ -5197,7 +5199,8 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
      "SELECT ai_redact('Contact anna@example.com');"},
     {"ai_translate", "Translates text to the target language.", "SELECT ai_translate('Hello', 'French');"},
     {"ai_classify", "Chooses one label from a comma-separated VARCHAR or VARCHAR[] label list.",
-     "SELECT ai_classify(review, ['positive', 'negative']) FROM reviews;"},
+     "SELECT ai_classify(review, ['positive', 'negative']) FROM reviews;",
+     "SELECT ai_classify(review, 'positive, negative, mixed') FROM reviews;"},
     {"ai_classify_labels", "Chooses zero or more labels from a comma-separated VARCHAR or VARCHAR[] label list.",
      "SELECT ai_classify_labels(review, ['shipping', 'pricing', 'quality']) FROM reviews;"},
     {"ai_extract", "Extracts requested information from text.",
@@ -5209,27 +5212,30 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
     {"ai_summarize_agg", "Summarizes grouped text values with one completion call.",
      "SELECT ai_summarize_agg(review) FROM reviews;"},
     {"ai_sql",
-     "Generates one read-only DuckDB SELECT statement from a natural-language question. With fix_attempts := N it "
-     "verifies the SQL binds against the catalog and self-corrects using the bind error.",
-     "SELECT ai_sql('total sales by region');"},
+     "Generates one read-only DuckDB SELECT statement from a natural-language question.\n"
+     "With fix_attempts := N it verifies the SQL binds against the catalog and self-corrects using the bind error.",
+     "SELECT ai_sql('total sales by region');",
+     "SELECT ai_sql('total sales by region', include_tables := ['main.sales'], fix_attempts := 2);"},
     {"ai_query_data",
-     "Generates one read-only SELECT at bind time and executes it as a subquery. With fix_attempts := N it verifies "
-     "the SQL binds against the catalog and self-corrects using the bind error.",
-     "SELECT * FROM ai_query_data('total sales by region');"},
+     "Generates one read-only SELECT at bind time and executes it as a subquery.\n"
+     "With fix_attempts := N it verifies the SQL binds against the catalog and self-corrects using the bind error.",
+     "SELECT * FROM ai_query_data('total sales by region');",
+     "SELECT * FROM ai_query_data('total sales by region', include_tables := ['main.sales']);"},
     {"ai_schema_prompt", "Returns deterministic local catalog context for prompting SQL models.",
      "SELECT * FROM ai_schema_prompt();"},
     {"ai_explain_sql", "Explains one read-only DuckDB SELECT statement.", "SELECT * FROM ai_explain_sql('SELECT 42');"},
     {"ai_fix_sql",
-     "Rewrites a broken query as one corrected read-only DuckDB SELECT, or rewrites one line with mode := 'line'. "
+     "Rewrites a broken query as one corrected read-only DuckDB SELECT, or rewrites one line with mode := 'line'.\n"
      "Accepts error := to pass the failure message and fix_attempts := N for bind-verified self-correction.",
-     "SELECT * FROM ai_fix_sql('SELEC 42');"},
+     "SELECT * FROM ai_fix_sql('SELEC 42');",
+     "SELECT * FROM ai_fix_sql('SELECT amout FROM sales', error := 'column amout not found', fix_attempts := 2);"},
     {"ai_is_read_only_sql",
-     "Returns whether SQL is one parser-valid read-only SELECT statement. Pass true as the second argument to also "
-     "check that the SQL binds against the catalog.",
+     "Returns whether SQL is one parser-valid read-only SELECT statement.\n"
+     "Pass true as the second argument to also check that the SQL binds against the catalog.",
      "SELECT ai_is_read_only_sql('SELECT 42');"},
     {"ai_validate_read_only_sql",
-     "Returns normalized SQL or raises an error if it is not one read-only SELECT statement. Pass true as the second "
-     "argument to also check that the SQL binds against the catalog.",
+     "Returns normalized SQL or raises an error if it is not one read-only SELECT statement.\n"
+     "Pass true as the second argument to also check that the SQL binds against the catalog.",
      "SELECT ai_validate_read_only_sql('SELECT 42');"},
     {"ai_count_tokens", "Returns a local approximate token count for text.", "SELECT ai_count_tokens('hello world');"},
     {"ai_recommended_batch_size", "Returns a conservative row batch size for rate-limited AI jobs.",
@@ -5252,6 +5258,9 @@ void AttachAiFunctionDocumentation(CreateFunctionInfo &info) {
 			FunctionDescription description;
 			description.description = doc.description;
 			description.examples.emplace_back(doc.example);
+			if (doc.second_example) {
+				description.examples.emplace_back(doc.second_example);
+			}
 			info.descriptions.push_back(std::move(description));
 			return;
 		}

@@ -7,6 +7,32 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.0 - 2026-07-06
+
+### Added
+
+- Exposed function descriptions and examples through `duckdb_functions()`
+  catalog metadata for every `ai_*` function.
+- Added a llama.cpp server provider (`llamacpp` / `llama.cpp`) for
+  OpenAI-compatible chat and embeddings against `llama-server`.
+- Added bind-verified SQL self-correction (`fix_attempts := N`) across the
+  SQL assistant functions (`ai_sql`, `ai_query_data`, `ai_fix_sql`), plus
+  optional catalog bind checks in `ai_is_read_only_sql` and
+  `ai_validate_read_only_sql`.
+- Added `scripts/preview_community_docs.sh` to preview the generated
+  duckdb.org community extension page locally, with a committed snapshot
+  (`test/community_docs_snapshot/`) and `--check`/`--update` modes.
+- Added `RELEASING.md` documenting the release and community-extensions
+  publication flow.
+
+### Changed
+
+- Tightened the first line of the SQL assistant function descriptions and
+  added second usage examples for `ai_complete`, `ai_classify`, `ai_sql`,
+  `ai_query_data`, and `ai_fix_sql`.
+- Documentation now leads with `INSTALL ai FROM community` now that the
+  extension is published as a DuckDB community extension.
+
 ## 0.3.2 - 2026-07-03
 
 ### Fixed
