@@ -46,8 +46,8 @@ FROM ai_usage();
 | `ai_schema_prompt([include_tables])` | Table | Returns deterministic local catalog context for prompting SQL models. |
 | `ai_explain_sql(sql[, ...])` | Table | Explains one read-only DuckDB `SELECT` statement. |
 | `ai_fix_sql(sql[, ...])` | Table | Rewrites a broken query as one corrected read-only DuckDB `SELECT`, or rewrites one line with `mode := 'line'`. |
-| `ai_is_read_only_sql(sql)` | Scalar | Returns whether SQL is one parser-valid read-only `SELECT`. |
-| `ai_validate_read_only_sql(sql)` | Scalar | Returns normalized SQL or raises if it is not one read-only `SELECT`. |
+| `ai_is_read_only_sql(sql[, check_binding])` | Scalar | Returns whether SQL is one parser-valid read-only `SELECT`; optionally also checks it binds against the catalog. |
+| `ai_validate_read_only_sql(sql[, check_binding])` | Scalar | Returns normalized SQL or raises if it is not one read-only `SELECT`; optionally also checks it binds against the catalog. |
 | `ai_count_tokens(text[, model[, provider]])` | Scalar | Returns a local approximate token count. |
 | `ai_recommended_batch_size(input_tokens_per_row, max_output_tokens_per_row, token_limit_per_minute[, request_limit_per_minute[, safety_factor]])` | Scalar | Returns a conservative row batch size for rate-limited AI jobs. |
 | `ai_provider_base_url(provider)` | Scalar | Returns the default base URL for a supported provider. |
@@ -429,12 +429,21 @@ Result: `VARCHAR`
 Description: Calls a completion model to generate one DuckDB `SELECT` statement,
 strips common markdown code fences, and rejects output that is not one read-only
 `SELECT`. When `schema_context` is omitted, the function builds local catalog
-context from `ai_schema_prompt()`.
+context from `ai_schema_prompt()`. With `fix_attempts := N` (0 to 5, default 0),
+the function verifies the generated SQL binds against the current catalog and,
+when it does not, feeds the bind error back to the model for up to `N`
+correction rounds before failing.
 
 Example:
 
 ```sql
 SELECT ai_sql('count orders by status');
+```
+
+Example with self-correction:
+
+```sql
+SELECT ai_sql('count orders by status', fix_attempts := 2);
 ```
 
 Result: `VARCHAR` containing a read-only DuckDB `SELECT`
@@ -447,6 +456,15 @@ current DuckDB database instance for repeated binds with the same question,
 schema context, and output-affecting options. Use `on_error := 'null'` to return
 an empty error-shaped relation instead of failing the bind.
 
+With `fix_attempts := N` (0 to 5, default 0), the function verifies the
+generated SQL binds against the current catalog before returning it. When
+binding fails — a hallucinated column, a wrong function name, a typo — the
+DuckDB bind error is fed back to the model for up to `N` correction rounds.
+Each correction is a regular model call and appears in `ai_usage()` alongside an
+`ai_query_data_fix_attempt` event. Cached SQL is re-verified on cache hits when
+`fix_attempts > 0`, so entries that stopped binding after a schema change are
+repaired instead of failing.
+
 Example:
 
 ```sql
@@ -454,6 +472,18 @@ SELECT *
 FROM ai_query_data(
     'count orders by status',
     schema_context := (SELECT summary FROM ai_schema_prompt(include_tables := ['main.orders']))
+);
+```
+
+Example with self-correction (useful in views, scheduled queries, and other
+non-interactive contexts):
+
+```sql
+SELECT *
+FROM ai_query_data(
+    'revenue by pickup borough',
+    include_tables := ['trips', 'zones'],
+    fix_attempts := 2
 );
 ```
 
@@ -503,11 +533,31 @@ corrected read-only DuckDB `SELECT` statement. With `mode := 'line'`, it rewrite
 only the line identified by an error message and returns the detected line number
 plus replacement line.
 
+In query mode, pass `error :=` to include the failure message in the correction
+prompt — the error text is usually what makes the fix reliable. Passing `error`
+without an explicit `mode` selects line mode for backward compatibility, so
+combine it with `mode := 'query'` for full-query rewrites. Query mode also
+accepts `fix_attempts := N` (0 to 5, default 0) to verify the corrected SQL
+binds against the current catalog and re-correct with the bind error for up to
+`N` rounds.
+
 Example:
 
 ```sql
 SELECT sql
 FROM ai_fix_sql('SEELECT status, count(*) FRUM orders GROUP BY status');
+```
+
+Example with the error message and bind verification:
+
+```sql
+SELECT sql
+FROM ai_fix_sql(
+    'SELECT statuss, count(*) FROM orders GROUP BY statuss',
+    mode := 'query',
+    error := 'Binder Error: Referenced column "statuss" not found',
+    fix_attempts := 1
+);
 ```
 
 Result: one `sql VARCHAR` column
@@ -527,28 +577,34 @@ Line-mode result: `line_number BIGINT`, `replacement_line VARCHAR`
 
 ## SQL validation functions
 
-#### `ai_is_read_only_sql(sql)`
+#### `ai_is_read_only_sql(sql[, check_binding])`
 
 Description: Returns whether `sql` parses as exactly one read-only DuckDB
-`SELECT` statement.
+`SELECT` statement. With `check_binding` set to `true`, the statement must also
+bind against the current catalog — hallucinated tables, columns, or functions
+return `false` even when the SQL parses. The bind check runs in the current
+session, so temporary tables are visible, and nothing is executed.
 
 Example:
 
 ```sql
 SELECT ai_is_read_only_sql('SELECT 42');
+SELECT ai_is_read_only_sql('SELECT missing_column FROM my_table', true);
 ```
 
 Result: `BOOLEAN`
 
-#### `ai_validate_read_only_sql(sql)`
+#### `ai_validate_read_only_sql(sql[, check_binding])`
 
 Description: Returns the input SQL when it is one read-only DuckDB `SELECT`;
-otherwise raises an error.
+otherwise raises an error. With `check_binding` set to `true`, the statement
+must also bind against the current catalog.
 
 Example:
 
 ```sql
 SELECT ai_validate_read_only_sql('SELECT count(*) FROM my_table');
+SELECT ai_validate_read_only_sql('SELECT count(*) FROM my_table', true);
 ```
 
 Result: `VARCHAR`
@@ -742,7 +798,8 @@ SQL assistant table functions also accept:
 | `exclude_tables` | `VARCHAR[]` | Remove matching tables from generated local catalog context. |
 | `sample_rows` | `BIGINT` | Include up to 100 sample rows per local table. |
 | `mode` | `VARCHAR` | `ai_fix_sql` only. `query` or `full` rewrites the full query; `line` rewrites one error line. |
-| `error` | `VARCHAR` | `ai_fix_sql` line mode only. Error text used to identify the target line. |
+| `error` | `VARCHAR` | `ai_fix_sql` only. Error text included in the correction prompt; in line mode it also identifies the target line. Without an explicit `mode`, passing `error` selects line mode. |
+| `fix_attempts` | `BIGINT` | `ai_sql`, `ai_query_data`, and `ai_fix_sql` query mode. Number of bind-verified self-correction rounds from 0 to 5. Default 0 keeps single-shot behavior. |
 
 Aggregate functions also accept:
 
