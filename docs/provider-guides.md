@@ -5,13 +5,15 @@ sidebar_position: 3
 # Provider guides
 
 This page gives one simple end-to-end example for each supported provider.
-Examples assume you have built the extension and are running the bundled DuckDB
-shell:
+Examples assume the extension is installed and loaded:
 
-```sh
-GEN=ninja make release
-./build/release/duckdb
+```sql
+INSTALL ai FROM community;
+LOAD ai;
 ```
+
+(Or build from source with `GEN=ninja make release` and run
+`./build/release/duckdb`.)
 
 Each guide uses a DuckDB secret for provider, model, and base URL settings. The
 API key is read from the matching environment variable when the provider call
