@@ -175,6 +175,10 @@ std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	    provider == "local_openai" || provider == "local-models" || provider == "local_models") {
 		return "openai_compatible";
 	}
+	if (provider == "llama.cpp" || provider == "llama-cpp" || provider == "llama_cpp" || provider == "llama-server" ||
+	    provider == "llama_server") {
+		return "llamacpp";
+	}
 	return provider;
 }
 
@@ -2475,6 +2479,11 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 	if (provider == "openai_compatible") {
 		return {provider, "openai_chat", "gpt-4o-mini", "", "", "OPENAI_COMPATIBLE_API_KEY", "", false};
 	}
+	if (provider == "llamacpp") {
+		// llama.cpp llama-server speaks the OpenAI-compatible protocol and ignores the request model
+		// name unless started with --model-alias; the loaded model always answers.
+		return {provider, "openai_chat", "default", "", "http://localhost:8080/v1", "LLAMACPP_API_KEY", "", false};
+	}
 	if (provider == "azure") {
 		return {provider, "openai_chat", "gpt-4o", "", "", "AZURE_OPENAI_API_KEY", "", true};
 	}
@@ -2516,7 +2525,7 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 	throw InvalidInputException(
 	    "Unsupported AI provider \"%s\". Supported providers: ollama, openai, azure, "
 	    "anthropic, claude, databricks, gemini, gcp, mistral, snowflake, zai, deepseek, openrouter, "
-	    "openai_privacy_filter, openai_compatible, local",
+	    "openai_privacy_filter, openai_compatible, local, llamacpp, llama.cpp",
 	    provider_input);
 }
 
@@ -2876,6 +2885,10 @@ std::string EmbeddingDefaultModel(const std::string &provider) {
 	}
 	if (provider == "openai_compatible") {
 		return "text-embedding-3-small";
+	}
+	if (provider == "llamacpp") {
+		// llama-server exposes /v1/embeddings when started with --embeddings and uses the loaded model.
+		return "default";
 	}
 	if (provider == "mistral") {
 		return "mistral-embed";

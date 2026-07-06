@@ -62,6 +62,16 @@ SELECT ai_provider_protocol('openai_privacy_filter');
 ----
 privacy_filter
 
+query IIII
+SELECT ai_provider_protocol('llamacpp'), ai_provider_protocol('llama.cpp'), ai_provider_protocol('llama-server'), ai_provider_base_url('llama.cpp');
+----
+openai_chat	openai_chat	openai_chat	http://localhost:8080/v1
+
+query II
+SELECT contains(ai_completion_request_json('hello', provider := 'llama.cpp'), '"model":"default"'), contains(ai_embedding_request_json('hello', provider := 'llama.cpp'), '"model":"default"');
+----
+true	true
+
 query I
 SELECT ai_recommended_batch_size(100, 50, 6000);
 ----

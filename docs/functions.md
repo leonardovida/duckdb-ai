@@ -771,6 +771,7 @@ Supported provider names and aliases are:
 | `snowflake` | none | Yes | No | `snowflake-llama-3.3-70b` |
 | `openai_privacy_filter` | `privacy_filter`, `pii_filter`, `opf` | Redaction only | No | `openai/privacy-filter` |
 | `openai_compatible` | `local`, `openai-compatible`, `local_openai`, `local-models`, `local_models` | Yes | Yes | `gpt-4o-mini` |
+| `llamacpp` | `llama.cpp`, `llama-cpp`, `llama_cpp`, `llama-server`, `llama_server` | Yes | Yes | `default` (llama-server answers with its loaded model) |
 
 Session defaults can be configured with DuckDB settings:
 

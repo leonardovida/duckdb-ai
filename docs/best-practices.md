@@ -16,6 +16,7 @@ Use the most constrained provider that fits the job:
 | Local development without hosted credentials | `ollama` | Keeps prompts local and avoids provider costs. |
 | Production chat, extraction, classification, and SQL assistant calls | A managed LLM provider such as `openai`, `azure`, `databricks`, `snowflake`, `anthropic`, `gemini`, `mistral`, `deepseek`, `zai`, or `openrouter` | Gives managed reliability, model access, and governance controls. |
 | OpenAI-compatible gateways, vLLM, LM Studio, LiteLLM, or local Ollama `/v1` | `openai_compatible` or `local` | Uses the common chat-completions request shape. |
+| Local llama.cpp `llama-server` | `llamacpp` or `llama.cpp` | Talks to `http://localhost:8080/v1` out of the box; the server answers with its loaded model. |
 | PII redaction where raw text should stay local | `openai_privacy_filter` with local hosting | Sends raw text to a dedicated redaction service instead of a general chat model. |
 | PII redaction shared across teams | `openai_privacy_filter` with a private cloud service | Centralizes deployment, auth, scaling, and audit controls while preserving the dedicated redaction contract. |
 
@@ -57,6 +58,7 @@ Use provider-specific environment variables for local development:
 | `snowflake` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | `SNOWFLAKE_ACCOUNT_URL`, `SNOWFLAKE_HOST`, `SNOWFLAKE_ACCOUNT`, or `SNOWFLAKE_BASE_URL` |
 | `openai_privacy_filter` | `OPENAI_PRIVACY_FILTER_API_KEY` | `OPENAI_PRIVACY_FILTER_BASE_URL` |
 | `openai_compatible` / `local` | `OPENAI_COMPATIBLE_API_KEY` | `OPENAI_COMPATIBLE_BASE_URL` |
+| `llamacpp` / `llama.cpp` | `LLAMACPP_API_KEY` | `LLAMACPP_BASE_URL` |
 
 `DUCKDB_AI_API_KEY`, `DUCKDB_AI_BASE_URL`, and `DUCKDB_AI_MODEL` are generic
 fallbacks. Use them only when one process talks to one provider; provider-
