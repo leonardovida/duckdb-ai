@@ -304,6 +304,7 @@ End-to-end setup examples for each provider are in
 | --- | --- | --- |
 | `ollama` | Local Ollama chat and embedding models | `http://localhost:11434`; optional `OLLAMA_API_KEY` |
 | `openai_compatible` / `local` | vLLM, LM Studio, LiteLLM, Ollama `/v1`, or another gateway | Set `BASE_URL`; optional `OPENAI_COMPATIBLE_API_KEY` |
+| `llamacpp` / `llama.cpp` | Local llama.cpp `llama-server` | `http://localhost:8080/v1`; optional `LLAMACPP_API_KEY` |
 | `openai_privacy_filter` | OpenAI Privacy Filter PII redaction service | `http://localhost:8080`; optional `OPENAI_PRIVACY_FILTER_API_KEY` |
 
 ### Remote providers

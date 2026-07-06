@@ -44,6 +44,7 @@ LIMIT 1;
 | `snowflake` | OpenAI-compatible chat | `snowflake-llama-3.3-70b` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
 | `openai_privacy_filter` | Dedicated redaction endpoint | `openai/privacy-filter` | Optional `OPENAI_PRIVACY_FILTER_API_KEY` | Defaults to `http://localhost:8080` and calls `POST /redact`. |
 | `openai_compatible` / `local` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | Optional `OPENAI_COMPATIBLE_API_KEY` | Requires `BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL`. |
+| `llamacpp` / `llama.cpp` | OpenAI-compatible chat and embeddings | `default` (llama-server answers with its loaded model) | Optional `LLAMACPP_API_KEY` (`llama-server --api-key`) | Defaults to `http://localhost:8080/v1`. Embeddings need `llama-server --embeddings`. |
 
 For guidance on choosing providers, credentials, logging, cost, throughput, and
 PII workflows, see [Best practices](best-practices.md).
@@ -540,3 +541,35 @@ SELECT ai_complete(
 
 Aliases `local`, `openai_compatible`, `openai-compatible`, `local_openai`,
 `local-models`, and `local_models` all use the OpenAI-compatible protocol.
+
+## llama.cpp
+
+Use the `llamacpp` provider (aliases `llama.cpp`, `llama-cpp`, `llama_cpp`,
+`llama-server`, `llama_server`) for a local
+[llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`. It uses the
+OpenAI-compatible protocol and defaults to `http://localhost:8080/v1`, so no
+base URL setup is needed for a default server:
+
+```sh
+llama-server -m model.gguf --embeddings
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+SET duckdb_ai_provider = 'llama.cpp';
+
+SELECT ai_complete('Write one sentence about DuckDB.') AS answer;
+SELECT ai_embed('DuckDB');
+```
+
+The request `model` defaults to `default`; `llama-server` ignores it and
+answers with its loaded model, so no model configuration is needed either.
+Set `LLAMACPP_BASE_URL` for a non-default host or port, and `LLAMACPP_API_KEY`
+when the server runs with `--api-key`. Embedding calls require starting
+`llama-server` with `--embeddings`.
+
+For throughput, start `llama-server` with parallel slots (for example
+`--parallel 4`) and match `max_concurrent_requests` so DuckDB keeps every slot
+busy; llama.cpp reuses cached prompt prefixes automatically, so shared system
+prompts stay cheap across rows.
