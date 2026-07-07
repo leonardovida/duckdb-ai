@@ -123,6 +123,7 @@ walkthroughs, use the docs cookbooks:
 - [Create the sample support tickets table](docs/cookbooks/support-ticket-data.md)
 - [Enrich support tickets with AI text functions](docs/cookbooks/support-ticket-enrichment.md)
 - [Compare support tickets with embeddings](docs/cookbooks/support-ticket-similarity.md)
+- [Store embeddings in Lance for semantic search](docs/cookbooks/lance-semantic-search.md)
 - [Extract typed records from model output](docs/cookbooks/structured-triage-records.md)
 - [Generate read-only SQL over local tables](docs/cookbooks/sql-assistant.md)
 
