@@ -7,6 +7,15 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.2 - 2026-07-07
+
+### Fixed
+
+- Updated provider defaults and built-in pricing metadata for current public
+  provider docs: Gemini text embeddings now default to `gemini-embedding-001`,
+  DeepSeek completion calls default to `deepseek-v4-flash`, and Z.ai calls use
+  `https://api.z.ai/api/paas/v4` with `glm-4.7-flash`.
+
 ## 0.4.1 - 2026-07-07
 
 ### Fixed
