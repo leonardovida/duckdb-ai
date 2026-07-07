@@ -19,6 +19,8 @@ to the next without changing context.
   summarize, classify, filter, extract, redact, and translate table columns.
 - [Compare support tickets with embeddings](support-ticket-similarity.md): rank
   tickets by semantic similarity.
+- [Store embeddings in Lance for semantic search](lance-semantic-search.md):
+  persist, index, search, and rerank reusable embeddings.
 - [Extract typed records from model output](structured-triage-records.md): project
   structured JSON into DuckDB columns.
 - [Generate read-only SQL over local tables](sql-assistant.md): use local schema
