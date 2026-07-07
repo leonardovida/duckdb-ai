@@ -697,7 +697,7 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 	}
 	if (name == "temperature") {
 		options.temperature = OptionDoubleValue(value, function_name, name);
-		if (options.temperature < 0 || options.temperature > 2) {
+		if (!std::isfinite(options.temperature) || options.temperature < 0 || options.temperature > 2) {
 			throw BinderException("%s option \"temperature\" must be between 0 and 2", function_name);
 		}
 		options.has_temperature = true;
@@ -705,7 +705,7 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 	}
 	if (name == "log_sample_rate") {
 		options.log_sample_rate = OptionDoubleValue(value, function_name, name);
-		if (options.log_sample_rate < 0 || options.log_sample_rate > 1) {
+		if (!std::isfinite(options.log_sample_rate) || options.log_sample_rate < 0 || options.log_sample_rate > 1) {
 			throw BinderException("%s option \"log_sample_rate\" must be between 0 and 1", function_name);
 		}
 		options.has_log_sample_rate = true;
@@ -940,6 +940,9 @@ void ApplyDoubleSetting(ClientContext &context, const std::string &name, double 
 		return;
 	}
 	auto setting = DoubleValue::Get(value.DefaultCastAs(LogicalType::DOUBLE));
+	if (!std::isfinite(setting)) {
+		throw BinderException("Setting %s must be between 0 and 1", name);
+	}
 	if (setting < 0) {
 		return;
 	}

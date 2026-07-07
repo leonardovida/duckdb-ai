@@ -650,6 +650,24 @@ def run_duckdb_strict_log_error(duckdb_path: Path, base_url: str, port: int) -> 
     return result.stdout
 
 
+def run_duckdb_invalid_env_log_sample_rate(duckdb_path: Path) -> str:
+    sql = "SELECT ai_completion_request_json('hello', provider := 'openai');"
+    env = os.environ.copy()
+    env["DUCKDB_AI_LOG_SAMPLE_RATE"] = "nan"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"duckdb invalid env log sample rate unexpectedly succeeded\n{result.stdout}")
+    return result.stdout
+
+
 def assert_provider_error(output: str):
     required = [
         'AI provider "openai" (openai_chat, model "mock-model") returned HTTP 401',
@@ -706,6 +724,15 @@ def assert_strict_log_error(output: str):
     if MockProviderHandler.log_requests:
         raise AssertionError(
             f"strict log allowlist should block before log request: {MockProviderHandler.log_requests}"
+        )
+
+
+def assert_invalid_env_log_sample_rate(output: str):
+    if "DUCKDB_AI_LOG_SAMPLE_RATE must be between 0 and 1" not in output:
+        raise AssertionError(f"invalid env log sample rate error missing expected message\n{output}")
+    if MockProviderHandler.completion_requests:
+        raise AssertionError(
+            f"invalid env log sample rate should fail before provider request: {MockProviderHandler.completion_requests}"
         )
 
 
@@ -1191,6 +1218,9 @@ def main():
         MockProviderHandler.reset()
         strict_log_error_output = run_duckdb_strict_log_error(args.duckdb, f"http://127.0.0.1:{port}", port)
         assert_strict_log_error(strict_log_error_output)
+        MockProviderHandler.reset()
+        invalid_env_log_sample_rate_output = run_duckdb_invalid_env_log_sample_rate(args.duckdb)
+        assert_invalid_env_log_sample_rate(invalid_env_log_sample_rate_output)
     finally:
         server.shutdown()
         thread.join(timeout=5)

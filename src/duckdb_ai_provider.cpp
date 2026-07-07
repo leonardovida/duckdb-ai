@@ -236,7 +236,7 @@ bool TryReadEnvDouble(const std::string &name, double &target, double min_value,
 	}
 	try {
 		auto value = std::stod(configured);
-		if (value < min_value || value > max_value) {
+		if (!std::isfinite(value) || value < min_value || value > max_value) {
 			throw InvalidInputException("%s must be between %.0f and %.0f", name, min_value, max_value);
 		}
 		target = value;
@@ -3391,6 +3391,9 @@ void RecordFailedEmbeddingUsageEvent(const ProviderConfig &config, const std::st
 
 double LogSampleRate(const CompletionOptions &options) {
 	if (options.has_log_sample_rate) {
+		if (!std::isfinite(options.log_sample_rate) || options.log_sample_rate < 0 || options.log_sample_rate > 1) {
+			throw InvalidInputException("DUCKDB_AI_LOG_SAMPLE_RATE must be between 0 and 1");
+		}
 		return options.log_sample_rate;
 	}
 	auto configured = GetEnv("DUCKDB_AI_LOG_SAMPLE_RATE");
@@ -3399,7 +3402,7 @@ double LogSampleRate(const CompletionOptions &options) {
 	}
 	try {
 		auto rate = std::stod(configured);
-		if (rate < 0 || rate > 1) {
+		if (!std::isfinite(rate) || rate < 0 || rate > 1) {
 			throw InvalidInputException("DUCKDB_AI_LOG_SAMPLE_RATE must be between 0 and 1");
 		}
 		return rate;
