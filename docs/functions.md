@@ -821,8 +821,8 @@ Supported provider names and aliases are:
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
 | `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-2.5-flash` |
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
-| `zai` | `zhipu` | Yes | Yes | `glm-4-flash` |
-| `deepseek` | none | Yes | No | `deepseek-chat` |
+| `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |
+| `deepseek` | none | Yes | No | `deepseek-v4-flash` |
 | `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-llama-4-maverick` |
 | `snowflake` | none | Yes | No | `snowflake-llama-3.3-70b` |

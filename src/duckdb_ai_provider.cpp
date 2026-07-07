@@ -596,6 +596,8 @@ bool HasEstimatedCost(double estimated_cost_usd) {
 
 const std::vector<ModelPrice> &BuiltinModelPrices() {
 	static const std::vector<ModelPrice> prices {
+	    {"openai", "gpt-5.5", "completion", 5.00, 30.00, "https://developers.openai.com/api/docs/pricing",
+	     "standard text token pricing for <272K context length", "2026-07-07"},
 	    {"openai", "gpt-5.4", "completion", 2.50, 15.00, "https://developers.openai.com/api/docs/pricing",
 	     "standard text token pricing", "2026-06-30"},
 	    {"openai", "gpt-5.4-mini", "completion", 0.75, 4.50,
@@ -613,15 +615,14 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
 	    {"gemini", "gemini-2.5-flash", "completion", 0.30, 2.50, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "text/image/video input <= 200k tokens", "2026-06-30"},
-	    {"gemini", "text-embedding-004", "embedding", 0.00, -1, "https://ai.google.dev/gemini-api/docs/pricing",
-	     "listed as free tier pricing", "2026-06-30"},
+	    {"gemini", "gemini-embedding-001", "embedding", 0.15, -1, "https://ai.google.dev/gemini-api/docs/pricing",
+	     "standard text embedding input tokens only", "2026-07-07"},
 	    {"mistral", "mistral-small-latest", "completion", 0.10, 0.30, "https://mistral.ai/pricing/",
 	     "standard text token pricing", "2026-06-30"},
 	    {"mistral", "mistral-embed", "embedding", 0.10, -1, "https://mistral.ai/pricing/",
 	     "embedding input tokens only", "2026-06-30"},
-	    {"deepseek", "deepseek-chat", "completion", 0.27, 1.10,
-	     "https://api-docs.deepseek.com/quick_start/pricing/pricing_details", "input price uses cache-miss pricing",
-	     "2026-06-30"},
+	    {"deepseek", "deepseek-v4-flash", "completion", 0.14, 0.28, "https://api-docs.deepseek.com/quick_start/pricing",
+	     "input price uses cache-miss pricing", "2026-07-07"},
 	    {"zai", "glm-4.7-flash", "completion", 0.00, 0.00, "https://docs.z.ai/guides/overview/pricing",
 	     "standard text token pricing", "2026-06-30"},
 	    {"zai", "glm-4.7-flashx", "completion", 0.07, 0.40, "https://docs.z.ai/guides/overview/pricing",
@@ -2488,15 +2489,15 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 		return {provider, "openai_chat", "gpt-4o", "", "", "AZURE_OPENAI_API_KEY", "", true};
 	}
 	if (provider == "deepseek") {
-		return {provider, "openai_chat", "deepseek-chat", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", "", true};
+		return {provider, "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY",
+		        "",       true};
 	}
 	if (provider == "mistral") {
 		return {provider, "openai_chat", "mistral-small-latest", "", "https://api.mistral.ai/v1", "MISTRAL_API_KEY",
 		        "",       true};
 	}
 	if (provider == "zai" || provider == "zhipu") {
-		return {"zai", "openai_chat", "glm-4-flash", "", "https://open.bigmodel.cn/api/paas/v4", "ZAI_API_KEY",
-		        "",    true};
+		return {"zai", "openai_chat", "glm-4.7-flash", "", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY", "", true};
 	}
 	if (provider == "gemini") {
 		return {provider,
@@ -2894,7 +2895,7 @@ std::string EmbeddingDefaultModel(const std::string &provider) {
 		return "mistral-embed";
 	}
 	if (provider == "gemini") {
-		return "text-embedding-004";
+		return "gemini-embedding-001";
 	}
 	if (provider == "zai") {
 		return "embedding-3";

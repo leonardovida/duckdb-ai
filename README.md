@@ -321,7 +321,7 @@ End-to-end setup examples for each provider are in
 | `openai` | OpenAI chat and embedding models | `https://api.openai.com/v1`; `OPENAI_API_KEY` |
 | `openrouter` | OpenRouter model routing | `https://openrouter.ai/api/v1`; `OPENROUTER_API_KEY` |
 | `snowflake` | Snowflake Cortex REST Chat Completions API | Set `BASE_URL`, `SNOWFLAKE_ACCOUNT_URL`, or `SNOWFLAKE_ACCOUNT`; `SNOWFLAKE_PAT` |
-| `zai` | Z.ai / BigModel chat models | `https://open.bigmodel.cn/api/paas/v4`; `ZAI_API_KEY` |
+| `zai` | Z.ai / BigModel chat models | `https://api.z.ai/api/paas/v4`; `ZAI_API_KEY` |
 
 You can configure providers three ways:
 

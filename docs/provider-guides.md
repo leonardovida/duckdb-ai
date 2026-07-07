@@ -37,10 +37,10 @@ LIMIT 1;
 | `openai` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
 | `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
 | `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
-| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-2.5-flash`; embeddings use `text-embedding-004` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
+| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-2.5-flash`; embeddings use `gemini-embedding-001` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
-| `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://open.bigmodel.cn/api/paas/v4`. |
-| `deepseek` | OpenAI-compatible chat | `deepseek-chat` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
+| `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4.7-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://api.z.ai/api/paas/v4`. |
+| `deepseek` | OpenAI-compatible chat | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
 | `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
 | `databricks` | OpenAI-compatible chat | `databricks-llama-4-maverick` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
 | `snowflake` | OpenAI-compatible chat | `snowflake-llama-3.3-70b` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
@@ -221,7 +221,7 @@ SELECT ai_complete(
 SELECT ai_embed(
     'DuckDB vector search',
     secret := 'gemini_ai',
-    model := 'text-embedding-004'
+    model := 'gemini-embedding-001'
 )[1] AS first_embedding_value;
 ```
 
@@ -268,7 +268,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET zai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'zai',
-    MODEL 'glm-4-flash'
+    MODEL 'glm-4.7-flash'
 );
 
 SELECT ai_complete(
@@ -298,7 +298,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET deepseek_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'deepseek',
-    MODEL 'deepseek-chat'
+    MODEL 'deepseek-v4-flash'
 );
 
 SELECT ai_complete(
