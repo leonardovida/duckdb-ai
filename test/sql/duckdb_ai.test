@@ -609,7 +609,17 @@ SELECT ai_completion_request_json('hello', provider := 'openai', temperature := 
 Binder Error: AI option "temperature" must be between 0 and 2
 
 statement error
+SELECT ai_completion_request_json('hello', provider := 'openai', temperature := CAST('nan' AS DOUBLE));
+----
+Binder Error: AI option "temperature" must be between 0 and 2
+
+statement error
 SELECT ai_completion_request_json('hello', provider := 'openai', log_sample_rate := 1.5);
+----
+Binder Error: AI option "log_sample_rate" must be between 0 and 1
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai', log_sample_rate := CAST('nan' AS DOUBLE));
 ----
 Binder Error: AI option "log_sample_rate" must be between 0 and 1
 
@@ -700,6 +710,17 @@ Binder Error: AI option "output_token_price_per_million" must be greater than or
 
 statement ok
 SET duckdb_ai_log_sample_rate = 2.0;
+
+statement error
+SELECT ai_completion_request_json('hello', provider := 'openai');
+----
+Binder Error: Setting duckdb_ai_log_sample_rate must be between 0 and 1
+
+statement ok
+RESET duckdb_ai_log_sample_rate;
+
+statement ok
+SET duckdb_ai_log_sample_rate = 'nan';
 
 statement error
 SELECT ai_completion_request_json('hello', provider := 'openai');

@@ -7,6 +7,19 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.1 - 2026-07-07
+
+### Fixed
+
+- Rejected non-finite `temperature` and `log_sample_rate` values from per-call
+  options, DuckDB settings, and `DUCKDB_AI_LOG_SAMPLE_RATE` instead of emitting
+  invalid provider request JSON or silently disabling usage-log sampling.
+
+### Changed
+
+- Refreshed Docusaurus transitive lockfile dependencies within existing package
+  ranges.
+
 ## 0.4.0 - 2026-07-06
 
 ### Added
