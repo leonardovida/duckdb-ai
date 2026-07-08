@@ -617,8 +617,8 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "standard text token pricing", "2026-07-08"},
 	    {"gemini", "gemini-embedding-001", "embedding", 0.15, -1, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text embedding input tokens only", "2026-07-07"},
-	    {"mistral", "mistral-small-latest", "completion", 0.10, 0.30, "https://mistral.ai/pricing/",
-	     "standard text token pricing", "2026-06-30"},
+	    {"mistral", "mistral-small-latest", "completion", 0.15, 0.60, "https://mistral.ai/pricing/api/",
+	     "standard text token pricing", "2026-07-08"},
 	    {"mistral", "mistral-embed", "embedding", 0.10, -1, "https://mistral.ai/pricing/",
 	     "embedding input tokens only", "2026-06-30"},
 	    {"deepseek", "deepseek-v4-flash", "completion", 0.14, 0.28, "https://api-docs.deepseek.com/quick_start/pricing",
@@ -2465,7 +2465,7 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 		return {provider, "openai_chat", "databricks-llama-4-maverick", "", "", "DATABRICKS_TOKEN", "", true};
 	}
 	if (provider == "snowflake") {
-		return {provider, "openai_chat", "snowflake-llama-3.3-70b", "", "", "SNOWFLAKE_PAT", "", true};
+		return {provider, "openai_chat", "claude-sonnet-4-5", "", "", "SNOWFLAKE_PAT", "", true};
 	}
 	if (provider == "openai_privacy_filter") {
 		return {provider,
@@ -3080,7 +3080,7 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config) {
 			headers.push_back("HTTP-Referer: " + referer);
 		}
 		if (!title.empty()) {
-			headers.push_back("X-Title: " + title);
+			headers.push_back("X-OpenRouter-Title: " + title);
 		}
 	}
 	return headers;

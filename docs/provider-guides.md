@@ -43,7 +43,7 @@ LIMIT 1;
 | `deepseek` | OpenAI-compatible chat | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
 | `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
 | `databricks` | OpenAI-compatible chat | `databricks-llama-4-maverick` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
-| `snowflake` | OpenAI-compatible chat | `snowflake-llama-3.3-70b` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
+| `snowflake` | OpenAI-compatible chat | `claude-sonnet-4-5` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
 | `openai_privacy_filter` | Dedicated redaction endpoint | `openai/privacy-filter` | Optional `OPENAI_PRIVACY_FILTER_API_KEY` | Defaults to `http://localhost:8080` and calls `POST /redact`. |
 | `openai_compatible` / `local` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | Optional `OPENAI_COMPATIBLE_API_KEY` | Requires `BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL`. |
 | `llamacpp` / `llama.cpp` | OpenAI-compatible chat and embeddings | `default` (llama-server answers with its loaded model) | Optional `LLAMACPP_API_KEY` (`llama-server --api-key`) | Defaults to `http://localhost:8080/v1`. Embeddings need `llama-server --embeddings`. |
@@ -347,6 +347,9 @@ SELECT ai_embed(
 OpenRouter model names include the upstream provider prefix, for example
 `openai/gpt-4o-mini`.
 
+Set `OPENROUTER_HTTP_REFERER` and `OPENROUTER_X_TITLE` to send OpenRouter's
+optional attribution headers.
+
 ## Databricks
 
 Databricks Model Serving exposes chat endpoints through an OpenAI-compatible
@@ -398,7 +401,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET snowflake_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'snowflake',
-    MODEL 'snowflake-llama-3.3-70b'
+    MODEL 'claude-sonnet-4-5'
 );
 
 SELECT ai_complete(
@@ -412,8 +415,8 @@ If `BASE_URL` is omitted, set `SNOWFLAKE_ACCOUNT_URL`, `SNOWFLAKE_HOST`, or
 `https://<account>.snowflakecomputing.com/api/v2/cortex/v1`. You can also set a
 secret `BASE_URL`, `SNOWFLAKE_BASE_URL`, or per-call `base_url := ...` to use a
 full `/api/v2/cortex/v1` or `/chat/completions` endpoint. Snowflake model IDs
-include values such as `snowflake-llama-3.3-70b`, `llama4-maverick`, and
-`openai-gpt-5.1`, depending on region and model access.
+include values such as `claude-sonnet-4-5`, `llama4-maverick`, and
+`llama3.3-70b`, depending on region and model access.
 
 ## OpenAI Privacy Filter
 
