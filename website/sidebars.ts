@@ -24,6 +24,11 @@ const sidebars: SidebarsConfig = {
       },
       items: [
         'cookbooks/support-ticket-data',
+        'cookbooks/production-batch-enrichment',
+        'cookbooks/source-database-enrichment',
+        'cookbooks/audited-lakehouse-output',
+        'cookbooks/usage-cost-observability',
+        'cookbooks/messy-document-intake',
         'cookbooks/support-ticket-enrichment',
         'cookbooks/support-ticket-similarity',
         'cookbooks/lance-semantic-search',

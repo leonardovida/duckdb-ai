@@ -121,6 +121,11 @@ The examples below use ordinary table columns. For pasteable end-to-end
 walkthroughs, use the docs cookbooks:
 
 - [Create the sample support tickets table](docs/cookbooks/support-ticket-data.md)
+- [Run production batch enrichment from S3 or Parquet](docs/cookbooks/production-batch-enrichment.md)
+- [Enrich rows from Postgres or MySQL safely](docs/cookbooks/source-database-enrichment.md)
+- [Write audited AI outputs to lakehouse tables](docs/cookbooks/audited-lakehouse-output.md)
+- [Monitor AI usage, failures, and cost](docs/cookbooks/usage-cost-observability.md)
+- [Normalize messy documents into structured records](docs/cookbooks/messy-document-intake.md)
 - [Enrich support tickets with AI text functions](docs/cookbooks/support-ticket-enrichment.md)
 - [Compare support tickets with embeddings](docs/cookbooks/support-ticket-similarity.md)
 - [Store embeddings in Lance for semantic search](docs/cookbooks/lance-semantic-search.md)
@@ -303,24 +308,50 @@ End-to-end setup examples for each provider are in
 
 | Provider | Use it with | Default base URL / key |
 | --- | --- | --- |
+| `llamacpp` / `llama.cpp` | Local llama.cpp `llama-server` | `http://localhost:8080/v1`; optional `LLAMACPP_API_KEY` |
 | `ollama` | Local Ollama chat and embedding models | `http://localhost:11434`; optional `OLLAMA_API_KEY` |
 | `openai_compatible` / `local` | vLLM, LM Studio, LiteLLM, Ollama `/v1`, or another gateway | Set `BASE_URL`; optional `OPENAI_COMPATIBLE_API_KEY` |
-| `llamacpp` / `llama.cpp` | Local llama.cpp `llama-server` | `http://localhost:8080/v1`; optional `LLAMACPP_API_KEY` |
 | `openai_privacy_filter` | OpenAI Privacy Filter PII redaction service | `http://localhost:8080`; optional `OPENAI_PRIVACY_FILTER_API_KEY` |
 
 ### Remote providers
 
 | Provider | Use it with | Default base URL / key |
 | --- | --- | --- |
-| `azure` | Azure OpenAI deployments | Set `BASE_URL` or `AZURE_OPENAI_BASE_URL`; `AZURE_OPENAI_API_KEY` |
 | `anthropic` / `claude` | Anthropic Claude models | `https://api.anthropic.com/v1`; `ANTHROPIC_API_KEY` |
+| `azure` | Azure OpenAI deployments | Set `BASE_URL` or `AZURE_OPENAI_BASE_URL`; `AZURE_OPENAI_API_KEY` |
+| `bedrock` | Amazon Bedrock OpenAI-compatible endpoints | Set `BASE_URL` or `AWS_REGION`; `AWS_BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK` |
+| `cerebras` | Cerebras Cloud chat models | `https://api.cerebras.ai/v1`; `CEREBRAS_API_KEY` |
+| `cloudflare` / `workers_ai` | Cloudflare Workers AI OpenAI-compatible endpoints | Set `CLOUDFLARE_ACCOUNT_ID` or `BASE_URL`; `CLOUDFLARE_API_KEY` or `CLOUDFLARE_API_TOKEN` |
+| `cohere` | Cohere chat and embedding models through the compatibility API | `https://api.cohere.ai/compatibility/v1`; `COHERE_API_KEY` |
+| `dashscope` / `qwen` | Alibaba Cloud Model Studio / DashScope Qwen models | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; `DASHSCOPE_API_KEY` |
 | `databricks` | Databricks Model Serving and Unity AI Gateway chat endpoints | Set `BASE_URL` or `DATABRICKS_HOST`; `DATABRICKS_TOKEN` |
+| `deepinfra` | DeepInfra hosted open-weight chat and embedding models | `https://api.deepinfra.com/v1/openai`; `DEEPINFRA_API_KEY` |
 | `deepseek` | DeepSeek chat models | `https://api.deepseek.com`; `DEEPSEEK_API_KEY` |
+| `fireworks` | Fireworks AI hosted open-weight chat and embedding models | `https://api.fireworks.ai/inference/v1`; `FIREWORKS_API_KEY` |
 | `gemini` / `gcp` / `google` | Gemini through the OpenAI-compatible endpoint | `GEMINI_API_KEY` |
+| `github` / `github_models` | GitHub Models for prototyping and CI workflows | `https://models.github.ai/inference`; `GITHUB_TOKEN` |
+| `groq` | GroqCloud low-latency hosted open-weight models | `https://api.groq.com/openai/v1`; `GROQ_API_KEY` |
+| `huggingface` / `hf` | Hugging Face Inference Providers router | `https://router.huggingface.co/v1`; `HF_TOKEN` |
+| `hunyuan` / `tencent_hunyuan` | Tencent Hunyuan OpenAI-compatible models | `https://api.hunyuan.cloud.tencent.com/v1`; `HUNYUAN_API_KEY` |
+| `minimax` | MiniMax OpenAI-compatible models | `https://api.minimax.io/v1`; `MINIMAX_API_KEY` |
 | `mistral` | Mistral chat models | `https://api.mistral.ai/v1`; `MISTRAL_API_KEY` |
+| `moonshot` / `kimi` | Moonshot AI / Kimi models | `https://api.moonshot.ai/v1`; `MOONSHOT_API_KEY` or `KIMI_API_KEY` |
+| `nebius` / `nebius_token_factory` | Nebius Token Factory hosted open-weight models | `https://api.tokenfactory.nebius.com/v1`; `NEBIUS_API_KEY` |
+| `nvidia` / `nvidia_nim` | NVIDIA hosted NIM endpoints | `https://integrate.api.nvidia.com/v1`; `NVIDIA_API_KEY` |
 | `openai` | OpenAI chat and embedding models | `https://api.openai.com/v1`; `OPENAI_API_KEY` |
 | `openrouter` | OpenRouter model routing | `https://openrouter.ai/api/v1`; `OPENROUTER_API_KEY` |
+| `perplexity` | Perplexity Sonar chat/search models | `https://api.perplexity.ai`; `PERPLEXITY_API_KEY` |
+| `poe` | Poe OpenAI-compatible model routing | `https://api.poe.com/v1`; `POE_API_KEY` |
+| `qianfan` / `ernie` | Baidu Qianfan ERNIE models | `https://qianfan.baidubce.com/v2`; `QIANFAN_API_KEY` |
+| `sambanova` | SambaNova Cloud hosted open-weight models | `https://api.sambanova.ai/v1`; `SAMBANOVA_API_KEY` |
+| `siliconflow` | SiliconFlow hosted open-weight models | `https://api.siliconflow.com/v1`; `SILICONFLOW_API_KEY` |
 | `snowflake` | Snowflake Cortex REST Chat Completions API | Set `BASE_URL`, `SNOWFLAKE_ACCOUNT_URL`, or `SNOWFLAKE_ACCOUNT`; `SNOWFLAKE_PAT` |
+| `stepfun` / `step` | StepFun OpenAI-compatible models | `https://api.stepfun.ai/v1`; `STEPFUN_API_KEY` or `STEP_API_KEY` |
+| `together` | Together AI hosted open-weight chat and embedding models | `https://api.together.xyz/v1`; `TOGETHER_API_KEY` |
+| `vercel` / `vercel_ai_gateway` | Vercel AI Gateway multi-provider routing | `https://ai-gateway.vercel.sh/v1`; `AI_GATEWAY_API_KEY` |
+| `vertex` / `google_vertex` | Google Vertex AI OpenAI-compatible endpoints | Set `BASE_URL` or `GOOGLE_CLOUD_PROJECT`; `VERTEX_AI_ACCESS_TOKEN` or `GOOGLE_CLOUD_ACCESS_TOKEN` |
+| `volcengine` / `doubao` | Volcengine Ark Doubao models | `https://ark.cn-beijing.volces.com/api/v3`; `VOLCENGINE_API_KEY` or `ARK_API_KEY` |
+| `xai` / `grok` | xAI Grok chat models | `https://api.x.ai/v1`; `XAI_API_KEY` |
 | `zai` | Z.ai / BigModel chat models | `https://api.z.ai/api/paas/v4`; `ZAI_API_KEY` |
 
 You can configure providers three ways:
@@ -353,8 +384,9 @@ SELECT ai_complete('hello', secret := 'local_llm');
 ```
 
 Provider-specific environment variables such as `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DATABRICKS_TOKEN`, `SNOWFLAKE_PAT`, and
-`OPENAI_PRIVACY_FILTER_API_KEY` are also supported. Generic overrides include
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`,
+`DATABRICKS_TOKEN`, `SNOWFLAKE_PAT`, and `OPENAI_PRIVACY_FILTER_API_KEY` are
+also supported. Generic overrides include
 `DUCKDB_AI_PROVIDER`, `DUCKDB_AI_MODEL`, `DUCKDB_AI_BASE_URL`, and
 `DUCKDB_AI_API_KEY`.
 

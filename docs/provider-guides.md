@@ -37,13 +37,39 @@ LIMIT 1;
 | `openai` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
 | `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
 | `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
+| `bedrock` | OpenAI-compatible chat | `amazon.nova-lite-v1:0` | `AWS_BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `BEDROCK_API_KEY` | Set `AWS_REGION`, `AWS_BEDROCK_REGION`, `AWS_BEDROCK_BASE_URL`, or secret `BASE_URL`. |
+| `cerebras` | OpenAI-compatible chat | `gpt-oss-120b` | `CEREBRAS_API_KEY` | Defaults to `https://api.cerebras.ai/v1`. |
+| `cloudflare` / `workers_ai` | OpenAI-compatible chat and embeddings | `@cf/meta/llama-3.1-8b-instruct`; embeddings use `@cf/baai/bge-base-en-v1.5` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_API_TOKEN`, or `CLOUDFLARE_AUTH_TOKEN` | Derives the endpoint from `CLOUDFLARE_ACCOUNT_ID`, or accepts `CLOUDFLARE_WORKERS_AI_BASE_URL`, `CLOUDFLARE_AI_BASE_URL`, or secret `BASE_URL`. |
+| `cohere` | OpenAI-compatible chat and embeddings | `command-a-03-2025`; embeddings use `embed-v4.0` | `COHERE_API_KEY` | Defaults to `https://api.cohere.ai/compatibility/v1`. |
+| `dashscope` / `qwen` | OpenAI-compatible chat and embeddings | `qwen-plus`; embeddings use `text-embedding-v4` | `DASHSCOPE_API_KEY`, `ALIBABA_API_KEY`, or `QWEN_API_KEY` | Defaults to `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; override with a workspace-specific base URL when needed. |
+| `deepinfra` | OpenAI-compatible chat and embeddings | `meta-llama/Meta-Llama-3.1-8B-Instruct`; embeddings use `BAAI/bge-large-en-v1.5` | `DEEPINFRA_API_KEY` | Defaults to `https://api.deepinfra.com/v1/openai`. |
+| `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/llama-v3p1-8b-instruct`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
 | `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.5-flash`; embeddings use `gemini-embedding-001` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
+| `github` / `github_models` | OpenAI-compatible chat and embeddings | `openai/gpt-4o`; embeddings use `openai/text-embedding-3-small` | `GITHUB_TOKEN`, `GITHUB_MODELS_TOKEN`, or `GITHUB_API_KEY` | Defaults to `https://models.github.ai/inference`. |
+| `groq` | OpenAI-compatible chat | `openai/gpt-oss-20b` | `GROQ_API_KEY` | Defaults to `https://api.groq.com/openai/v1`. |
+| `huggingface` / `hf` | OpenAI-compatible chat | `openai/gpt-oss-120b` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | Defaults to `https://router.huggingface.co/v1`. |
+| `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat | `hunyuan-turbos-latest` | `HUNYUAN_API_KEY` or `TENCENT_HUNYUAN_API_KEY` | Defaults to `https://api.hunyuan.cloud.tencent.com/v1`. |
+| `minimax` | OpenAI-compatible chat | `MiniMax-M3` | `MINIMAX_API_KEY` or `MINI_MAX_API_KEY` | Defaults to `https://api.minimax.io/v1`. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
+| `moonshot` / `kimi` | OpenAI-compatible chat | `kimi-k2.7-code` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Defaults to `https://api.moonshot.ai/v1`. |
+| `nebius` / `nebius_token_factory` | OpenAI-compatible chat | `meta-llama/Meta-Llama-3.1-70B-Instruct` | `NEBIUS_API_KEY` or `TOKEN_FACTORY_API_KEY` | Defaults to `https://api.tokenfactory.nebius.com/v1`. |
+| `nvidia` / `nvidia_nim` | OpenAI-compatible chat | `meta/llama-3.3-70b-instruct` | `NVIDIA_API_KEY` | Defaults to `https://integrate.api.nvidia.com/v1`. |
 | `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4.7-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://api.z.ai/api/paas/v4`. |
 | `deepseek` | OpenAI-compatible chat | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
 | `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
 | `databricks` | OpenAI-compatible chat | `databricks-llama-4-maverick` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
 | `snowflake` | OpenAI-compatible chat | `claude-sonnet-4-5` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
+| `perplexity` | OpenAI-compatible chat | `sonar` | `PERPLEXITY_API_KEY` | Defaults to `https://api.perplexity.ai`. |
+| `poe` | OpenAI-compatible chat | `GPT-5.4` | `POE_API_KEY` | Defaults to `https://api.poe.com/v1`. |
+| `qianfan` / `ernie` | OpenAI-compatible chat | `ernie-4.5-turbo-128k-preview` | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY`, or `BAIDU_API_KEY` | Defaults to `https://qianfan.baidubce.com/v2`. |
+| `sambanova` | OpenAI-compatible chat | `Meta-Llama-3.3-70B-Instruct` | `SAMBANOVA_API_KEY` | Defaults to `https://api.sambanova.ai/v1`. |
+| `siliconflow` | OpenAI-compatible chat | `Qwen/Qwen2.5-72B-Instruct` | `SILICONFLOW_API_KEY` | Defaults to `https://api.siliconflow.com/v1`. |
+| `together` | OpenAI-compatible chat and embeddings | `meta-llama/Llama-3.3-70B-Instruct-Turbo`; embeddings use `BAAI/bge-base-en-v1.5` | `TOGETHER_API_KEY` | Defaults to `https://api.together.xyz/v1`. |
+| `stepfun` / `step` | OpenAI-compatible chat | `step-3.7-flash` | `STEPFUN_API_KEY` or `STEP_API_KEY` | Defaults to `https://api.stepfun.ai/v1`. |
+| `vercel` / `vercel_ai_gateway` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `AI_GATEWAY_API_KEY`, `VERCEL_AI_GATEWAY_API_KEY`, or `VERCEL_OIDC_TOKEN` | Defaults to `https://ai-gateway.vercel.sh/v1`. |
+| `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-2.5-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
+| `volcengine` / `doubao` | OpenAI-compatible chat | `doubao-seed-2-1-pro-260628` | `VOLCENGINE_API_KEY`, `ARK_API_KEY`, or `DOUBAO_API_KEY` | Defaults to `https://ark.cn-beijing.volces.com/api/v3`. |
+| `xai` / `grok` | OpenAI-compatible chat | `grok-4` | `XAI_API_KEY` | Defaults to `https://api.x.ai/v1`. |
 | `openai_privacy_filter` | Dedicated redaction endpoint | `openai/privacy-filter` | Optional `OPENAI_PRIVACY_FILTER_API_KEY` | Defaults to `http://localhost:8080` and calls `POST /redact`. |
 | `openai_compatible` / `local` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | Optional `OPENAI_COMPATIBLE_API_KEY` | Requires `BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL`. |
 | `llamacpp` / `llama.cpp` | OpenAI-compatible chat and embeddings | `default` (llama-server answers with its loaded model) | Optional `LLAMACPP_API_KEY` (`llama-server --api-key`) | Defaults to `http://localhost:8080/v1`. Embeddings need `llama-server --embeddings`. |
@@ -349,6 +375,707 @@ OpenRouter model names include the upstream provider prefix, for example
 
 Set `OPENROUTER_HTTP_REFERER` and `OPENROUTER_X_TITLE` to send OpenRouter's
 optional attribution headers.
+
+## Groq
+
+```sh
+export GROQ_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET groq_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'groq',
+    MODEL 'openai/gpt-oss-20b'
+);
+
+SELECT ai_complete(
+    'Explain vectorized SQL execution in one sentence.',
+    secret := 'groq_ai'
+) AS answer;
+```
+
+Groq is configured for completion calls. Embeddings are not configured for this
+provider.
+
+## Together AI
+
+```sh
+export TOGETHER_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET together_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'together',
+    MODEL 'meta-llama/Llama-3.3-70B-Instruct-Turbo'
+);
+
+SELECT ai_complete(
+    'Write one sentence about local-first analytics.',
+    secret := 'together_ai'
+) AS answer;
+
+SELECT ai_embed(
+    'DuckDB vector search',
+    secret := 'together_ai',
+    model := 'BAAI/bge-base-en-v1.5'
+)[1] AS first_embedding_value;
+```
+
+## Fireworks AI
+
+```sh
+export FIREWORKS_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET fireworks_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'fireworks',
+    MODEL 'accounts/fireworks/models/llama-v3p1-8b-instruct'
+);
+
+SELECT ai_complete(
+    'Give one reason to enrich data inside SQL.',
+    secret := 'fireworks_ai'
+) AS answer;
+
+SELECT ai_embed(
+    'DuckDB vector search',
+    secret := 'fireworks_ai',
+    model := 'nomic-ai/nomic-embed-text-v1.5'
+)[1] AS first_embedding_value;
+```
+
+## DeepInfra
+
+```sh
+export DEEPINFRA_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET deepinfra_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'deepinfra',
+    MODEL 'meta-llama/Meta-Llama-3.1-8B-Instruct'
+);
+
+SELECT ai_complete(
+    'Summarize why open-weight hosted inference is useful.',
+    secret := 'deepinfra_ai'
+) AS answer;
+
+SELECT ai_embed(
+    'DuckDB vector search',
+    secret := 'deepinfra_ai',
+    model := 'BAAI/bge-large-en-v1.5'
+)[1] AS first_embedding_value;
+```
+
+## Cerebras
+
+```sh
+export CEREBRAS_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET cerebras_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'cerebras',
+    MODEL 'gpt-oss-120b'
+);
+
+SELECT ai_complete(
+    'Explain fast inference for analytical workflows in one sentence.',
+    secret := 'cerebras_ai'
+) AS answer;
+```
+
+Cerebras is configured for completion calls. Embeddings are not configured for
+this provider.
+
+## Cohere
+
+```sh
+export COHERE_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET cohere_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'cohere',
+    MODEL 'command-a-03-2025'
+);
+
+SELECT ai_complete(
+    'Classify this support note as billing, support, sales, or other.',
+    secret := 'cohere_ai'
+) AS answer;
+
+SELECT ai_embed(
+    'DuckDB vector search',
+    secret := 'cohere_ai',
+    model := 'embed-v4.0'
+)[1] AS first_embedding_value;
+```
+
+## Cloudflare Workers AI
+
+Cloudflare Workers AI's OpenAI-compatible endpoint is account scoped. Set
+`CLOUDFLARE_ACCOUNT_ID`, or provide a full `BASE_URL`.
+
+```sh
+export CLOUDFLARE_API_KEY='...'
+export CLOUDFLARE_ACCOUNT_ID='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET cloudflare_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'workers_ai',
+    MODEL '@cf/meta/llama-3.1-8b-instruct'
+);
+
+SELECT ai_complete(
+    'Explain edge-hosted inference in one sentence.',
+    secret := 'cloudflare_ai'
+) AS answer;
+
+SELECT ai_embed(
+    'DuckDB vector search',
+    secret := 'cloudflare_ai',
+    model := '@cf/baai/bge-base-en-v1.5'
+)[1] AS first_embedding_value;
+```
+
+Aliases `cloudflare`, `workers_ai`, `cloudflare_workers_ai`, and
+`cloudflare_ai` resolve to the same provider.
+
+## Alibaba Cloud Model Studio / DashScope
+
+DashScope exposes Qwen models through an OpenAI-compatible endpoint. The default
+base URL uses the existing international compatible-mode endpoint; use a secret
+`BASE_URL`, `DASHSCOPE_BASE_URL`, or `ALIBABA_MODEL_STUDIO_BASE_URL` for a
+workspace-specific endpoint.
+
+```sh
+export DASHSCOPE_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET dashscope_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'qwen',
+    MODEL 'qwen-plus'
+);
+
+SELECT ai_complete(
+    'Write one sentence about analytics agents.',
+    secret := 'dashscope_ai'
+) AS answer;
+
+SELECT ai_embed(
+    'DuckDB vector search',
+    secret := 'dashscope_ai',
+    model := 'text-embedding-v4'
+)[1] AS first_embedding_value;
+```
+
+Aliases `dashscope`, `qwen`, `alibaba`, `alibaba_model_studio`, and
+`model_studio` resolve to the same provider.
+
+## Nebius Token Factory
+
+```sh
+export NEBIUS_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET nebius_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'nebius_token_factory',
+    MODEL 'meta-llama/Meta-Llama-3.1-70B-Instruct'
+);
+
+SELECT ai_complete(
+    'Summarize why managed open-weight inference matters.',
+    secret := 'nebius_ai'
+) AS answer;
+```
+
+Nebius is configured for completion calls. Embeddings are not configured for
+this provider.
+
+## SambaNova Cloud
+
+```sh
+export SAMBANOVA_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET sambanova_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'sambanova',
+    MODEL 'Meta-Llama-3.3-70B-Instruct'
+);
+
+SELECT ai_complete(
+    'Explain fast open-weight inference in one sentence.',
+    secret := 'sambanova_ai'
+) AS answer;
+```
+
+Aliases `sambanova`, `sambanova_ai`, `samba_nova`, and `sambacloud` resolve to
+the same provider. Embeddings are not configured for this provider.
+
+## SiliconFlow
+
+```sh
+export SILICONFLOW_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET siliconflow_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'siliconflow',
+    MODEL 'Qwen/Qwen2.5-72B-Instruct'
+);
+
+SELECT ai_complete(
+    'Write one sentence about open model hosting.',
+    secret := 'siliconflow_ai'
+) AS answer;
+```
+
+Aliases `siliconflow` and `silicon_flow` resolve to the same provider.
+Embeddings are not configured for this provider.
+
+## Vercel AI Gateway
+
+```sh
+export AI_GATEWAY_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET vercel_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'vercel_ai_gateway',
+    MODEL 'openai/gpt-4o-mini'
+);
+
+SELECT ai_complete(
+    'Explain model gateway routing in one sentence.',
+    secret := 'vercel_ai'
+) AS answer;
+
+SELECT ai_embed(
+    'DuckDB vector search',
+    secret := 'vercel_ai',
+    model := 'openai/text-embedding-3-small'
+)[1] AS first_embedding_value;
+```
+
+Aliases `vercel`, `vercel_ai_gateway`, `vercel_gateway`, and `ai_gateway`
+resolve to the same provider.
+
+## Moonshot AI / Kimi
+
+```sh
+export MOONSHOT_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET kimi_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'kimi',
+    MODEL 'kimi-k2.7-code'
+);
+
+SELECT ai_complete(
+    'Explain code-oriented model inference in one sentence.',
+    secret := 'kimi_ai'
+) AS answer;
+```
+
+Aliases `moonshot`, `kimi`, `moonshot_ai`, and `kimi_api` resolve to the same
+provider. Embeddings are not configured for this provider.
+
+## Baidu Qianfan / ERNIE
+
+```sh
+export QIANFAN_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET qianfan_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'ernie',
+    MODEL 'ernie-4.5-turbo-128k-preview'
+);
+
+SELECT ai_complete(
+    'Write one sentence about enterprise AI platforms.',
+    secret := 'qianfan_ai'
+) AS answer;
+```
+
+Aliases `qianfan`, `baidu`, `baidu_qianfan`, `ernie`, and `wenxin` resolve to
+the same provider. Embeddings are not configured for this provider.
+
+## Tencent Hunyuan
+
+```sh
+export HUNYUAN_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET hunyuan_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'tencent_hunyuan',
+    MODEL 'hunyuan-turbos-latest'
+);
+
+SELECT ai_complete(
+    'Summarize governed model APIs in one sentence.',
+    secret := 'hunyuan_ai'
+) AS answer;
+```
+
+Aliases `hunyuan`, `tencent`, and `tencent_hunyuan` resolve to the same
+provider. Embeddings are not configured for this provider.
+
+## StepFun
+
+```sh
+export STEPFUN_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET stepfun_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'step',
+    MODEL 'step-3.7-flash'
+);
+
+SELECT ai_complete(
+    'Write one sentence about fast chat models.',
+    secret := 'stepfun_ai'
+) AS answer;
+```
+
+Aliases `stepfun`, `step`, and `step_fun` resolve to the same provider.
+Embeddings are not configured for this provider.
+
+## MiniMax
+
+```sh
+export MINIMAX_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET minimax_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'minimax',
+    MODEL 'MiniMax-M3'
+);
+
+SELECT ai_complete(
+    'Explain model choice for SQL enrichment in one sentence.',
+    secret := 'minimax_ai'
+) AS answer;
+```
+
+Aliases `minimax` and `mini_max` resolve to the same provider. Embeddings are
+not configured for this provider.
+
+## Poe
+
+```sh
+export POE_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET poe_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'poe',
+    MODEL 'GPT-5.4'
+);
+
+SELECT ai_complete(
+    'Summarize model routing in one sentence.',
+    secret := 'poe_ai'
+) AS answer;
+```
+
+Aliases `poe` and `poe_api` resolve to the same provider. Embeddings are not
+configured for this provider.
+
+## Volcengine Ark / Doubao
+
+```sh
+export VOLCENGINE_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET doubao_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'doubao',
+    MODEL 'doubao-seed-2-1-pro-260628'
+);
+
+SELECT ai_complete(
+    'Explain hosted model APIs in one sentence.',
+    secret := 'doubao_ai'
+) AS answer;
+```
+
+Aliases `volcengine`, `volcano_engine`, `volcengine_ark`, `doubao`, and `ark`
+resolve to the same provider. Embeddings are not configured for this provider.
+
+## Hugging Face
+
+```sh
+export HF_TOKEN='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET huggingface_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'huggingface',
+    MODEL 'openai/gpt-oss-120b'
+);
+
+SELECT ai_complete(
+    'Write one sentence about open-source model routing.',
+    secret := 'huggingface_ai'
+) AS answer;
+```
+
+Aliases `hf`, `hugging_face`, `huggingface_hub`, and `hf_inference` resolve to
+`huggingface`. Embeddings are not configured by default; use
+`openai_compatible` with an embedding-capable router endpoint if needed.
+
+## GitHub Models
+
+```sh
+export GITHUB_TOKEN='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET github_models_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'github_models',
+    MODEL 'openai/gpt-4o'
+);
+
+SELECT ai_complete(
+    'Write one concise test-case title for an AI SQL helper.',
+    secret := 'github_models_ai'
+) AS answer;
+```
+
+Aliases `github`, `github_models`, `github-models`, and `gh_models` resolve to
+the same provider.
+
+## xAI
+
+```sh
+export XAI_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET xai_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'xai',
+    MODEL 'grok-4'
+);
+
+SELECT ai_complete(
+    'Summarize this SQL migration risk in one sentence.',
+    secret := 'xai_ai'
+) AS answer;
+```
+
+Aliases `xai`, `x.ai`, `x-ai`, and `grok` resolve to the same provider.
+Embeddings are not configured for this provider.
+
+## Perplexity
+
+```sh
+export PERPLEXITY_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET perplexity_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'perplexity',
+    MODEL 'sonar'
+);
+
+SELECT ai_complete(
+    'Give one current consideration for managed model APIs.',
+    secret := 'perplexity_ai'
+) AS answer;
+```
+
+Perplexity is configured for completion calls. Embeddings are not configured for
+this provider.
+
+## NVIDIA NIM
+
+```sh
+export NVIDIA_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET nvidia_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'nvidia_nim',
+    MODEL 'meta/llama-3.3-70b-instruct'
+);
+
+SELECT ai_complete(
+    'Explain GPU-hosted inference in one sentence.',
+    secret := 'nvidia_ai'
+) AS answer;
+```
+
+Aliases `nvidia`, `nvidia_nim`, and `nim` resolve to the same provider.
+Embeddings are not configured for this provider.
+
+## Amazon Bedrock
+
+Bedrock's OpenAI-compatible endpoint is regional. Set either a full base URL or
+a region; the extension derives `https://bedrock-mantle.<region>.api.aws/v1`
+from the region.
+
+```sh
+export AWS_BEARER_TOKEN_BEDROCK='...'
+export AWS_REGION='us-east-1'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET bedrock_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'bedrock',
+    MODEL 'amazon.nova-lite-v1:0'
+);
+
+SELECT ai_complete(
+    'Summarize why governed enterprise inference matters.',
+    secret := 'bedrock_ai'
+) AS answer;
+```
+
+Aliases `bedrock`, `aws_bedrock`, `amazon_bedrock`, and `bedrock_mantle`
+resolve to the same provider. Embeddings are not configured by default.
+
+## Google Vertex AI
+
+Vertex AI's OpenAI-compatible endpoint is project and location scoped. Set a
+full base URL, or set `GOOGLE_CLOUD_PROJECT` and optionally
+`GOOGLE_CLOUD_LOCATION`.
+
+```sh
+export GOOGLE_CLOUD_PROJECT='my-project'
+export GOOGLE_CLOUD_LOCATION='global'
+export VERTEX_AI_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+
+CREATE OR REPLACE SECRET vertex_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'vertex',
+    MODEL 'google/gemini-2.5-flash'
+);
+
+SELECT ai_complete(
+    'Explain BigQuery and DuckDB together in one sentence.',
+    secret := 'vertex_ai'
+) AS answer;
+```
+
+Aliases `vertex`, `google_vertex`, `vertex_ai`, and `gcp_vertex` resolve to the
+same provider. Embeddings are not configured for this provider.
 
 ## Databricks
 

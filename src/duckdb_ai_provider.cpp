@@ -76,6 +76,16 @@ struct UsageLogJob {
 	long retry_backoff_ms;
 };
 
+struct ProviderSpec {
+	const char *provider;
+	const char *protocol;
+	const char *default_model;
+	const char *embedding_model;
+	const char *base_url;
+	const char *api_key_env;
+	bool requires_api_key;
+};
+
 struct ProviderRuntimeState;
 void StopUsageLogWorker(ProviderRuntimeState &state);
 
@@ -164,6 +174,27 @@ std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	if (provider == "azure_openai" || provider == "azure-openai") {
 		return "azure";
 	}
+	if (provider == "cloudflare_workers_ai" || provider == "cloudflare-workers-ai" || provider == "workers_ai" ||
+	    provider == "workers-ai" || provider == "cloudflare_ai" || provider == "cloudflare-ai") {
+		return "cloudflare";
+	}
+	if (provider == "aws" || provider == "aws_bedrock" || provider == "aws-bedrock" || provider == "amazon_bedrock" ||
+	    provider == "amazon-bedrock" || provider == "bedrock_mantle" || provider == "bedrock-mantle") {
+		return "bedrock";
+	}
+	if (provider == "qwen" || provider == "alibaba" || provider == "alibaba_cloud" || provider == "alibaba-cloud" ||
+	    provider == "alibaba_model_studio" || provider == "alibaba-model-studio" || provider == "model_studio" ||
+	    provider == "model-studio") {
+		return "dashscope";
+	}
+	if (provider == "qianfan" || provider == "baidu" || provider == "baidu_qianfan" || provider == "baidu-qianfan" ||
+	    provider == "ernie" || provider == "wenxin") {
+		return "qianfan";
+	}
+	if (provider == "google_vertex" || provider == "google-vertex" || provider == "vertex_ai" ||
+	    provider == "vertex-ai" || provider == "gcp_vertex" || provider == "gcp-vertex") {
+		return "vertex";
+	}
 	if (provider == "mosaic" || provider == "mosaic_ai" || provider == "databricks_ai") {
 		return "databricks";
 	}
@@ -178,6 +209,75 @@ std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	if (provider == "llama.cpp" || provider == "llama-cpp" || provider == "llama_cpp" || provider == "llama-server" ||
 	    provider == "llama_server") {
 		return "llamacpp";
+	}
+	if (provider == "cohere_ai" || provider == "cohere-ai") {
+		return "cohere";
+	}
+	if (provider == "cerebras_cloud" || provider == "cerebras-cloud") {
+		return "cerebras";
+	}
+	if (provider == "fireworks_ai" || provider == "fireworks-ai") {
+		return "fireworks";
+	}
+	if (provider == "github_models" || provider == "github-models" || provider == "github_model" ||
+	    provider == "github-model" || provider == "gh_models" || provider == "gh-models") {
+		return "github";
+	}
+	if (provider == "groqcloud" || provider == "groq_cloud" || provider == "groq-cloud") {
+		return "groq";
+	}
+	if (provider == "hf" || provider == "hugging_face" || provider == "hugging-face" || provider == "huggingface_hub" ||
+	    provider == "huggingface-hub" || provider == "hf_inference" || provider == "hf-inference") {
+		return "huggingface";
+	}
+	if (provider == "moonshot_ai" || provider == "moonshot-ai" || provider == "kimi" || provider == "kimi_api" ||
+	    provider == "kimi-api") {
+		return "moonshot";
+	}
+	if (provider == "nvidia_nim" || provider == "nvidia-nim" || provider == "nim") {
+		return "nvidia";
+	}
+	if (provider == "nebius_ai" || provider == "nebius-ai" || provider == "nebius_token_factory" ||
+	    provider == "nebius-token-factory" || provider == "token_factory" || provider == "token-factory") {
+		return "nebius";
+	}
+	if (provider == "pplx") {
+		return "perplexity";
+	}
+	if (provider == "mini_max" || provider == "mini-max") {
+		return "minimax";
+	}
+	if (provider == "poe_api" || provider == "poe-api") {
+		return "poe";
+	}
+	if (provider == "sambanova_ai" || provider == "sambanova-ai" || provider == "samba_nova" ||
+	    provider == "samba-nova" || provider == "sambacloud" || provider == "samba_cloud" ||
+	    provider == "samba-cloud") {
+		return "sambanova";
+	}
+	if (provider == "silicon_flow" || provider == "silicon-flow") {
+		return "siliconflow";
+	}
+	if (provider == "together_ai" || provider == "together-ai") {
+		return "together";
+	}
+	if (provider == "step" || provider == "stepfun_ai" || provider == "stepfun-ai" || provider == "step_fun" ||
+	    provider == "step-fun") {
+		return "stepfun";
+	}
+	if (provider == "tencent" || provider == "tencent_hunyuan" || provider == "tencent-hunyuan") {
+		return "hunyuan";
+	}
+	if (provider == "vercel_ai_gateway" || provider == "vercel-ai-gateway" || provider == "vercel_gateway" ||
+	    provider == "vercel-gateway" || provider == "ai_gateway" || provider == "ai-gateway") {
+		return "vercel";
+	}
+	if (provider == "volcano" || provider == "volcano_engine" || provider == "volcano-engine" ||
+	    provider == "volcengine_ark" || provider == "volcengine-ark" || provider == "doubao" || provider == "ark") {
+		return "volcengine";
+	}
+	if (provider == "x.ai" || provider == "x-ai" || provider == "grok") {
+		return "xai";
 	}
 	return provider;
 }
@@ -517,6 +617,108 @@ std::string SnowflakeAccountBaseUrl(std::string account) {
 		return SnowflakeCortexBaseUrl(account);
 	}
 	return SnowflakeCortexBaseUrl(account + ".snowflakecomputing.com");
+}
+
+std::string BedrockBaseUrl(std::string value) {
+	value = TrimTrailingSlash(std::move(value));
+	if (value.empty()) {
+		return value;
+	}
+	if (!HasHttpScheme(value)) {
+		auto looks_like_region = value.find('.') == std::string::npos && value.find('/') == std::string::npos;
+		if (looks_like_region) {
+			return "https://bedrock-mantle." + value + ".api.aws/v1";
+		}
+		value = "https://" + value;
+	}
+	if (EndsWith(value, "/v1") || EndsWith(value, "/chat/completions")) {
+		return value;
+	}
+	return value + "/v1";
+}
+
+std::string CloudflareWorkersAiBaseUrl(std::string value) {
+	value = TrimTrailingSlash(std::move(value));
+	if (value.empty()) {
+		return value;
+	}
+	if (!HasHttpScheme(value)) {
+		auto looks_like_account_id = value.find('.') == std::string::npos && value.find('/') == std::string::npos;
+		if (looks_like_account_id) {
+			return "https://api.cloudflare.com/client/v4/accounts/" + value + "/ai/v1";
+		}
+		value = "https://" + value;
+	}
+	if (EndsWith(value, "/ai/v1") || EndsWith(value, "/chat/completions") || EndsWith(value, "/embeddings")) {
+		return value;
+	}
+	if (value.find("/accounts/") != std::string::npos) {
+		return value + "/ai/v1";
+	}
+	return value;
+}
+
+std::string DashScopeBaseUrl(std::string value) {
+	value = TrimTrailingSlash(std::move(value));
+	if (value.empty()) {
+		return value;
+	}
+	if (!HasHttpScheme(value)) {
+		value = "https://" + value;
+	}
+	if (EndsWith(value, "/compatible-mode/v1") || EndsWith(value, "/chat/completions") ||
+	    EndsWith(value, "/embeddings")) {
+		return value;
+	}
+	return value + "/compatible-mode/v1";
+}
+
+std::string VertexBaseUrl(std::string value) {
+	value = TrimTrailingSlash(std::move(value));
+	if (value.empty()) {
+		return value;
+	}
+	if (!HasHttpScheme(value)) {
+		value = "https://" + value;
+	}
+	if (EndsWith(value, "/endpoints/openapi") || EndsWith(value, "/chat/completions")) {
+		return value;
+	}
+	return value + "/endpoints/openapi";
+}
+
+std::string VertexProjectBaseUrl(const std::string &project, const std::string &location) {
+	if (project.empty()) {
+		return "";
+	}
+	auto resolved_location = location.empty() ? "global" : location;
+	return "https://aiplatform.googleapis.com/v1/projects/" + project + "/locations/" + resolved_location +
+	       "/endpoints/openapi";
+}
+
+std::string NormalizeBaseUrlForProvider(const std::string &provider, const std::string &base_url) {
+	if (provider == "azure") {
+		return AzureOpenAIBaseUrl(base_url);
+	}
+	if (provider == "bedrock") {
+		return BedrockBaseUrl(base_url);
+	}
+	if (provider == "cloudflare") {
+		return CloudflareWorkersAiBaseUrl(base_url);
+	}
+	if (provider == "dashscope") {
+		return DashScopeBaseUrl(base_url);
+	}
+	if (provider == "databricks") {
+		return DatabricksBaseUrl(base_url);
+	}
+	if (provider == "snowflake") {
+		return SnowflakeCortexBaseUrl(base_url);
+	}
+	if (provider == "vertex") {
+		return VertexBaseUrl(base_url);
+	}
+	return TrimTrailingSlash(base_url);
 }
 
 std::string CurrentTimestamp() {
@@ -2447,6 +2649,99 @@ std::string ProviderSpecificEnvPrefix(const std::string &provider) {
 	return upper;
 }
 
+const std::vector<ProviderSpec> &ProviderCatalog() {
+	static const std::vector<ProviderSpec> providers {
+	    {"ollama", "ollama_chat", "llama3.2", "nomic-embed-text", "http://localhost:11434", "OLLAMA_API_KEY", false},
+	    {"openai", "openai_chat", "gpt-4o-mini", "text-embedding-3-small", "https://api.openai.com/v1",
+	     "OPENAI_API_KEY", true},
+	    {"azure", "openai_chat", "gpt-4o", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
+	    {"anthropic", "anthropic_messages", "claude-haiku-4-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
+	     true},
+	    {"bedrock", "openai_chat", "amazon.nova-lite-v1:0", "", "", "AWS_BEDROCK_API_KEY", true},
+	    {"cerebras", "openai_chat", "gpt-oss-120b", "", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", true},
+	    {"cloudflare", "openai_chat", "@cf/meta/llama-3.1-8b-instruct", "@cf/baai/bge-base-en-v1.5", "",
+	     "CLOUDFLARE_API_KEY", true},
+	    {"cohere", "openai_chat", "command-a-03-2025", "embed-v4.0", "https://api.cohere.ai/compatibility/v1",
+	     "COHERE_API_KEY", true},
+	    {"dashscope", "openai_chat", "qwen-plus", "text-embedding-v4",
+	     "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY", true},
+	    {"databricks", "openai_chat", "databricks-llama-4-maverick", "", "", "DATABRICKS_TOKEN", true},
+	    {"deepinfra", "openai_chat", "meta-llama/Meta-Llama-3.1-8B-Instruct", "BAAI/bge-large-en-v1.5",
+	     "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY", true},
+	    {"deepseek", "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
+	    {"fireworks", "openai_chat", "accounts/fireworks/models/llama-v3p1-8b-instruct",
+	     "nomic-ai/nomic-embed-text-v1.5", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", true},
+	    {"gemini", "openai_chat", "gemini-3.5-flash", "gemini-embedding-001",
+	     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", true},
+	    {"github", "openai_chat", "openai/gpt-4o", "openai/text-embedding-3-small",
+	     "https://models.github.ai/inference", "GITHUB_TOKEN", true},
+	    {"groq", "openai_chat", "openai/gpt-oss-20b", "", "https://api.groq.com/openai/v1", "GROQ_API_KEY", true},
+	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
+	    {"hunyuan", "openai_chat", "hunyuan-turbos-latest", "", "https://api.hunyuan.cloud.tencent.com/v1",
+	     "HUNYUAN_API_KEY", true},
+	    {"llamacpp", "openai_chat", "default", "default", "http://localhost:8080/v1", "LLAMACPP_API_KEY", false},
+	    {"minimax", "openai_chat", "MiniMax-M3", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
+	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
+	     "MISTRAL_API_KEY", true},
+	    {"moonshot", "openai_chat", "kimi-k2.7-code", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
+	    {"nebius", "openai_chat", "meta-llama/Meta-Llama-3.1-70B-Instruct", "",
+	     "https://api.tokenfactory.nebius.com/v1", "NEBIUS_API_KEY", true},
+	    {"nvidia", "openai_chat", "meta/llama-3.3-70b-instruct", "", "https://integrate.api.nvidia.com/v1",
+	     "NVIDIA_API_KEY", true},
+	    {"openai_privacy_filter", "privacy_filter", "openai/privacy-filter", "", "http://localhost:8080",
+	     "OPENAI_PRIVACY_FILTER_API_KEY", false},
+	    {"openai_compatible", "openai_chat", "gpt-4o-mini", "text-embedding-3-small", "", "OPENAI_COMPATIBLE_API_KEY",
+	     false},
+	    {"openrouter", "openai_chat", "openai/gpt-4o-mini", "openai/text-embedding-3-small",
+	     "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", true},
+	    {"perplexity", "openai_chat", "sonar", "", "https://api.perplexity.ai", "PERPLEXITY_API_KEY", true},
+	    {"poe", "openai_chat", "GPT-5.4", "", "https://api.poe.com/v1", "POE_API_KEY", true},
+	    {"qianfan", "openai_chat", "ernie-4.5-turbo-128k-preview", "", "https://qianfan.baidubce.com/v2",
+	     "QIANFAN_API_KEY", true},
+	    {"sambanova", "openai_chat", "Meta-Llama-3.3-70B-Instruct", "", "https://api.sambanova.ai/v1",
+	     "SAMBANOVA_API_KEY", true},
+	    {"siliconflow", "openai_chat", "Qwen/Qwen2.5-72B-Instruct", "", "https://api.siliconflow.com/v1",
+	     "SILICONFLOW_API_KEY", true},
+	    {"snowflake", "openai_chat", "claude-sonnet-4-5", "", "", "SNOWFLAKE_PAT", true},
+	    {"stepfun", "openai_chat", "step-3.7-flash", "", "https://api.stepfun.ai/v1", "STEPFUN_API_KEY", true},
+	    {"together", "openai_chat", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "BAAI/bge-base-en-v1.5",
+	     "https://api.together.xyz/v1", "TOGETHER_API_KEY", true},
+	    {"vercel", "openai_chat", "openai/gpt-4o-mini", "openai/text-embedding-3-small",
+	     "https://ai-gateway.vercel.sh/v1", "AI_GATEWAY_API_KEY", true},
+	    {"vertex", "openai_chat", "google/gemini-2.5-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
+	    {"volcengine", "openai_chat", "doubao-seed-2-1-pro-260628", "", "https://ark.cn-beijing.volces.com/api/v3",
+	     "VOLCENGINE_API_KEY", true},
+	    {"xai", "openai_chat", "grok-4", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
+	    {"zai", "openai_chat", "glm-4.7-flash", "embedding-3", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY",
+	     true},
+	};
+	return providers;
+}
+
+const ProviderSpec *FindProviderSpec(const std::string &provider) {
+	for (auto &spec : ProviderCatalog()) {
+		if (provider == spec.provider) {
+			return &spec;
+		}
+	}
+	return nullptr;
+}
+
+std::string SupportedProvidersList() {
+	std::string result;
+	for (idx_t i = 0; i < ProviderCatalog().size(); i++) {
+		if (i > 0) {
+			result += ", ";
+		}
+		result += ProviderCatalog()[i].provider;
+	}
+	result += ", claude, gcp, google, zhipu, azure_openai, databricks_ai, local, llama.cpp, github_models, "
+	          "hugging_face, x.ai, nvidia_nim, aws_bedrock, google_vertex, workers_ai, qwen, alibaba, "
+	          "nebius_token_factory, sambanova_ai, silicon_flow, vercel_ai_gateway, kimi, baidu, ernie, "
+	          "tencent_hunyuan, step, mini_max, doubao, ark";
+	return result;
+}
+
 ProviderConfig ProviderDefaults(const std::string &provider_input) {
 	auto provider =
 	    NormalizeProviderNameInternal(provider_input.empty() ? GetEnv("DUCKDB_AI_PROVIDER") : provider_input);
@@ -2454,80 +2749,14 @@ ProviderConfig ProviderDefaults(const std::string &provider_input) {
 		provider = "ollama";
 	}
 
-	if (provider == "openai") {
-		return {provider, "openai_chat", "gpt-4o-mini", "", "https://api.openai.com/v1", "OPENAI_API_KEY", "", true};
-	}
-	if (provider == "openrouter") {
-		return {provider, "openai_chat", "openai/gpt-4o-mini", "", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY",
-		        "",       true};
-	}
-	if (provider == "databricks") {
-		return {provider, "openai_chat", "databricks-llama-4-maverick", "", "", "DATABRICKS_TOKEN", "", true};
-	}
-	if (provider == "snowflake") {
-		return {provider, "openai_chat", "claude-sonnet-4-5", "", "", "SNOWFLAKE_PAT", "", true};
-	}
-	if (provider == "openai_privacy_filter") {
-		return {provider,
-		        "privacy_filter",
-		        "openai/privacy-filter",
-		        "",
-		        "http://localhost:8080",
-		        "OPENAI_PRIVACY_FILTER_API_KEY",
-		        "",
-		        false};
-	}
-	if (provider == "openai_compatible") {
-		return {provider, "openai_chat", "gpt-4o-mini", "", "", "OPENAI_COMPATIBLE_API_KEY", "", false};
-	}
-	if (provider == "llamacpp") {
-		// llama.cpp llama-server speaks the OpenAI-compatible protocol and ignores the request model
-		// name unless started with --model-alias; the loaded model always answers.
-		return {provider, "openai_chat", "default", "", "http://localhost:8080/v1", "LLAMACPP_API_KEY", "", false};
-	}
-	if (provider == "azure") {
-		return {provider, "openai_chat", "gpt-4o", "", "", "AZURE_OPENAI_API_KEY", "", true};
-	}
-	if (provider == "deepseek") {
-		return {provider, "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY",
-		        "",       true};
-	}
-	if (provider == "mistral") {
-		return {provider, "openai_chat", "mistral-small-latest", "", "https://api.mistral.ai/v1", "MISTRAL_API_KEY",
-		        "",       true};
-	}
-	if (provider == "zai" || provider == "zhipu") {
-		return {"zai", "openai_chat", "glm-4.7-flash", "", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY", "", true};
-	}
-	if (provider == "gemini") {
-		return {provider,
-		        "openai_chat",
-		        "gemini-3.5-flash",
-		        "",
-		        "https://generativelanguage.googleapis.com/v1beta/openai",
-		        "GEMINI_API_KEY",
-		        "",
-		        true};
-	}
-	if (provider == "anthropic" || provider == "claude") {
-		return {"anthropic",
-		        "anthropic_messages",
-		        "claude-haiku-4-5",
-		        "",
-		        "https://api.anthropic.com/v1",
-		        "ANTHROPIC_API_KEY",
-		        "",
-		        true};
-	}
-	if (provider == "ollama") {
-		return {provider, "ollama_chat", "llama3.2", "", "http://localhost:11434", "OLLAMA_API_KEY", "", false};
+	auto spec = FindProviderSpec(provider);
+	if (spec) {
+		return {spec->provider,        spec->protocol, spec->default_model, "", spec->base_url, spec->api_key_env, "",
+		        spec->requires_api_key};
 	}
 
-	throw InvalidInputException(
-	    "Unsupported AI provider \"%s\". Supported providers: ollama, openai, azure, "
-	    "anthropic, claude, databricks, gemini, gcp, mistral, snowflake, zai, deepseek, openrouter, "
-	    "openai_privacy_filter, openai_compatible, local, llamacpp, llama.cpp",
-	    provider_input);
+	throw InvalidInputException("Unsupported AI provider \"%s\". Supported providers: %s", provider_input,
+	                            SupportedProvidersList());
 }
 
 std::string ResolveBaseUrl(const ProviderConfig &config) {
@@ -2544,17 +2773,139 @@ std::string ResolveBaseUrl(const ProviderConfig &config) {
 			return AzureOpenAIBaseUrl(azure_endpoint);
 		}
 	}
+	if (config.provider == "bedrock") {
+		auto aws_bedrock_base_url = GetEnv("AWS_BEDROCK_BASE_URL");
+		if (!aws_bedrock_base_url.empty()) {
+			return BedrockBaseUrl(aws_bedrock_base_url);
+		}
+	}
+	if (config.provider == "cloudflare") {
+		auto cloudflare_workers_ai_base_url = GetEnv("CLOUDFLARE_WORKERS_AI_BASE_URL");
+		if (!cloudflare_workers_ai_base_url.empty()) {
+			return CloudflareWorkersAiBaseUrl(cloudflare_workers_ai_base_url);
+		}
+		auto cloudflare_ai_base_url = GetEnv("CLOUDFLARE_AI_BASE_URL");
+		if (!cloudflare_ai_base_url.empty()) {
+			return CloudflareWorkersAiBaseUrl(cloudflare_ai_base_url);
+		}
+	}
+	if (config.provider == "dashscope") {
+		auto alibaba_model_studio_base_url = GetEnv("ALIBABA_MODEL_STUDIO_BASE_URL");
+		if (!alibaba_model_studio_base_url.empty()) {
+			return DashScopeBaseUrl(alibaba_model_studio_base_url);
+		}
+		auto qwen_base_url = GetEnv("QWEN_BASE_URL");
+		if (!qwen_base_url.empty()) {
+			return DashScopeBaseUrl(qwen_base_url);
+		}
+	}
+	if (config.provider == "hunyuan") {
+		auto tencent_hunyuan_base_url = GetEnv("TENCENT_HUNYUAN_BASE_URL");
+		if (!tencent_hunyuan_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, tencent_hunyuan_base_url);
+		}
+	}
+	if (config.provider == "moonshot") {
+		auto kimi_base_url = GetEnv("KIMI_BASE_URL");
+		if (!kimi_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, kimi_base_url);
+		}
+	}
+	if (config.provider == "nebius") {
+		auto token_factory_base_url = GetEnv("TOKEN_FACTORY_BASE_URL");
+		if (!token_factory_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, token_factory_base_url);
+		}
+	}
+	if (config.provider == "qianfan") {
+		auto baidu_qianfan_base_url = GetEnv("BAIDU_QIANFAN_BASE_URL");
+		if (!baidu_qianfan_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, baidu_qianfan_base_url);
+		}
+	}
+	if (config.provider == "sambanova") {
+		auto sambanova_url = GetEnv("SAMBANOVA_URL");
+		if (!sambanova_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, sambanova_url);
+		}
+	}
+	if (config.provider == "stepfun") {
+		auto step_base_url = GetEnv("STEP_BASE_URL");
+		if (!step_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, step_base_url);
+		}
+	}
+	if (config.provider == "vercel") {
+		auto ai_gateway_base_url = GetEnv("AI_GATEWAY_BASE_URL");
+		if (!ai_gateway_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, ai_gateway_base_url);
+		}
+		auto vercel_ai_gateway_base_url = GetEnv("VERCEL_AI_GATEWAY_BASE_URL");
+		if (!vercel_ai_gateway_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, vercel_ai_gateway_base_url);
+		}
+	}
+	if (config.provider == "volcengine") {
+		auto ark_base_url = GetEnv("ARK_BASE_URL");
+		if (!ark_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, ark_base_url);
+		}
+		auto doubao_base_url = GetEnv("DOUBAO_BASE_URL");
+		if (!doubao_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, doubao_base_url);
+		}
+	}
+	if (config.provider == "vertex") {
+		auto vertex_ai_base_url = GetEnv("VERTEX_AI_BASE_URL");
+		if (!vertex_ai_base_url.empty()) {
+			return VertexBaseUrl(vertex_ai_base_url);
+		}
+		auto google_vertex_base_url = GetEnv("GOOGLE_VERTEX_BASE_URL");
+		if (!google_vertex_base_url.empty()) {
+			return VertexBaseUrl(google_vertex_base_url);
+		}
+	}
 	if (!provider_base_url.empty()) {
-		return config.provider == "azure"        ? AzureOpenAIBaseUrl(provider_base_url)
-		       : config.provider == "databricks" ? DatabricksBaseUrl(provider_base_url)
-		       : config.provider == "snowflake"  ? SnowflakeCortexBaseUrl(provider_base_url)
-		                                         : TrimTrailingSlash(provider_base_url);
+		return NormalizeBaseUrlForProvider(config.provider, provider_base_url);
 	}
 	if (!generic_base_url.empty()) {
-		return config.provider == "azure"        ? AzureOpenAIBaseUrl(generic_base_url)
-		       : config.provider == "databricks" ? DatabricksBaseUrl(generic_base_url)
-		       : config.provider == "snowflake"  ? SnowflakeCortexBaseUrl(generic_base_url)
-		                                         : TrimTrailingSlash(generic_base_url);
+		return NormalizeBaseUrlForProvider(config.provider, generic_base_url);
+	}
+	if (config.provider == "bedrock") {
+		auto aws_bedrock_region = GetEnv("AWS_BEDROCK_REGION");
+		if (!aws_bedrock_region.empty()) {
+			return BedrockBaseUrl(aws_bedrock_region);
+		}
+		auto aws_region = GetEnv("AWS_REGION");
+		if (!aws_region.empty()) {
+			return BedrockBaseUrl(aws_region);
+		}
+		auto aws_default_region = GetEnv("AWS_DEFAULT_REGION");
+		if (!aws_default_region.empty()) {
+			return BedrockBaseUrl(aws_default_region);
+		}
+	}
+	if (config.provider == "cloudflare") {
+		auto cloudflare_account_id = GetEnv("CLOUDFLARE_ACCOUNT_ID");
+		if (cloudflare_account_id.empty()) {
+			cloudflare_account_id = GetEnv("CF_ACCOUNT_ID");
+		}
+		if (!cloudflare_account_id.empty()) {
+			return CloudflareWorkersAiBaseUrl(cloudflare_account_id);
+		}
+	}
+	if (config.provider == "vertex") {
+		auto project = GetEnv("GOOGLE_CLOUD_PROJECT");
+		if (project.empty()) {
+			project = GetEnv("VERTEX_AI_PROJECT");
+		}
+		auto location = GetEnv("GOOGLE_CLOUD_LOCATION");
+		if (location.empty()) {
+			location = GetEnv("VERTEX_AI_LOCATION");
+		}
+		if (!project.empty()) {
+			return VertexProjectBaseUrl(project, location);
+		}
 	}
 	if (config.provider == "anthropic") {
 		auto claude_base_url = GetEnv("CLAUDE_BASE_URL");
@@ -2599,6 +2950,146 @@ std::string ResolveApiKey(const ProviderConfig &config) {
 		auto azure_key = GetEnv("AZURE_OPENAI_API_KEY");
 		if (!azure_key.empty()) {
 			return azure_key;
+		}
+	}
+	if (config.provider == "bedrock") {
+		auto aws_bedrock_key = GetEnv("AWS_BEDROCK_API_KEY");
+		if (!aws_bedrock_key.empty()) {
+			return aws_bedrock_key;
+		}
+		auto bedrock_bearer = GetEnv("AWS_BEARER_TOKEN_BEDROCK");
+		if (!bedrock_bearer.empty()) {
+			return bedrock_bearer;
+		}
+	}
+	if (config.provider == "cloudflare") {
+		auto cloudflare_api_key = GetEnv("CLOUDFLARE_API_KEY");
+		if (!cloudflare_api_key.empty()) {
+			return cloudflare_api_key;
+		}
+		auto cloudflare_api_token = GetEnv("CLOUDFLARE_API_TOKEN");
+		if (!cloudflare_api_token.empty()) {
+			return cloudflare_api_token;
+		}
+		auto cloudflare_auth_token = GetEnv("CLOUDFLARE_AUTH_TOKEN");
+		if (!cloudflare_auth_token.empty()) {
+			return cloudflare_auth_token;
+		}
+	}
+	if (config.provider == "dashscope") {
+		auto dashscope_api_key = GetEnv("DASHSCOPE_API_KEY");
+		if (!dashscope_api_key.empty()) {
+			return dashscope_api_key;
+		}
+		auto alibaba_api_key = GetEnv("ALIBABA_API_KEY");
+		if (!alibaba_api_key.empty()) {
+			return alibaba_api_key;
+		}
+		auto qwen_api_key = GetEnv("QWEN_API_KEY");
+		if (!qwen_api_key.empty()) {
+			return qwen_api_key;
+		}
+	}
+	if (config.provider == "hunyuan") {
+		auto tencent_hunyuan_api_key = GetEnv("TENCENT_HUNYUAN_API_KEY");
+		if (!tencent_hunyuan_api_key.empty()) {
+			return tencent_hunyuan_api_key;
+		}
+		auto tencentcloud_hunyuan_api_key = GetEnv("TENCENTCLOUD_HUNYUAN_API_KEY");
+		if (!tencentcloud_hunyuan_api_key.empty()) {
+			return tencentcloud_hunyuan_api_key;
+		}
+	}
+	if (config.provider == "moonshot") {
+		auto kimi_api_key = GetEnv("KIMI_API_KEY");
+		if (!kimi_api_key.empty()) {
+			return kimi_api_key;
+		}
+	}
+	if (config.provider == "minimax") {
+		auto mini_max_api_key = GetEnv("MINI_MAX_API_KEY");
+		if (!mini_max_api_key.empty()) {
+			return mini_max_api_key;
+		}
+	}
+	if (config.provider == "nebius") {
+		auto nebius_api_key = GetEnv("NEBIUS_API_KEY");
+		if (!nebius_api_key.empty()) {
+			return nebius_api_key;
+		}
+		auto token_factory_api_key = GetEnv("TOKEN_FACTORY_API_KEY");
+		if (!token_factory_api_key.empty()) {
+			return token_factory_api_key;
+		}
+	}
+	if (config.provider == "qianfan") {
+		auto baidu_qianfan_api_key = GetEnv("BAIDU_QIANFAN_API_KEY");
+		if (!baidu_qianfan_api_key.empty()) {
+			return baidu_qianfan_api_key;
+		}
+		auto baidu_api_key = GetEnv("BAIDU_API_KEY");
+		if (!baidu_api_key.empty()) {
+			return baidu_api_key;
+		}
+	}
+	if (config.provider == "stepfun") {
+		auto step_api_key = GetEnv("STEP_API_KEY");
+		if (!step_api_key.empty()) {
+			return step_api_key;
+		}
+	}
+	if (config.provider == "vercel") {
+		auto ai_gateway_api_key = GetEnv("AI_GATEWAY_API_KEY");
+		if (!ai_gateway_api_key.empty()) {
+			return ai_gateway_api_key;
+		}
+		auto vercel_ai_gateway_api_key = GetEnv("VERCEL_AI_GATEWAY_API_KEY");
+		if (!vercel_ai_gateway_api_key.empty()) {
+			return vercel_ai_gateway_api_key;
+		}
+		auto vercel_oidc_token = GetEnv("VERCEL_OIDC_TOKEN");
+		if (!vercel_oidc_token.empty()) {
+			return vercel_oidc_token;
+		}
+	}
+	if (config.provider == "volcengine") {
+		auto ark_api_key = GetEnv("ARK_API_KEY");
+		if (!ark_api_key.empty()) {
+			return ark_api_key;
+		}
+		auto doubao_api_key = GetEnv("DOUBAO_API_KEY");
+		if (!doubao_api_key.empty()) {
+			return doubao_api_key;
+		}
+	}
+	if (config.provider == "vertex") {
+		auto vertex_access_token = GetEnv("VERTEX_AI_ACCESS_TOKEN");
+		if (!vertex_access_token.empty()) {
+			return vertex_access_token;
+		}
+		auto google_access_token = GetEnv("GOOGLE_CLOUD_ACCESS_TOKEN");
+		if (!google_access_token.empty()) {
+			return google_access_token;
+		}
+		auto google_oauth_token = GetEnv("GOOGLE_OAUTH_ACCESS_TOKEN");
+		if (!google_oauth_token.empty()) {
+			return google_oauth_token;
+		}
+		auto vertex_api_key = GetEnv("VERTEX_AI_API_KEY");
+		if (!vertex_api_key.empty()) {
+			return vertex_api_key;
+		}
+	}
+	if (config.provider == "github") {
+		auto github_models_token = GetEnv("GITHUB_MODELS_TOKEN");
+		if (!github_models_token.empty()) {
+			return github_models_token;
+		}
+	}
+	if (config.provider == "huggingface") {
+		auto hub_token = GetEnv("HUGGING_FACE_HUB_TOKEN");
+		if (!hub_token.empty()) {
+			return hub_token;
 		}
 	}
 	if (!provider_key.empty()) {
@@ -2649,6 +3140,110 @@ std::string ResolveModel(const ProviderConfig &config, const std::string &model_
 			return azure_deployment;
 		}
 	}
+	if (config.provider == "bedrock") {
+		auto aws_bedrock_model = GetEnv("AWS_BEDROCK_MODEL");
+		if (!aws_bedrock_model.empty()) {
+			return aws_bedrock_model;
+		}
+		auto bedrock_model = GetEnv("BEDROCK_MODEL");
+		if (!bedrock_model.empty()) {
+			return bedrock_model;
+		}
+	}
+	if (config.provider == "cloudflare") {
+		auto cloudflare_workers_ai_model = GetEnv("CLOUDFLARE_WORKERS_AI_MODEL");
+		if (!cloudflare_workers_ai_model.empty()) {
+			return cloudflare_workers_ai_model;
+		}
+	}
+	if (config.provider == "dashscope") {
+		auto qwen_model = GetEnv("QWEN_MODEL");
+		if (!qwen_model.empty()) {
+			return qwen_model;
+		}
+	}
+	if (config.provider == "hunyuan") {
+		auto tencent_hunyuan_model = GetEnv("TENCENT_HUNYUAN_MODEL");
+		if (!tencent_hunyuan_model.empty()) {
+			return tencent_hunyuan_model;
+		}
+	}
+	if (config.provider == "moonshot") {
+		auto kimi_model = GetEnv("KIMI_MODEL");
+		if (!kimi_model.empty()) {
+			return kimi_model;
+		}
+	}
+	if (config.provider == "minimax") {
+		auto mini_max_model = GetEnv("MINI_MAX_MODEL");
+		if (!mini_max_model.empty()) {
+			return mini_max_model;
+		}
+	}
+	if (config.provider == "nebius") {
+		auto token_factory_model = GetEnv("TOKEN_FACTORY_MODEL");
+		if (!token_factory_model.empty()) {
+			return token_factory_model;
+		}
+	}
+	if (config.provider == "qianfan") {
+		auto baidu_qianfan_model = GetEnv("BAIDU_QIANFAN_MODEL");
+		if (!baidu_qianfan_model.empty()) {
+			return baidu_qianfan_model;
+		}
+		auto baidu_model = GetEnv("BAIDU_MODEL");
+		if (!baidu_model.empty()) {
+			return baidu_model;
+		}
+	}
+	if (config.provider == "stepfun") {
+		auto step_model = GetEnv("STEP_MODEL");
+		if (!step_model.empty()) {
+			return step_model;
+		}
+	}
+	if (config.provider == "vercel") {
+		auto ai_gateway_model = GetEnv("AI_GATEWAY_MODEL");
+		if (!ai_gateway_model.empty()) {
+			return ai_gateway_model;
+		}
+		auto vercel_ai_gateway_model = GetEnv("VERCEL_AI_GATEWAY_MODEL");
+		if (!vercel_ai_gateway_model.empty()) {
+			return vercel_ai_gateway_model;
+		}
+	}
+	if (config.provider == "volcengine") {
+		auto ark_model = GetEnv("ARK_MODEL");
+		if (!ark_model.empty()) {
+			return ark_model;
+		}
+		auto doubao_model = GetEnv("DOUBAO_MODEL");
+		if (!doubao_model.empty()) {
+			return doubao_model;
+		}
+	}
+	if (config.provider == "vertex") {
+		auto vertex_ai_model = GetEnv("VERTEX_AI_MODEL");
+		if (!vertex_ai_model.empty()) {
+			return vertex_ai_model;
+		}
+		auto google_vertex_model = GetEnv("GOOGLE_VERTEX_MODEL");
+		if (!google_vertex_model.empty()) {
+			return google_vertex_model;
+		}
+	}
+	if (config.provider == "github") {
+		auto github_models_model = GetEnv("GITHUB_MODELS_MODEL");
+		if (!github_models_model.empty()) {
+			return github_models_model;
+		}
+	}
+	if (config.provider == "huggingface") {
+		auto hf_model = GetEnv("HF_MODEL");
+		if (!hf_model.empty()) {
+			return hf_model;
+		}
+	}
 	if (!provider_model.empty()) {
 		return provider_model;
 	}
@@ -2664,29 +3259,48 @@ std::string ResolveModel(const ProviderConfig &config, const std::string &model_
 	return config.default_model;
 }
 
-ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool require_api_key) {
-	auto config = ProviderDefaults(options.provider);
-	config.base_url = options.base_url.empty()          ? ResolveBaseUrl(config)
-	                  : config.provider == "azure"      ? AzureOpenAIBaseUrl(options.base_url)
-	                  : config.provider == "databricks" ? DatabricksBaseUrl(options.base_url)
-	                  : config.provider == "snowflake"  ? SnowflakeCortexBaseUrl(options.base_url)
-	                                                    : TrimTrailingSlash(options.base_url);
-	config.api_key = options.api_key.empty() ? ResolveApiKey(config) : options.api_key;
-	config.model = ResolveModel(config, options.model);
+void ValidateResolvedProviderConfig(const ProviderConfig &config, bool require_api_key) {
 	if (require_api_key && config.requires_api_key && config.api_key.empty()) {
 		throw InvalidInputException("AI provider \"%s\" requires an API key. Set %s or DUCKDB_AI_API_KEY.",
 		                            config.provider, config.api_key_env);
 	}
-	if (require_api_key && config.provider == "databricks" && config.base_url.empty()) {
+	if (!require_api_key) {
+		return;
+	}
+	if (config.provider == "cloudflare" && config.base_url.empty()) {
+		throw InvalidInputException("AI provider \"cloudflare\" requires a base URL. Set duckdb_ai_base_url, "
+		                            "CLOUDFLARE_BASE_URL, CLOUDFLARE_WORKERS_AI_BASE_URL, or "
+		                            "CLOUDFLARE_ACCOUNT_ID.");
+	}
+	if (config.provider == "databricks" && config.base_url.empty()) {
 		throw InvalidInputException(
 		    "AI provider \"databricks\" requires a base URL. Set duckdb_ai_base_url, DATABRICKS_BASE_URL, or "
 		    "DATABRICKS_HOST.");
 	}
-	if (require_api_key && config.provider == "snowflake" && config.base_url.empty()) {
+	if (config.provider == "snowflake" && config.base_url.empty()) {
 		throw InvalidInputException("AI provider \"snowflake\" requires a base URL. Set duckdb_ai_base_url, "
 		                            "SNOWFLAKE_BASE_URL, SNOWFLAKE_ACCOUNT_URL, SNOWFLAKE_HOST, or "
 		                            "SNOWFLAKE_ACCOUNT.");
 	}
+	if (config.provider == "bedrock" && config.base_url.empty()) {
+		throw InvalidInputException("AI provider \"bedrock\" requires a base URL. Set duckdb_ai_base_url, "
+		                            "BEDROCK_BASE_URL, AWS_BEDROCK_BASE_URL, AWS_BEDROCK_REGION, AWS_REGION, or "
+		                            "AWS_DEFAULT_REGION.");
+	}
+	if (config.provider == "vertex" && config.base_url.empty()) {
+		throw InvalidInputException("AI provider \"vertex\" requires a base URL. Set duckdb_ai_base_url, "
+		                            "VERTEX_BASE_URL, VERTEX_AI_BASE_URL, GOOGLE_VERTEX_BASE_URL, or "
+		                            "GOOGLE_CLOUD_PROJECT.");
+	}
+}
+
+ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool require_api_key) {
+	auto config = ProviderDefaults(options.provider);
+	config.base_url = options.base_url.empty() ? ResolveBaseUrl(config)
+	                                           : NormalizeBaseUrlForProvider(config.provider, options.base_url);
+	config.api_key = options.api_key.empty() ? ResolveApiKey(config) : options.api_key;
+	config.model = ResolveModel(config, options.model);
+	ValidateResolvedProviderConfig(config, require_api_key);
 	return config;
 }
 
@@ -2872,33 +3486,9 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 }
 
 std::string EmbeddingDefaultModel(const std::string &provider) {
-	if (provider == "ollama") {
-		return "nomic-embed-text";
-	}
-	if (provider == "openai") {
-		return "text-embedding-3-small";
-	}
-	if (provider == "openrouter") {
-		return "openai/text-embedding-3-small";
-	}
-	if (provider == "azure") {
-		return "text-embedding-3-small";
-	}
-	if (provider == "openai_compatible") {
-		return "text-embedding-3-small";
-	}
-	if (provider == "llamacpp") {
-		// llama-server exposes /v1/embeddings when started with --embeddings and uses the loaded model.
-		return "default";
-	}
-	if (provider == "mistral") {
-		return "mistral-embed";
-	}
-	if (provider == "gemini") {
-		return "gemini-embedding-001";
-	}
-	if (provider == "zai") {
-		return "embedding-3";
+	auto spec = FindProviderSpec(provider);
+	if (spec && spec->embedding_model && spec->embedding_model[0] != '\0') {
+		return spec->embedding_model;
 	}
 	throw InvalidInputException("AI provider \"%s\" does not have a configured embedding endpoint. Use provider "
 	                            "\"openai\" with base_url for OpenAI-compatible embedding gateways.",
@@ -2909,21 +3499,20 @@ ProviderConfig ResolveEmbeddingProviderConfig(const CompletionOptions &options, 
 	auto config = ProviderDefaults(options.provider);
 	config.default_model = EmbeddingDefaultModel(config.provider);
 	config.protocol = config.provider == "ollama" ? "ollama_embed" : "openai_embeddings";
-	config.base_url = options.base_url.empty()     ? ResolveBaseUrl(config)
-	                  : config.provider == "azure" ? AzureOpenAIBaseUrl(options.base_url)
-	                                               : TrimTrailingSlash(options.base_url);
+	config.base_url = options.base_url.empty() ? ResolveBaseUrl(config)
+	                                           : NormalizeBaseUrlForProvider(config.provider, options.base_url);
 	config.api_key = options.api_key.empty() ? ResolveApiKey(config) : options.api_key;
 	config.model = ResolveModel(config, options.model);
-	if (require_api_key && config.requires_api_key && config.api_key.empty()) {
-		throw InvalidInputException("AI provider \"%s\" requires an API key. Set %s or DUCKDB_AI_API_KEY.",
-		                            config.provider, config.api_key_env);
-	}
+	ValidateResolvedProviderConfig(config, require_api_key);
 	return config;
 }
 
 std::string EmbeddingEndpoint(const ProviderConfig &config) {
 	if (config.protocol == "ollama_embed") {
 		return config.base_url + "/api/embed";
+	}
+	if (EndsWith(config.base_url, "/embeddings")) {
+		return config.base_url;
 	}
 	return config.base_url + "/embeddings";
 }

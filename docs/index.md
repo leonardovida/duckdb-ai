@@ -24,9 +24,10 @@ LOAD ai;
 
 - [SQL function reference](functions.md): every scalar, aggregate, and table
   function exposed by the extension, with examples and result shapes.
-- [Cookbooks](cookbooks/index.md): practical workflows over local tables,
-  including text enrichment, similarity, Lance-backed semantic search,
-  structured records, and SQL generation.
+- [Cookbooks](cookbooks/index.md): practical workflows over local tables and
+  production inputs, including batch enrichment, source database enrichment,
+  audited outputs, observability, document intake, similarity, Lance-backed
+  semantic search, structured records, and SQL generation.
 - [Provider guides](provider-guides.md): end-to-end examples for Ollama, OpenAI,
   Azure OpenAI, Claude, Gemini, Mistral, Z.ai, DeepSeek, OpenRouter,
   Databricks, Snowflake Cortex REST, OpenAI Privacy Filter, and local
