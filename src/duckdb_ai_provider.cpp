@@ -2712,8 +2712,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"volcengine", "openai_chat", "doubao-seed-2-1-pro-260628", "", "https://ark.cn-beijing.volces.com/api/v3",
 	     "VOLCENGINE_API_KEY", true},
 	    {"xai", "openai_chat", "grok-4", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
-	    {"zai", "openai_chat", "glm-4.7-flash", "embedding-3", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY",
-	     true},
+	    {"zai", "openai_chat", "glm-4.7-flash", "embedding-3", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY", true},
 	};
 	return providers;
 }
