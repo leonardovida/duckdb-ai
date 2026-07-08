@@ -17,6 +17,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
     claude_requests = []
     log_requests = []
     authorization_headers = []
+    openrouter_referer_headers = []
+    openrouter_title_headers = []
     claude_api_keys = []
     claude_versions = []
     retry_completion_attempts = 0
@@ -30,6 +32,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         cls.claude_requests.clear()
         cls.log_requests.clear()
         cls.authorization_headers.clear()
+        cls.openrouter_referer_headers.clear()
+        cls.openrouter_title_headers.clear()
         cls.claude_api_keys.clear()
         cls.claude_versions.clear()
         cls.retry_completion_attempts = 0
@@ -40,6 +44,9 @@ class MockProviderHandler(BaseHTTPRequestHandler):
 
         if self.path.endswith("/chat/completions"):
             self.authorization_headers.append(self.headers.get("authorization"))
+            if self.headers.get("x-openrouter-title") or self.headers.get("http-referer"):
+                self.openrouter_referer_headers.append(self.headers.get("http-referer"))
+                self.openrouter_title_headers.append(self.headers.get("x-openrouter-title"))
             request = json.loads(body)
             self.completion_requests.append(request)
             prompt = request["messages"][-1]["content"]
@@ -232,7 +239,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             API_KEY 'test-key',
             AI_PROVIDER 'snowflake',
             BASE_URL '{base_url}',
-            MODEL 'snowflake-llama-3.3-70b'
+            MODEL 'claude-sonnet-4-5'
         );
         SELECT ai_complete(
             'hello from smoke',
@@ -359,7 +366,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             'hello snowflake',
             secret := 'smoke_snowflake_ai',
             provider := 'snowflake',
-            model := 'snowflake-llama-3.3-70b'
+            model := 'claude-sonnet-4-5'
         ) AS snowflake_completion;
         SELECT result.response, result.error IS NULL
         FROM (SELECT ai_try_complete('try complete smoke', max_tokens := 5) AS result);
@@ -668,6 +675,50 @@ def run_duckdb_invalid_env_log_sample_rate(duckdb_path: Path) -> str:
     return result.stdout
 
 
+def run_duckdb_openrouter_headers(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT ai_complete(
+            'hello openrouter',
+            provider := 'openrouter',
+            model := 'openai/gpt-4o-mini',
+            base_url := '{base_url}'
+        );
+    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENROUTER_API_KEY": "openrouter-test-key",
+            "OPENROUTER_HTTP_REFERER": "https://duckdb-ai.example",
+            "OPENROUTER_X_TITLE": "DuckDB AI smoke",
+        }
+    )
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb openrouter header smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_openrouter_headers(output: str):
+    if "mock completion" not in output:
+        raise AssertionError(f"duckdb openrouter output missing completion\n{output}")
+    if MockProviderHandler.authorization_headers != ["Bearer openrouter-test-key"]:
+        raise AssertionError(
+            f"unexpected OpenRouter authorization headers: {MockProviderHandler.authorization_headers}"
+        )
+    if MockProviderHandler.openrouter_referer_headers != ["https://duckdb-ai.example"]:
+        raise AssertionError(f"unexpected OpenRouter referer headers: {MockProviderHandler.openrouter_referer_headers}")
+    if MockProviderHandler.openrouter_title_headers != ["DuckDB AI smoke"]:
+        raise AssertionError(f"unexpected OpenRouter title headers: {MockProviderHandler.openrouter_title_headers}")
+
+
 def assert_provider_error(output: str):
     required = [
         'AI provider "openai" (openai_chat, model "mock-model") returned HTTP 401',
@@ -773,7 +824,7 @@ def assert_smoke_result(output: str):
         "databricks",
         "snowflake",
         "databricks-llama-4-maverick",
-        "snowflake-llama-3.3-70b",
+        "claude-sonnet-4-5",
         "email [PRIVATE_EMAIL] token [SECRET]",
         "billing, overdue",
         "performance",
@@ -962,7 +1013,7 @@ def assert_smoke_result(output: str):
     if databricks_request["messages"][-1]["content"] != "hello databricks":
         raise AssertionError(f"unexpected Databricks prompt: {databricks_request}")
     snowflake_request = MockProviderHandler.completion_requests[30]
-    if snowflake_request.get("model") != "snowflake-llama-3.3-70b":
+    if snowflake_request.get("model") != "claude-sonnet-4-5":
         raise AssertionError(f"unexpected Snowflake model: {snowflake_request}")
     if snowflake_request["messages"][-1]["content"] != "hello snowflake":
         raise AssertionError(f"unexpected Snowflake prompt: {snowflake_request}")
@@ -1141,9 +1192,7 @@ def assert_smoke_result(output: str):
     )
     if databricks_log is None or databricks_log.get("provider") != "databricks":
         raise AssertionError(f"missing Databricks completion log: {completion_logs}")
-    snowflake_log = next(
-        (request for request in completion_logs if request.get("model") == "snowflake-llama-3.3-70b"), None
-    )
+    snowflake_log = next((request for request in completion_logs if request.get("model") == "claude-sonnet-4-5"), None)
     if snowflake_log is None or snowflake_log.get("provider") != "snowflake":
         raise AssertionError(f"missing Snowflake completion log: {completion_logs}")
     privacy_filter_log = next(
@@ -1209,6 +1258,9 @@ def main():
         MockProviderHandler.reset()
         provider_error_output = run_duckdb_provider_error(args.duckdb, f"http://127.0.0.1:{port}")
         assert_provider_error(provider_error_output)
+        MockProviderHandler.reset()
+        openrouter_headers_output = run_duckdb_openrouter_headers(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_openrouter_headers(openrouter_headers_output)
         MockProviderHandler.reset()
         cache_output = run_duckdb_cache_and_allowlist(args.duckdb, f"http://127.0.0.1:{port}")
         assert_cache_and_allowlist_result(cache_output)

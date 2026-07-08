@@ -825,7 +825,7 @@ Supported provider names and aliases are:
 | `deepseek` | none | Yes | No | `deepseek-v4-flash` |
 | `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-llama-4-maverick` |
-| `snowflake` | none | Yes | No | `snowflake-llama-3.3-70b` |
+| `snowflake` | none | Yes | No | `claude-sonnet-4-5` |
 | `openai_privacy_filter` | `privacy_filter`, `pii_filter`, `opf` | Redaction only | No | `openai/privacy-filter` |
 | `openai_compatible` | `local`, `openai-compatible`, `local_openai`, `local-models`, `local_models` | Yes | Yes | `gpt-4o-mini` |
 | `llamacpp` | `llama.cpp`, `llama-cpp`, `llama_cpp`, `llama-server`, `llama_server` | Yes | Yes | `default` (llama-server answers with its loaded model) |

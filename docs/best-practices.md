@@ -122,7 +122,7 @@ Use request-preview functions in tests, reviews, and provider debugging:
 SELECT ai_completion_request_json(
     'Summarize this.',
     provider := 'snowflake',
-    model := 'snowflake-llama-3.3-70b'
+    model := 'claude-sonnet-4-5'
 );
 
 SELECT ai_embedding_request_json(

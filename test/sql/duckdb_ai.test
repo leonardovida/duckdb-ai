@@ -42,6 +42,11 @@ SELECT provider, model, operation, printf('%.2f', input_token_price_per_million)
 ----
 gemini	gemini-3.5-flash	completion	1.50	9.00
 
+query IIIII
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'mistral' AND model = 'mistral-small-latest';
+----
+mistral	mistral-small-latest	completion	0.15	0.60
+
 query I
 SELECT contains(source_url, 'openrouter.ai') FROM ai_model_prices() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
 ----
@@ -337,7 +342,7 @@ SELECT ai_completion_request_json('hello databricks', provider := 'databricks');
 query I
 SELECT ai_completion_request_json('hello snowflake', provider := 'snowflake');
 ----
-{"model":"snowflake-llama-3.3-70b","messages":[{"role":"user","content":"hello snowflake"}],"temperature":0.1}
+{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello snowflake"}],"temperature":0.1}
 
 statement ok
 SET duckdb_ai_provider = 'openai';
