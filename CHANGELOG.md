@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.3 - 2026-07-08
+
+### Fixed
+
+- Updated Gemini completion defaults and built-in pricing metadata to use the
+  current `gemini-3.5-flash` model from Google's OpenAI-compatible API docs.
+
 ## 0.4.2 - 2026-07-07
 
 ### Fixed
