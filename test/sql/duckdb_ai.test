@@ -118,6 +118,71 @@ SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model"
 true	true	true	true
 
 query I
+SELECT ai_provider_protocol('groq') || '@' || ai_provider_base_url('groq') || '|' || ai_provider_protocol('together') || '@' || ai_provider_base_url('together') || '|' || ai_provider_protocol('fireworks') || '@' || ai_provider_base_url('fireworks') || '|' || ai_provider_protocol('deepinfra') || '@' || ai_provider_base_url('deepinfra');
+----
+openai_chat@https://api.groq.com/openai/v1|openai_chat@https://api.together.xyz/v1|openai_chat@https://api.fireworks.ai/inference/v1|openai_chat@https://api.deepinfra.com/v1/openai
+
+query I
+SELECT ai_provider_protocol('cerebras') || '@' || ai_provider_base_url('cerebras') || '|' || ai_provider_protocol('cohere') || '@' || ai_provider_base_url('cohere') || '|' || ai_provider_protocol('github_models') || '@' || ai_provider_base_url('github_models') || '|' || ai_provider_protocol('hf') || '@' || ai_provider_base_url('hf');
+----
+openai_chat@https://api.cerebras.ai/v1|openai_chat@https://api.cohere.ai/compatibility/v1|openai_chat@https://models.github.ai/inference|openai_chat@https://router.huggingface.co/v1
+
+query I
+SELECT ai_provider_protocol('nvidia_nim') || '@' || ai_provider_base_url('nvidia_nim') || '|' || ai_provider_protocol('perplexity') || '@' || ai_provider_base_url('perplexity') || '|' || ai_provider_protocol('x.ai') || '@' || ai_provider_base_url('x.ai');
+----
+openai_chat@https://integrate.api.nvidia.com/v1|openai_chat@https://api.perplexity.ai|openai_chat@https://api.x.ai/v1
+
+query IIII
+SELECT ai_provider_protocol('aws_bedrock'), ai_provider_base_url('aws_bedrock') = '', ai_provider_protocol('google_vertex'), ai_provider_base_url('google_vertex') = '';
+----
+openai_chat	true	openai_chat	true
+
+query I
+SELECT ai_provider_protocol('qwen') || '@' || ai_provider_base_url('qwen') || '|' || ai_provider_protocol('nebius_token_factory') || '@' || ai_provider_base_url('nebius_token_factory') || '|' || ai_provider_protocol('sambanova_ai') || '@' || ai_provider_base_url('sambanova_ai');
+----
+openai_chat@https://dashscope-intl.aliyuncs.com/compatible-mode/v1|openai_chat@https://api.tokenfactory.nebius.com/v1|openai_chat@https://api.sambanova.ai/v1
+
+query I
+SELECT ai_provider_protocol('workers_ai') || '@' || ai_provider_base_url('workers_ai') || '|' || ai_provider_protocol('silicon_flow') || '@' || ai_provider_base_url('silicon_flow') || '|' || ai_provider_protocol('vercel_ai_gateway') || '@' || ai_provider_base_url('vercel_ai_gateway');
+----
+openai_chat@|openai_chat@https://api.siliconflow.com/v1|openai_chat@https://ai-gateway.vercel.sh/v1
+
+query I
+SELECT ai_provider_protocol('kimi') || '@' || ai_provider_base_url('kimi') || '|' || ai_provider_protocol('ernie') || '@' || ai_provider_base_url('ernie') || '|' || ai_provider_protocol('tencent_hunyuan') || '@' || ai_provider_base_url('tencent_hunyuan');
+----
+openai_chat@https://api.moonshot.ai/v1|openai_chat@https://qianfan.baidubce.com/v2|openai_chat@https://api.hunyuan.cloud.tencent.com/v1
+
+query I
+SELECT ai_provider_protocol('step') || '@' || ai_provider_base_url('step') || '|' || ai_provider_protocol('mini_max') || '@' || ai_provider_base_url('mini_max') || '|' || ai_provider_protocol('poe') || '@' || ai_provider_base_url('poe') || '|' || ai_provider_protocol('doubao') || '@' || ai_provider_base_url('doubao');
+----
+openai_chat@https://api.stepfun.ai/v1|openai_chat@https://api.minimax.io/v1|openai_chat@https://api.poe.com/v1|openai_chat@https://ark.cn-beijing.volces.com/api/v3
+
+query IIII
+SELECT contains(ai_embedding_request_json('duck', provider := 'cohere'), '"model":"embed-v4.0"'), contains(ai_embedding_request_json('duck', provider := 'together'), '"model":"BAAI/bge-base-en-v1.5"'), contains(ai_embedding_request_json('duck', provider := 'deepinfra'), '"model":"BAAI/bge-large-en-v1.5"'), contains(ai_embedding_request_json('duck', provider := 'fireworks'), '"model":"nomic-ai/nomic-embed-text-v1.5"');
+----
+true	true	true	true
+
+query III
+SELECT contains(ai_embedding_request_json('duck', provider := 'workers_ai'), '"model":"@cf/baai/bge-base-en-v1.5"'), contains(ai_embedding_request_json('duck', provider := 'dashscope'), '"model":"text-embedding-v4"'), contains(ai_embedding_request_json('duck', provider := 'vercel'), '"model":"openai/text-embedding-3-small"');
+----
+true	true	true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'groq'), '"model":"openai/gpt-oss-20b"') AND contains(ai_completion_request_json('hello', provider := 'github'), '"model":"openai/gpt-4o"') AND contains(ai_completion_request_json('hello', provider := 'bedrock'), '"model":"amazon.nova-lite-v1:0"') AND contains(ai_completion_request_json('hello', provider := 'vertex'), '"model":"google/gemini-2.5-flash"');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'workers_ai'), '"model":"@cf/meta/llama-3.1-8b-instruct"') AND contains(ai_completion_request_json('hello', provider := 'qwen'), '"model":"qwen-plus"') AND contains(ai_completion_request_json('hello', provider := 'nebius'), '"model":"meta-llama/Meta-Llama-3.1-70B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'sambanova'), '"model":"Meta-Llama-3.3-70B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'siliconflow'), '"model":"Qwen/Qwen2.5-72B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'vercel'), '"model":"openai/gpt-4o-mini"');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k-preview"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hunyuan-turbos-latest"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.7-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M3"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
+----
+true
+
+query I
 SELECT count(*) > 0 FROM duckdb_secret_types() WHERE type = 'duckdb_ai';
 ----
 true

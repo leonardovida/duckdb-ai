@@ -787,6 +787,85 @@ def assert_invalid_env_log_sample_rate(output: str):
         )
 
 
+def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
+    sql = """
+        SELECT ai_provider_base_url('aws_bedrock') AS bedrock_url;
+        SELECT ai_provider_base_url('workers_ai') AS cloudflare_url;
+        SELECT ai_provider_base_url('qwen') AS dashscope_url;
+        SELECT ai_provider_base_url('google_vertex') AS vertex_url;
+        SELECT ai_provider_base_url('kimi') AS moonshot_url;
+        SELECT ai_provider_base_url('ernie') AS qianfan_url;
+        SELECT ai_provider_base_url('tencent_hunyuan') AS hunyuan_url;
+        SELECT ai_provider_base_url('step') AS stepfun_url;
+        SELECT ai_provider_base_url('vercel_ai_gateway') AS vercel_url;
+        SELECT ai_provider_base_url('doubao') AS volcengine_url;
+        SELECT ai_provider_protocol('github_models') AS github_protocol;
+        SELECT ai_provider_protocol('hf') AS huggingface_protocol;
+        SELECT ai_provider_protocol('mini_max') AS minimax_protocol;
+        SELECT ai_provider_protocol('poe_api') AS poe_protocol;
+        SELECT ai_provider_protocol('sambanova_ai') AS sambanova_protocol;
+        SELECT ai_provider_protocol('silicon_flow') AS siliconflow_protocol;
+        SELECT ai_provider_protocol('x.ai') AS xai_protocol;
+        SELECT ai_completion_request_json('hello qwen', provider := 'qwen') AS dashscope_request;
+        SELECT ai_completion_request_json('hello kimi', provider := 'kimi') AS moonshot_request;
+        SELECT ai_completion_request_json('hello ark', provider := 'ark') AS volcengine_request;
+        SELECT ai_embedding_request_json('hello cloudflare', provider := 'workers_ai') AS cloudflare_embedding_request;
+        SELECT ai_completion_request_json('hello nvidia', provider := 'nvidia_nim') AS nvidia_request;
+    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "AWS_REGION": "us-west-2",
+            "CLOUDFLARE_ACCOUNT_ID": "duckdb-ai-account",
+            "GOOGLE_CLOUD_PROJECT": "duckdb-ai-test",
+            "GOOGLE_CLOUD_LOCATION": "us-central1",
+        }
+    )
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb provider metadata smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_provider_metadata(output: str):
+    required = [
+        "https://bedrock-mantle.us-west-2.api.aws/v1",
+        "https://api.cloudflare.com/client/v4/accounts/duckdb-ai-account/ai/v1",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "https://aiplatform.googleapis.com/v1/projects/duckdb-ai-test/locations/us-central1/endpoints/openapi",
+        "https://api.moonshot.ai/v1",
+        "https://qianfan.baidubce.com/v2",
+        "https://api.hunyuan.cloud.tencent.com/v1",
+        "https://api.stepfun.ai/v1",
+        "https://ai-gateway.vercel.sh/v1",
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "github_protocol",
+        "huggingface_protocol",
+        "minimax_protocol",
+        "poe_protocol",
+        "sambanova_protocol",
+        "siliconflow_protocol",
+        "xai_protocol",
+        "openai_chat",
+        '"model":"qwen-plus"',
+        '"model":"kimi-k2.7-code"',
+        '"model":"doubao-seed-2-1-pro-260628"',
+        '"model":"@cf/baai/bge-base-en-v1.5"',
+        '"model":"meta/llama-3.3-70b-instruct"',
+    ]
+    missing = [value for value in required if value not in output]
+    if missing:
+        raise AssertionError(f"provider metadata output missing {missing}\n{output}")
+
+
 def assert_smoke_result(output: str):
     required = [
         "mock completion",
@@ -1250,6 +1329,8 @@ def main():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        provider_metadata_output = run_duckdb_provider_metadata(args.duckdb)
+        assert_provider_metadata(provider_metadata_output)
         output = run_duckdb(args.duckdb, f"http://127.0.0.1:{port}")
         assert_smoke_result(output)
         MockProviderHandler.reset()

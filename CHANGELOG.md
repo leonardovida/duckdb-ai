@@ -7,6 +7,29 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.5 - 2026-07-08
+
+### Added
+
+- Added first-class provider defaults, aliases, and environment-variable
+  handling for Amazon Bedrock, Google Vertex AI, Groq, Together AI, Fireworks
+  AI, DeepInfra, Cerebras, Cohere, GitHub Models, Hugging Face, NVIDIA NIM,
+  Perplexity, xAI, Cloudflare Workers AI, Alibaba Cloud Model Studio /
+  DashScope, Nebius Token Factory, SambaNova Cloud, SiliconFlow, Vercel AI
+  Gateway, Moonshot AI / Kimi, Baidu Qianfan, Tencent Hunyuan, StepFun,
+  MiniMax, Poe, and Volcengine Ark.
+- Added provider request-shape coverage and smoke metadata checks for the
+  expanded OpenAI-compatible provider catalog.
+- Added cookbook docs for production batch enrichment, messy document intake,
+  source database enrichment, audited lakehouse outputs, and AI usage-cost
+  observability.
+
+### Changed
+
+- Centralized provider defaults in one provider catalog so aliases, base URLs,
+  default models, embedding defaults, and required credentials stay aligned
+  across SQL helpers, request builders, docs, and tests.
+
 ## 0.4.3 - 2026-07-08
 
 ### Fixed

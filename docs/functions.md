@@ -819,13 +819,39 @@ Supported provider names and aliases are:
 | `openai` | none | Yes | Yes | `gpt-4o-mini` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
-| `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.5-flash` |
-| `mistral` | none | Yes | Yes | `mistral-small-latest` |
-| `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |
-| `deepseek` | none | Yes | No | `deepseek-v4-flash` |
-| `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
+| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `amazon.nova-lite-v1:0` |
+| `cerebras` | `cerebras_cloud` | Yes | No | `gpt-oss-120b` |
+| `cloudflare` | `workers_ai`, `cloudflare_workers_ai`, `cloudflare_ai` | Yes | Yes | `@cf/meta/llama-3.1-8b-instruct` |
+| `cohere` | `cohere_ai` | Yes | Yes | `command-a-03-2025` |
+| `dashscope` | `qwen`, `alibaba`, `alibaba_model_studio`, `model_studio` | Yes | Yes | `qwen-plus` |
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-llama-4-maverick` |
+| `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct` |
+| `deepseek` | none | Yes | No | `deepseek-v4-flash` |
+| `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/llama-v3p1-8b-instruct` |
+| `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.5-flash` |
+| `github` | `github_models`, `github-models`, `gh_models` | Yes | Yes | `openai/gpt-4o` |
+| `groq` | `groqcloud`, `groq_cloud` | Yes | No | `openai/gpt-oss-20b` |
+| `huggingface` | `hf`, `hugging_face`, `huggingface_hub` | Yes | No | `openai/gpt-oss-120b` |
+| `hunyuan` | `tencent`, `tencent_hunyuan` | Yes | No | `hunyuan-turbos-latest` |
+| `minimax` | `mini_max` | Yes | No | `MiniMax-M3` |
+| `mistral` | none | Yes | Yes | `mistral-small-latest` |
+| `moonshot` | `kimi`, `moonshot_ai`, `kimi_api` | Yes | No | `kimi-k2.7-code` |
+| `nebius` | `nebius_token_factory`, `token_factory` | Yes | No | `meta-llama/Meta-Llama-3.1-70B-Instruct` |
+| `nvidia` | `nvidia_nim`, `nim` | Yes | No | `meta/llama-3.3-70b-instruct` |
+| `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
+| `perplexity` | `pplx` | Yes | No | `sonar` |
+| `poe` | `poe_api` | Yes | No | `GPT-5.4` |
+| `qianfan` | `baidu`, `baidu_qianfan`, `ernie`, `wenxin` | Yes | No | `ernie-4.5-turbo-128k-preview` |
+| `sambanova` | `sambanova_ai`, `samba_nova`, `sambacloud` | Yes | No | `Meta-Llama-3.3-70B-Instruct` |
+| `siliconflow` | `silicon_flow` | Yes | No | `Qwen/Qwen2.5-72B-Instruct` |
 | `snowflake` | none | Yes | No | `claude-sonnet-4-5` |
+| `stepfun` | `step`, `step_fun` | Yes | No | `step-3.7-flash` |
+| `together` | `together_ai` | Yes | Yes | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
+| `vercel` | `vercel_ai_gateway`, `vercel_gateway`, `ai_gateway` | Yes | Yes | `openai/gpt-4o-mini` |
+| `vertex` | `google_vertex`, `vertex_ai`, `gcp_vertex` | Yes | No | `google/gemini-2.5-flash` |
+| `volcengine` | `volcano_engine`, `volcengine_ark`, `doubao`, `ark` | Yes | No | `doubao-seed-2-1-pro-260628` |
+| `xai` | `x.ai`, `x-ai`, `grok` | Yes | No | `grok-4` |
+| `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |
 | `openai_privacy_filter` | `privacy_filter`, `pii_filter`, `opf` | Redaction only | No | `openai/privacy-filter` |
 | `openai_compatible` | `local`, `openai-compatible`, `local_openai`, `local-models`, `local_models` | Yes | Yes | `gpt-4o-mini` |
 | `llamacpp` | `llama.cpp`, `llama-cpp`, `llama_cpp`, `llama-server`, `llama_server` | Yes | Yes | `default` (llama-server answers with its loaded model) |
