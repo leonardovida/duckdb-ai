@@ -819,7 +819,7 @@ Supported provider names and aliases are:
 | `openai` | none | Yes | Yes | `gpt-4o-mini` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
-| `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-2.5-flash` |
+| `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.5-flash` |
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
 | `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |
 | `deepseek` | none | Yes | No | `deepseek-v4-flash` |

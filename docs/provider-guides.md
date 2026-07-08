@@ -37,7 +37,7 @@ LIMIT 1;
 | `openai` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
 | `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
 | `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
-| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-2.5-flash`; embeddings use `gemini-embedding-001` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
+| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.5-flash`; embeddings use `gemini-embedding-001` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
 | `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4.7-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://api.z.ai/api/paas/v4`. |
 | `deepseek` | OpenAI-compatible chat | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
@@ -210,7 +210,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET gemini_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'gemini',
-    MODEL 'gemini-2.5-flash'
+    MODEL 'gemini-3.5-flash'
 );
 
 SELECT ai_complete(

@@ -37,6 +37,11 @@ SELECT provider, model, operation, printf('%.2f', input_token_price_per_million)
 ----
 openrouter	openai/gpt-4o-mini	completion	0.15	0.60
 
+query IIIII
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'gemini' AND model = 'gemini-3.5-flash';
+----
+gemini	gemini-3.5-flash	completion	1.50	9.00
+
 query I
 SELECT contains(source_url, 'openrouter.ai') FROM ai_model_prices() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
 ----
@@ -102,10 +107,10 @@ SELECT ai_provider_protocol('gemini') || '@' || ai_provider_base_url('gemini') |
 ----
 openai_chat@https://generativelanguage.googleapis.com/v1beta/openai|openai_chat@https://api.mistral.ai/v1|openai_chat@https://api.z.ai/api/paas/v4|openai_chat@https://api.deepseek.com|openai_chat@https://openrouter.ai/api/v1
 
-query III
-SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model":"glm-4.7-flash"'), contains(ai_completion_request_json('hello', provider := 'deepseek'), '"model":"deepseek-v4-flash"'), contains(ai_embedding_request_json('duck', provider := 'gemini'), '"model":"gemini-embedding-001"');
+query IIII
+SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model":"glm-4.7-flash"'), contains(ai_completion_request_json('hello', provider := 'deepseek'), '"model":"deepseek-v4-flash"'), contains(ai_completion_request_json('hello', provider := 'gemini'), '"model":"gemini-3.5-flash"'), contains(ai_embedding_request_json('duck', provider := 'gemini'), '"model":"gemini-embedding-001"');
 ----
-true	true	true
+true	true	true	true
 
 query I
 SELECT count(*) > 0 FROM duckdb_secret_types() WHERE type = 'duckdb_ai';
