@@ -398,10 +398,12 @@ SELECT ai_complete_json(
 FROM documents;
 ```
 
-OpenAI-compatible prompt caching generally needs a stable prefix of at least
-1,024 tokens before cached-token discounts appear. Anthropic cache reads and
-writes are exposed in `ai_usage()` as `cached_prompt_tokens` and
-`cache_creation_prompt_tokens`.
+OpenAI receives a stable `prompt_cache_key`, Anthropic receives ephemeral cache
+control on the system prompt, and xAI receives the matching `x-grok-conv-id`
+header for chat-completion calls. OpenAI-compatible prompt caching generally
+needs a stable prefix of at least 1,024 tokens before cached-token discounts
+appear. Anthropic cache reads and writes are exposed in `ai_usage()` as
+`cached_prompt_tokens` and `cache_creation_prompt_tokens`.
 
 This is separate from the extension's exact-response cache. Use `cache := true`
 when identical prompts may repeat inside or across chunks in the same database

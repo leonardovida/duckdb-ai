@@ -69,7 +69,7 @@ LIMIT 1;
 | `vercel` / `vercel_ai_gateway` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `AI_GATEWAY_API_KEY`, `VERCEL_AI_GATEWAY_API_KEY`, or `VERCEL_OIDC_TOKEN` | Defaults to `https://ai-gateway.vercel.sh/v1`. |
 | `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-2.5-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
 | `volcengine` / `doubao` | OpenAI-compatible chat | `doubao-seed-2-1-pro-260628` | `VOLCENGINE_API_KEY`, `ARK_API_KEY`, or `DOUBAO_API_KEY` | Defaults to `https://ark.cn-beijing.volces.com/api/v3`. |
-| `xai` / `grok` | OpenAI-compatible chat | `grok-4` | `XAI_API_KEY` | Defaults to `https://api.x.ai/v1`. |
+| `xai` / `grok` | OpenAI-compatible chat | `grok-4.5` | `XAI_API_KEY` | Defaults to `https://api.x.ai/v1`. |
 | `openai_privacy_filter` | Dedicated redaction endpoint | `openai/privacy-filter` | Optional `OPENAI_PRIVACY_FILTER_API_KEY` | Defaults to `http://localhost:8080` and calls `POST /redact`. |
 | `openai_compatible` / `local` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | Optional `OPENAI_COMPATIBLE_API_KEY` | Requires `BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL`. |
 | `llamacpp` / `llama.cpp` | OpenAI-compatible chat and embeddings | `default` (llama-server answers with its loaded model) | Optional `LLAMACPP_API_KEY` (`llama-server --api-key`) | Defaults to `http://localhost:8080/v1`. Embeddings need `llama-server --embeddings`. |
@@ -941,7 +941,7 @@ SELECT ai_complete(
 Aliases `github`, `github_models`, `github-models`, and `gh_models` resolve to
 the same provider.
 
-## xAI
+## xAI / SpaceXAI
 
 ```sh
 export XAI_API_KEY='...'
@@ -954,7 +954,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET xai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'xai',
-    MODEL 'grok-4'
+    MODEL 'grok-4.5'
 );
 
 SELECT ai_complete(

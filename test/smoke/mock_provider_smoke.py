@@ -19,6 +19,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
     authorization_headers = []
     openrouter_referer_headers = []
     openrouter_title_headers = []
+    xai_conversation_headers = []
     claude_api_keys = []
     claude_versions = []
     retry_completion_attempts = 0
@@ -34,6 +35,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         cls.authorization_headers.clear()
         cls.openrouter_referer_headers.clear()
         cls.openrouter_title_headers.clear()
+        cls.xai_conversation_headers.clear()
         cls.claude_api_keys.clear()
         cls.claude_versions.clear()
         cls.retry_completion_attempts = 0
@@ -47,6 +49,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             if self.headers.get("x-openrouter-title") or self.headers.get("http-referer"):
                 self.openrouter_referer_headers.append(self.headers.get("http-referer"))
                 self.openrouter_title_headers.append(self.headers.get("x-openrouter-title"))
+            if self.headers.get("x-grok-conv-id"):
+                self.xai_conversation_headers.append(self.headers.get("x-grok-conv-id"))
             request = json.loads(body)
             self.completion_requests.append(request)
             prompt = request["messages"][-1]["content"]
@@ -719,6 +723,50 @@ def assert_openrouter_headers(output: str):
         raise AssertionError(f"unexpected OpenRouter title headers: {MockProviderHandler.openrouter_title_headers}")
 
 
+def run_duckdb_xai_prompt_cache_header(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT ai_complete(
+            'hello xai',
+            provider := 'xai',
+            base_url := '{base_url}',
+            system_prompt := 'answer briefly',
+            prompt_cache := true
+        );
+    """
+    env = os.environ.copy()
+    env["XAI_API_KEY"] = "xai-test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb xAI prompt-cache header smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_xai_prompt_cache_header(output: str):
+    if "mock completion" not in output:
+        raise AssertionError(f"duckdb xAI output missing completion\n{output}")
+    if MockProviderHandler.authorization_headers != ["Bearer xai-test-key"]:
+        raise AssertionError(f"unexpected xAI authorization headers: {MockProviderHandler.authorization_headers}")
+    if len(MockProviderHandler.completion_requests) != 1:
+        raise AssertionError(f"expected one xAI completion request, got {MockProviderHandler.completion_requests}")
+    request = MockProviderHandler.completion_requests[0]
+    if request["model"] != "grok-4.5":
+        raise AssertionError(f"unexpected xAI default model: {request}")
+    if "prompt_cache_key" in request:
+        raise AssertionError(f"xAI prompt cache key should be sent as a header, not request JSON: {request}")
+    if len(MockProviderHandler.xai_conversation_headers) != 1:
+        raise AssertionError(f"missing xAI conversation header: {MockProviderHandler.xai_conversation_headers}")
+    if not MockProviderHandler.xai_conversation_headers[0].startswith("duckdb-ai-"):
+        raise AssertionError(f"unexpected xAI conversation header: {MockProviderHandler.xai_conversation_headers}")
+
+
 def assert_provider_error(output: str):
     required = [
         'AI provider "openai" (openai_chat, model "mock-model") returned HTTP 401',
@@ -1342,6 +1390,9 @@ def main():
         MockProviderHandler.reset()
         openrouter_headers_output = run_duckdb_openrouter_headers(args.duckdb, f"http://127.0.0.1:{port}")
         assert_openrouter_headers(openrouter_headers_output)
+        MockProviderHandler.reset()
+        xai_header_output = run_duckdb_xai_prompt_cache_header(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_xai_prompt_cache_header(xai_header_output)
         MockProviderHandler.reset()
         cache_output = run_duckdb_cache_and_allowlist(args.duckdb, f"http://127.0.0.1:{port}")
         assert_cache_and_allowlist_result(cache_output)

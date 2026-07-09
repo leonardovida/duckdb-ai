@@ -7,6 +7,14 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.6 - 2026-07-09
+
+### Fixed
+
+- Updated the xAI / SpaceXAI provider default to `grok-4.5`, added built-in
+  `grok-4.5` pricing metadata, and sent `prompt_cache := true` hints through
+  the documented `x-grok-conv-id` chat-completions header.
+
 ## 0.4.5 - 2026-07-08
 
 ### Added
