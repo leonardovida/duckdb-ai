@@ -47,6 +47,11 @@ SELECT provider, model, operation, printf('%.2f', input_token_price_per_million)
 ----
 mistral	mistral-small-latest	completion	0.15	0.60
 
+query IIIII
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'xai' AND model = 'grok-4.5';
+----
+xai	grok-4.5	completion	2.00	6.00
+
 query I
 SELECT contains(source_url, 'openrouter.ai') FROM ai_model_prices() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
 ----
@@ -179,6 +184,11 @@ true
 
 query I
 SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k-preview"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hunyuan-turbos-latest"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.7-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M3"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'x.ai'), '"model":"grok-4.5"');
 ----
 true
 

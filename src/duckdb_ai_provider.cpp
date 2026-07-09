@@ -837,6 +837,8 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "live model feed pricing", "2026-06-30"},
 	    {"openrouter", "z-ai/glm-4.7-flash", "completion", 0.06, 0.40, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
+	    {"xai", "grok-4.5", "completion", 2.00, 6.00, "https://docs.x.ai/developers/models",
+	     "standard text token pricing", "2026-07-09"},
 	};
 	return prices;
 }
@@ -2711,7 +2713,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"vertex", "openai_chat", "google/gemini-2.5-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
 	    {"volcengine", "openai_chat", "doubao-seed-2-1-pro-260628", "", "https://ark.cn-beijing.volces.com/api/v3",
 	     "VOLCENGINE_API_KEY", true},
-	    {"xai", "openai_chat", "grok-4", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
+	    {"xai", "openai_chat", "grok-4.5", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
 	    {"zai", "openai_chat", "glm-4.7-flash", "embedding-3", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY", true},
 	};
 	return providers;
@@ -3645,7 +3647,7 @@ std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config,
 	return results;
 }
 
-std::vector<std::string> RequestHeaders(const ProviderConfig &config) {
+std::vector<std::string> RequestHeaders(const ProviderConfig &config, const CompletionOptions &options) {
 	std::vector<std::string> headers {"Content-Type: application/json", "User-Agent: " + ExtensionUserAgent()};
 	if (config.protocol == "anthropic_messages") {
 		headers.push_back("anthropic-version: 2023-06-01");
@@ -3669,6 +3671,12 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config) {
 		}
 		if (!title.empty()) {
 			headers.push_back("X-OpenRouter-Title: " + title);
+		}
+	}
+	if (config.provider == "xai" && PromptCacheEnabled(options)) {
+		auto prompt_cache_key = PromptCacheKey(config, options);
+		if (!prompt_cache_key.empty()) {
+			headers.push_back("x-grok-conv-id: " + prompt_cache_key);
 		}
 	}
 	return headers;
@@ -4277,7 +4285,7 @@ HttpResponse FetchProviderResponse(const std::string &operation, const ProviderC
                                    const CompletionOptions &options, int64_t estimated_tokens,
                                    std::string &cache_key_out) {
 	if (!ResponseCacheEnabled(options)) {
-		return ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, estimated_tokens);
+		return ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens);
 	}
 	auto &runtime_state = RuntimeState(options);
 	auto cache_key = ResponseCacheKey(operation, config, endpoint, payload);
@@ -4292,7 +4300,8 @@ HttpResponse FetchProviderResponse(const std::string &operation, const ProviderC
 		return WaitForPendingCachedResponse(runtime_state, cache_key, pending, options);
 	}
 	try {
-		auto fresh_response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, estimated_tokens);
+		auto fresh_response =
+		    ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens);
 		if (fresh_response.status >= 200 && fresh_response.status < 300) {
 			StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
 		}
@@ -4318,7 +4327,7 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 	}
 	HttpResponse response;
 	try {
-		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config), options, total_tokens);
+		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, total_tokens);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {

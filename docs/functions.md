@@ -770,7 +770,7 @@ not from direct API key arguments.
 | `cache` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables the current database instance's in-memory response cache for successful provider responses. |
 | `cache_ttl_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Optional response-cache expiration from 0 to 31536000 seconds. `0` means entries do not expire by age. The `DUCKDB_AI_CACHE_TTL_SECONDS` environment variable sets the default. |
 | `cache_max_entries` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | Maximum in-memory response-cache entries from 0 to 1000000. `0` disables response-cache storage. The `DUCKDB_AI_CACHE_MAX_ENTRIES` environment variable sets the default. |
-| `prompt_cache` | `BOOLEAN` | Completion, task wrappers, and SQL assistant | Emits provider-side prompt-cache controls where supported. OpenAI requests include a stable `prompt_cache_key`; Anthropic requests attach ephemeral cache control to the system prompt. The `DUCKDB_AI_PROMPT_CACHE` environment variable enables this by default. |
+| `prompt_cache` | `BOOLEAN` | Completion, task wrappers, and SQL assistant | Emits provider-side prompt-cache controls where supported. OpenAI requests include a stable `prompt_cache_key`; Anthropic requests attach ephemeral cache control to the system prompt; xAI requests send `x-grok-conv-id`. The `DUCKDB_AI_PROMPT_CACHE` environment variable enables this by default. |
 | `allowed_hosts` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Comma-separated provider/logging host allowlist. Entries may be hostnames, `host:port`, full URLs, `*.example.com`, or `*`. |
 | `on_error` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Error handling mode: `fail`, `null`, or `capture`. `capture` is used by `ai_try_complete`; scalar/table functions that cannot return an error field use `NULL` behavior. |
 | `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Compatibility alias: `true` maps to `on_error := 'fail'`, `false` maps to `on_error := 'null'`. |
@@ -850,7 +850,7 @@ Supported provider names and aliases are:
 | `vercel` | `vercel_ai_gateway`, `vercel_gateway`, `ai_gateway` | Yes | Yes | `openai/gpt-4o-mini` |
 | `vertex` | `google_vertex`, `vertex_ai`, `gcp_vertex` | Yes | No | `google/gemini-2.5-flash` |
 | `volcengine` | `volcano_engine`, `volcengine_ark`, `doubao`, `ark` | Yes | No | `doubao-seed-2-1-pro-260628` |
-| `xai` | `x.ai`, `x-ai`, `grok` | Yes | No | `grok-4` |
+| `xai` | `x.ai`, `x-ai`, `grok` | Yes | No | `grok-4.5` |
 | `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |
 | `openai_privacy_filter` | `privacy_filter`, `pii_filter`, `opf` | Redaction only | No | `openai/privacy-filter` |
 | `openai_compatible` | `local`, `openai-compatible`, `local_openai`, `local-models`, `local_models` | Yes | Yes | `gpt-4o-mini` |

@@ -531,7 +531,8 @@ SELECT * FROM ai_clear_cache();
 Provider-side prompt caching is separate and reduces cost on repeated static
 prefixes (system prompts, schemas). Enable it with `prompt_cache := true` or
 `SET duckdb_ai_prompt_cache = true`; the extension sends the matching cache
-hints for OpenAI and Anthropic and reports cached token counts in `ai_usage()`.
+hints for OpenAI, Anthropic, and xAI and reports cached token counts in
+`ai_usage()`.
 
 Use `ai_recommended_batch_size` with a small provider-limit table to pick a
 starting batch size before running a large enrichment:
