@@ -7,6 +7,18 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.7 - 2026-07-10
+
+### Fixed
+
+- Updated Cloudflare Workers AI, Tencent TokenHub / Hunyuan, and Baidu Qianfan
+  defaults to current supported endpoints and models while retaining legacy
+  Hunyuan environment-variable aliases for existing configurations.
+- Sent completion limits through `max_completion_tokens` for OpenAI,
+  Cloudflare Workers AI, and Snowflake Cortex requests, matching their current
+  public APIs while preserving the SQL `max_tokens` option.
+- Removed retired Claude 3.5 Haiku built-in pricing metadata.
+
 ## 0.4.6 - 2026-07-09
 
 ### Fixed

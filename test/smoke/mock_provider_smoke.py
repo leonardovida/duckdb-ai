@@ -370,7 +370,8 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             'hello snowflake',
             secret := 'smoke_snowflake_ai',
             provider := 'snowflake',
-            model := 'claude-sonnet-4-5'
+            model := 'claude-sonnet-4-5',
+            max_tokens := 19
         ) AS snowflake_completion;
         SELECT result.response, result.error IS NULL
         FROM (SELECT ai_try_complete('try complete smoke', max_tokens := 5) AS result);
@@ -891,7 +892,7 @@ def assert_provider_metadata(output: str):
         "https://aiplatform.googleapis.com/v1/projects/duckdb-ai-test/locations/us-central1/endpoints/openapi",
         "https://api.moonshot.ai/v1",
         "https://qianfan.baidubce.com/v2",
-        "https://api.hunyuan.cloud.tencent.com/v1",
+        "https://tokenhub.tencentmaas.com/v1",
         "https://api.stepfun.ai/v1",
         "https://ai-gateway.vercel.sh/v1",
         "https://ark.cn-beijing.volces.com/api/v3",
@@ -999,8 +1000,8 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected completion prompt: {completion_request}")
     if completion_request.get("temperature") != 0.2:
         raise AssertionError(f"unexpected completion temperature: {completion_request}")
-    if completion_request.get("max_tokens") != 17:
-        raise AssertionError(f"unexpected completion max_tokens: {completion_request}")
+    if completion_request.get("max_completion_tokens") != 17 or "max_tokens" in completion_request:
+        raise AssertionError(f"unexpected completion token limit: {completion_request}")
 
     structured_request = MockProviderHandler.completion_requests[1]
     response_format = structured_request.get("response_format")
@@ -1142,13 +1143,15 @@ def assert_smoke_result(output: str):
     snowflake_request = MockProviderHandler.completion_requests[30]
     if snowflake_request.get("model") != "claude-sonnet-4-5":
         raise AssertionError(f"unexpected Snowflake model: {snowflake_request}")
+    if snowflake_request.get("max_completion_tokens") != 19 or "max_tokens" in snowflake_request:
+        raise AssertionError(f"unexpected Snowflake token limit: {snowflake_request}")
     if snowflake_request["messages"][-1]["content"] != "hello snowflake":
         raise AssertionError(f"unexpected Snowflake prompt: {snowflake_request}")
     try_complete_request = MockProviderHandler.completion_requests[31]
     if try_complete_request["messages"][-1]["content"] != "try complete smoke":
         raise AssertionError(f"unexpected try completion prompt: {try_complete_request}")
-    if try_complete_request.get("max_tokens") != 5:
-        raise AssertionError(f"unexpected try completion max tokens: {try_complete_request}")
+    if try_complete_request.get("max_completion_tokens") != 5 or "max_tokens" in try_complete_request:
+        raise AssertionError(f"unexpected try completion token limit: {try_complete_request}")
     extract_record_request = MockProviderHandler.completion_requests[32]
     if extract_record_request["messages"][-1]["content"] != "return scalar record JSON object":
         raise AssertionError(f"unexpected extract record prompt: {extract_record_request}")

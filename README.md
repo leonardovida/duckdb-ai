@@ -332,7 +332,7 @@ End-to-end setup examples for each provider are in
 | `github` / `github_models` | GitHub Models for prototyping and CI workflows | `https://models.github.ai/inference`; `GITHUB_TOKEN` |
 | `groq` | GroqCloud low-latency hosted open-weight models | `https://api.groq.com/openai/v1`; `GROQ_API_KEY` |
 | `huggingface` / `hf` | Hugging Face Inference Providers router | `https://router.huggingface.co/v1`; `HF_TOKEN` |
-| `hunyuan` / `tencent_hunyuan` | Tencent Hunyuan OpenAI-compatible models | `https://api.hunyuan.cloud.tencent.com/v1`; `HUNYUAN_API_KEY` |
+| `hunyuan` / `tencent_hunyuan` | Tencent TokenHub Hy3 models | `https://tokenhub.tencentmaas.com/v1`; `HUNYUAN_API_KEY` or `TOKENHUB_API_KEY` |
 | `minimax` | MiniMax OpenAI-compatible models | `https://api.minimax.io/v1`; `MINIMAX_API_KEY` |
 | `mistral` | Mistral chat models | `https://api.mistral.ai/v1`; `MISTRAL_API_KEY` |
 | `moonshot` / `kimi` | Moonshot AI / Kimi models | `https://api.moonshot.ai/v1`; `MOONSHOT_API_KEY` or `KIMI_API_KEY` |
