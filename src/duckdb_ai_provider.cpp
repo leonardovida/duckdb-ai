@@ -811,8 +811,6 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "2026-06-30"},
 	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
-	    {"anthropic", "claude-3-5-haiku-latest", "completion", 0.80, 4.00,
-	     "https://platform.claude.com/docs/en/about-claude/pricing", "legacy Haiku 3.5 pricing", "2026-06-30"},
 	    {"anthropic", "claude-sonnet-4-5", "completion", 3.00, 15.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
 	    {"gemini", "gemini-3.5-flash", "completion", 1.50, 9.00, "https://ai.google.dev/gemini-api/docs/pricing",
@@ -2661,7 +2659,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     true},
 	    {"bedrock", "openai_chat", "amazon.nova-lite-v1:0", "", "", "AWS_BEDROCK_API_KEY", true},
 	    {"cerebras", "openai_chat", "gpt-oss-120b", "", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", true},
-	    {"cloudflare", "openai_chat", "@cf/meta/llama-3.1-8b-instruct", "@cf/baai/bge-base-en-v1.5", "",
+	    {"cloudflare", "openai_chat", "@cf/zai-org/glm-4.7-flash", "@cf/baai/bge-base-en-v1.5", "",
 	     "CLOUDFLARE_API_KEY", true},
 	    {"cohere", "openai_chat", "command-a-03-2025", "embed-v4.0", "https://api.cohere.ai/compatibility/v1",
 	     "COHERE_API_KEY", true},
@@ -2679,8 +2677,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "https://models.github.ai/inference", "GITHUB_TOKEN", true},
 	    {"groq", "openai_chat", "openai/gpt-oss-20b", "", "https://api.groq.com/openai/v1", "GROQ_API_KEY", true},
 	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
-	    {"hunyuan", "openai_chat", "hunyuan-turbos-latest", "", "https://api.hunyuan.cloud.tencent.com/v1",
-	     "HUNYUAN_API_KEY", true},
+	    {"hunyuan", "openai_chat", "hy3", "", "https://tokenhub.tencentmaas.com/v1", "HUNYUAN_API_KEY", true},
 	    {"llamacpp", "openai_chat", "default", "default", "http://localhost:8080/v1", "LLAMACPP_API_KEY", false},
 	    {"minimax", "openai_chat", "MiniMax-M3", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
 	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
@@ -2698,8 +2695,8 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", true},
 	    {"perplexity", "openai_chat", "sonar", "", "https://api.perplexity.ai", "PERPLEXITY_API_KEY", true},
 	    {"poe", "openai_chat", "GPT-5.4", "", "https://api.poe.com/v1", "POE_API_KEY", true},
-	    {"qianfan", "openai_chat", "ernie-4.5-turbo-128k-preview", "", "https://qianfan.baidubce.com/v2",
-	     "QIANFAN_API_KEY", true},
+	    {"qianfan", "openai_chat", "ernie-4.5-turbo-128k", "", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY",
+	     true},
 	    {"sambanova", "openai_chat", "Meta-Llama-3.3-70B-Instruct", "", "https://api.sambanova.ai/v1",
 	     "SAMBANOVA_API_KEY", true},
 	    {"siliconflow", "openai_chat", "Qwen/Qwen2.5-72B-Instruct", "", "https://api.siliconflow.com/v1",
@@ -2801,6 +2798,14 @@ std::string ResolveBaseUrl(const ProviderConfig &config) {
 		}
 	}
 	if (config.provider == "hunyuan") {
+		auto tencent_tokenhub_base_url = GetEnv("TENCENT_TOKENHUB_BASE_URL");
+		if (!tencent_tokenhub_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, tencent_tokenhub_base_url);
+		}
+		auto tokenhub_base_url = GetEnv("TOKENHUB_BASE_URL");
+		if (!tokenhub_base_url.empty()) {
+			return NormalizeBaseUrlForProvider(config.provider, tokenhub_base_url);
+		}
 		auto tencent_hunyuan_base_url = GetEnv("TENCENT_HUNYUAN_BASE_URL");
 		if (!tencent_hunyuan_base_url.empty()) {
 			return NormalizeBaseUrlForProvider(config.provider, tencent_hunyuan_base_url);
@@ -2992,6 +2997,14 @@ std::string ResolveApiKey(const ProviderConfig &config) {
 		}
 	}
 	if (config.provider == "hunyuan") {
+		auto tencent_tokenhub_api_key = GetEnv("TENCENT_TOKENHUB_API_KEY");
+		if (!tencent_tokenhub_api_key.empty()) {
+			return tencent_tokenhub_api_key;
+		}
+		auto tokenhub_api_key = GetEnv("TOKENHUB_API_KEY");
+		if (!tokenhub_api_key.empty()) {
+			return tokenhub_api_key;
+		}
 		auto tencent_hunyuan_api_key = GetEnv("TENCENT_HUNYUAN_API_KEY");
 		if (!tencent_hunyuan_api_key.empty()) {
 			return tencent_hunyuan_api_key;
@@ -3164,6 +3177,10 @@ std::string ResolveModel(const ProviderConfig &config, const std::string &model_
 		}
 	}
 	if (config.provider == "hunyuan") {
+		auto tokenhub_model = GetEnv("TOKENHUB_MODEL");
+		if (!tokenhub_model.empty()) {
+			return tokenhub_model;
+		}
 		auto tencent_hunyuan_model = GetEnv("TENCENT_HUNYUAN_MODEL");
 		if (!tencent_hunyuan_model.empty()) {
 			return tencent_hunyuan_model;
@@ -3470,7 +3487,11 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt) +
 	               ",\"temperature\":" + JsonDouble(temperature);
 	if (options.has_max_tokens) {
-		payload += ",\"max_tokens\":" + std::to_string(options.max_tokens);
+		if (config.provider == "openai" || config.provider == "cloudflare" || config.provider == "snowflake") {
+			payload += ",\"max_completion_tokens\":" + std::to_string(options.max_tokens);
+		} else {
+			payload += ",\"max_tokens\":" + std::to_string(options.max_tokens);
+		}
 	}
 	auto response_format = OpenAIResponseFormatJson(options);
 	if (!response_format.empty()) {

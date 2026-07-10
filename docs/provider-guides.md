@@ -39,7 +39,7 @@ LIMIT 1;
 | `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
 | `bedrock` | OpenAI-compatible chat | `amazon.nova-lite-v1:0` | `AWS_BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `BEDROCK_API_KEY` | Set `AWS_REGION`, `AWS_BEDROCK_REGION`, `AWS_BEDROCK_BASE_URL`, or secret `BASE_URL`. |
 | `cerebras` | OpenAI-compatible chat | `gpt-oss-120b` | `CEREBRAS_API_KEY` | Defaults to `https://api.cerebras.ai/v1`. |
-| `cloudflare` / `workers_ai` | OpenAI-compatible chat and embeddings | `@cf/meta/llama-3.1-8b-instruct`; embeddings use `@cf/baai/bge-base-en-v1.5` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_API_TOKEN`, or `CLOUDFLARE_AUTH_TOKEN` | Derives the endpoint from `CLOUDFLARE_ACCOUNT_ID`, or accepts `CLOUDFLARE_WORKERS_AI_BASE_URL`, `CLOUDFLARE_AI_BASE_URL`, or secret `BASE_URL`. |
+| `cloudflare` / `workers_ai` | OpenAI-compatible chat and embeddings | `@cf/zai-org/glm-4.7-flash`; embeddings use `@cf/baai/bge-base-en-v1.5` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_API_TOKEN`, or `CLOUDFLARE_AUTH_TOKEN` | Derives the endpoint from `CLOUDFLARE_ACCOUNT_ID`, or accepts `CLOUDFLARE_WORKERS_AI_BASE_URL`, `CLOUDFLARE_AI_BASE_URL`, or secret `BASE_URL`. |
 | `cohere` | OpenAI-compatible chat and embeddings | `command-a-03-2025`; embeddings use `embed-v4.0` | `COHERE_API_KEY` | Defaults to `https://api.cohere.ai/compatibility/v1`. |
 | `dashscope` / `qwen` | OpenAI-compatible chat and embeddings | `qwen-plus`; embeddings use `text-embedding-v4` | `DASHSCOPE_API_KEY`, `ALIBABA_API_KEY`, or `QWEN_API_KEY` | Defaults to `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; override with a workspace-specific base URL when needed. |
 | `deepinfra` | OpenAI-compatible chat and embeddings | `meta-llama/Meta-Llama-3.1-8B-Instruct`; embeddings use `BAAI/bge-large-en-v1.5` | `DEEPINFRA_API_KEY` | Defaults to `https://api.deepinfra.com/v1/openai`. |
@@ -48,7 +48,7 @@ LIMIT 1;
 | `github` / `github_models` | OpenAI-compatible chat and embeddings | `openai/gpt-4o`; embeddings use `openai/text-embedding-3-small` | `GITHUB_TOKEN`, `GITHUB_MODELS_TOKEN`, or `GITHUB_API_KEY` | Defaults to `https://models.github.ai/inference`. |
 | `groq` | OpenAI-compatible chat | `openai/gpt-oss-20b` | `GROQ_API_KEY` | Defaults to `https://api.groq.com/openai/v1`. |
 | `huggingface` / `hf` | OpenAI-compatible chat | `openai/gpt-oss-120b` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | Defaults to `https://router.huggingface.co/v1`. |
-| `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat | `hunyuan-turbos-latest` | `HUNYUAN_API_KEY` or `TENCENT_HUNYUAN_API_KEY` | Defaults to `https://api.hunyuan.cloud.tencent.com/v1`. |
+| `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat through Tencent TokenHub | `hy3` | `HUNYUAN_API_KEY`, `TOKENHUB_API_KEY`, or `TENCENT_TOKENHUB_API_KEY` | Defaults to `https://tokenhub.tencentmaas.com/v1`; `TOKENHUB_BASE_URL` selects another TokenHub region. |
 | `minimax` | OpenAI-compatible chat | `MiniMax-M3` | `MINIMAX_API_KEY` or `MINI_MAX_API_KEY` | Defaults to `https://api.minimax.io/v1`. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
 | `moonshot` / `kimi` | OpenAI-compatible chat | `kimi-k2.7-code` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Defaults to `https://api.moonshot.ai/v1`. |
@@ -61,7 +61,7 @@ LIMIT 1;
 | `snowflake` | OpenAI-compatible chat | `claude-sonnet-4-5` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
 | `perplexity` | OpenAI-compatible chat | `sonar` | `PERPLEXITY_API_KEY` | Defaults to `https://api.perplexity.ai`. |
 | `poe` | OpenAI-compatible chat | `GPT-5.4` | `POE_API_KEY` | Defaults to `https://api.poe.com/v1`. |
-| `qianfan` / `ernie` | OpenAI-compatible chat | `ernie-4.5-turbo-128k-preview` | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY`, or `BAIDU_API_KEY` | Defaults to `https://qianfan.baidubce.com/v2`. |
+| `qianfan` / `ernie` | OpenAI-compatible chat | `ernie-4.5-turbo-128k` | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY`, or `BAIDU_API_KEY` | Defaults to `https://qianfan.baidubce.com/v2`. |
 | `sambanova` | OpenAI-compatible chat | `Meta-Llama-3.3-70B-Instruct` | `SAMBANOVA_API_KEY` | Defaults to `https://api.sambanova.ai/v1`. |
 | `siliconflow` | OpenAI-compatible chat | `Qwen/Qwen2.5-72B-Instruct` | `SILICONFLOW_API_KEY` | Defaults to `https://api.siliconflow.com/v1`. |
 | `together` | OpenAI-compatible chat and embeddings | `meta-llama/Llama-3.3-70B-Instruct-Turbo`; embeddings use `BAAI/bge-base-en-v1.5` | `TOGETHER_API_KEY` | Defaults to `https://api.together.xyz/v1`. |
@@ -555,7 +555,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET cloudflare_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'workers_ai',
-    MODEL '@cf/meta/llama-3.1-8b-instruct'
+    MODEL '@cf/zai-org/glm-4.7-flash'
 );
 
 SELECT ai_complete(
@@ -753,7 +753,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET qianfan_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'ernie',
-    MODEL 'ernie-4.5-turbo-128k-preview'
+    MODEL 'ernie-4.5-turbo-128k'
 );
 
 SELECT ai_complete(
@@ -765,10 +765,10 @@ SELECT ai_complete(
 Aliases `qianfan`, `baidu`, `baidu_qianfan`, `ernie`, and `wenxin` resolve to
 the same provider. Embeddings are not configured for this provider.
 
-## Tencent Hunyuan
+## Tencent TokenHub / Hunyuan
 
 ```sh
-export HUNYUAN_API_KEY='...'
+export TOKENHUB_API_KEY='...'
 ./build/release/duckdb
 ```
 
@@ -778,7 +778,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET hunyuan_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'tencent_hunyuan',
-    MODEL 'hunyuan-turbos-latest'
+    MODEL 'hy3'
 );
 
 SELECT ai_complete(
@@ -788,7 +788,10 @@ SELECT ai_complete(
 ```
 
 Aliases `hunyuan`, `tencent`, and `tencent_hunyuan` resolve to the same
-provider. Embeddings are not configured for this provider.
+provider. `HUNYUAN_API_KEY` and `TENCENT_HUNYUAN_API_KEY` remain accepted for
+existing configurations. Set `TOKENHUB_BASE_URL` for the international or a
+custom regional TokenHub endpoint. Embeddings are not configured for this
+provider.
 
 ## StepFun
 
