@@ -42,12 +42,12 @@ jobs:
       CC: gcc-10
       CXX: g++-10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -76,19 +76,19 @@ jobs:
       CXX: g++
       TIDY_THREADS: 4
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: .github/workflows/MainDistributionPipeline.yml
 
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.os }}-tidy-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'extension_config.cmake', 'vcpkg.json', 'src/**', 'duckdb/CMakeLists.txt', 'extension-ci-tools/makefiles/duckdb_extension.Makefile') }}
@@ -123,13 +123,13 @@ jobs:
       CC: gcc
       CXX: g++
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
 
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ runner.os }}-build-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'extension_config.cmake', 'vcpkg.json', 'src/**', 'test/**', 'duckdb/CMakeLists.txt', 'extension-ci-tools/makefiles/duckdb_extension.Makefile') }}
