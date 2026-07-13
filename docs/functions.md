@@ -30,6 +30,7 @@ FROM ai_usage();
 | `ai_embedding_request_json(text[, model[, provider]])` | Scalar | Returns the embedding request JSON without making a network call. |
 | `ai_similarity(left_text, right_text[, model[, provider]])` | Scalar | Embeds two strings and returns cosine similarity. |
 | `ai_rerank(query, candidate[, model[, provider]])` | Scalar | Uses a completion model to score candidate relevance from `0` to `1`. |
+| `ai_score(input, criteria[, model[, provider]])` | Scalar | Scores how well input satisfies criteria from `0` to `1`. |
 | `ai_summarize(text[, model[, provider]])` | Scalar | Summarizes text with a completion model. |
 | `ai_sentiment(text[, model[, provider]])` | Scalar | Classifies text as positive, neutral, or negative. |
 | `ai_fix_grammar(text[, model[, provider]])` | Scalar | Rewrites text with corrected grammar, spelling, and punctuation. |
@@ -37,10 +38,16 @@ FROM ai_usage();
 | `ai_translate(text, target_language[, model[, provider]])` | Scalar | Translates text to the target language. |
 | `ai_classify(text, labels[, model[, provider]])` | Scalar | Chooses one label from a comma-separated `VARCHAR` or `VARCHAR[]` label list. |
 | `ai_classify_labels(text, labels[, model[, provider]])` | Scalar | Chooses zero or more labels from a comma-separated `VARCHAR` or `VARCHAR[]` label list. |
+| `ai_classify_result(text, labels[, ...])` | Scalar | Returns multi-label classification as `STRUCT(value, error, metadata)`. |
+| `ai_classify_optimized(text, artifact[, ...])` | Scalar | Uses a local centroid classifier and falls back to an LLM below the configured confidence margin. |
 | `ai_extract(text, instruction[, model[, provider]])` | Scalar | Extracts requested information from text. |
 | `ai_filter(text, predicate[, model[, provider]])` | Scalar | Evaluates a natural-language predicate and returns `BOOLEAN`. |
 | `ai_agg(text, instruction[, model[, provider]])` | Aggregate | Runs one completion over grouped text values and an instruction. |
 | `ai_summarize_agg(text[, model[, provider]])` | Aggregate | Summarizes grouped text values. |
+| `ai_build_classifier(text, labels[, ...])` | Aggregate | Builds an experimental persisted classifier artifact for cost-optimized single-label classification. |
+| `ai_generate_chunks(text[, ...])` | Table | Splits text into deterministic Unicode-aware fixed or recursive chunks. |
+| `ai_prep_search(text[, ...])` | Table | Produces retrieval and context-enriched embedding chunks for RAG. |
+| `ai_parse_document(content, mime_type, parser_profile[, ...])` | Table | Calls a normalized remote document parser without bundling PDF/OCR dependencies. |
 | `ai_sql(question[, schema_context[, model[, provider]]])` | Scalar | Generates one read-only DuckDB `SELECT` statement. |
 | `ai_query_data(question[, schema_context[, model[, provider]]])` | Table | Generates one read-only `SELECT` at bind time and executes it as a subquery. |
 | `ai_schema_prompt([include_tables])` | Table | Returns deterministic local catalog context for prompting SQL models. |
@@ -53,9 +60,14 @@ FROM ai_usage();
 | `ai_provider_base_url(provider)` | Scalar | Returns the default base URL for a supported provider. |
 | `ai_provider_protocol(provider)` | Scalar | Returns the internal provider protocol. |
 | `ai_usage()` | Table | Returns recent per-database AI usage events. |
+| `ai_usage_summary()` | Table | Returns query-level calls, batches, retries, cache hits, cost, and dropped-event counters. |
 | `ai_clear_usage()` | Table | Clears the per-database usage event buffer. |
 | `ai_clear_cache()` | Table | Clears per-database in-memory response and generated-SQL caches. |
 | `ai_secrets()` | Table | Lists configured `duckdb_ai` secrets with credentials redacted. |
+| `ai_models()` | Table | Lists safe external-model metadata and validation status. |
+| `ai_provision_endpoint(profile[, ...])` | Table | Dry-runs or explicitly submits guarded asynchronous endpoint provisioning. |
+| `ai_endpoint_status(operation_id)` | Table | Returns the current normalized endpoint operation status. |
+| `ai_deprovision_endpoint(profile)` | Table | Explicitly submits asynchronous endpoint deprovisioning. |
 | `ai_model_prices()` | Table | Returns the built-in provider/model pricing catalog. |
 
 ## Completion functions
@@ -260,6 +272,24 @@ LIMIT 10;
 
 Result: `DOUBLE`
 
+#### `ai_score(input, criteria[, model[, provider]])`
+
+Description: Uses a completion model with a strict JSON Schema containing one
+numeric `score` to evaluate how well `input` satisfies `criteria`. Values
+outside the inclusive `[0, 1]` range and malformed responses are rejected.
+
+Example:
+
+```sql
+SELECT ai_score(
+    ticket_body,
+    'contains a reproducible production-impacting database issue'
+) AS escalation_score
+FROM support_tickets;
+```
+
+Result: `DOUBLE`
+
 ## Task wrappers
 
 #### `ai_summarize(text[, model[, provider]])`
@@ -336,7 +366,9 @@ Result: `VARCHAR`
 
 Description: Classifies text into exactly one label from `labels`. `labels` can
 be a comma-separated `VARCHAR` or a `VARCHAR[]`; use `VARCHAR[]` when labels may
-contain commas.
+contain commas. Use constant `label_descriptions :=`, `instructions :=`, and
+`examples :=` strings to add label semantics, global rules, and few-shot
+examples without changing the return type.
 
 Example:
 
@@ -344,6 +376,14 @@ Example:
 SELECT ai_classify('invoice overdue', 'billing, support');
 
 SELECT ai_classify('invoice overdue', ['billing, overdue', 'support']);
+
+SELECT ai_classify(
+    'invoice overdue',
+    ['billing', 'support'],
+    label_descriptions := '{"billing":"payments, invoices, or charges","support":"product help"}',
+    instructions := 'Prefer billing when an invoice is explicitly mentioned.',
+    examples := '[{"input":"card charged twice","label":"billing"}]'
+);
 ```
 
 Result: `VARCHAR`
@@ -364,6 +404,54 @@ SELECT ai_classify_labels(
 ```
 
 Result: `VARCHAR[]`
+
+#### `ai_classify_result(text, labels[, model[, provider]])`
+
+Description: Multi-label classification with pipeline-safe diagnostics. It
+always captures provider and parsing failures instead of failing the full
+vector, and returns metadata describing the selected provider and model.
+
+Example:
+
+```sql
+WITH classified AS (
+    SELECT id, ai_classify_result(body, ['billing', 'performance', 'support']) AS result
+    FROM support_tickets
+)
+SELECT id, result.value, result.metadata
+FROM classified
+WHERE result.error IS NULL;
+```
+
+Result: `STRUCT(value VARCHAR[], error VARCHAR, metadata VARCHAR)`
+
+#### `ai_classify_optimized(text, artifact[, ...])`
+
+Description: Experimental single-label classification. The function embeds
+`text`, compares it with the centroids in an `ai_build_classifier()` artifact,
+and returns locally when the best/second-best cosine margin meets the artifact
+threshold. It calls the fallback completion profile only when the artifact is
+unusable, embedding fails, or the margin is too small. Embeddings are packed and
+deduplicated by model options across each DuckDB vector chunk.
+
+Example:
+
+```sql
+SELECT
+    ticket_id,
+    result.value,
+    result.used_fallback,
+    result.metadata
+FROM (
+    SELECT
+        ticket_id,
+        ai_classify_optimized(body, artifact, fallback_profile := 'support_model') AS result
+    FROM support_tickets
+    CROSS JOIN classifier_artifacts
+);
+```
+
+Result: `STRUCT(value VARCHAR, used_fallback BOOLEAN, confidence DOUBLE, error VARCHAR, metadata VARCHAR)`
 
 #### `ai_extract(text, instruction[, model[, provider]])`
 
@@ -395,8 +483,11 @@ Result: `BOOLEAN`
 
 #### `ai_agg(text, instruction[, model[, provider]])`
 
-Description: Collects grouped input text up to `max_context_chars`, then calls
-one completion model with `instruction`.
+Description: Collects all grouped input text. When the input exceeds
+`max_context_chars`, the default `overflow_policy := 'hierarchical'` recursively
+maps chunks to compact evidence and reduces those partials until a final prompt
+fits. No input is silently discarded. Use `overflow_policy := 'error'` when the
+query must fail instead of issuing a request tree.
 
 Example:
 
@@ -410,7 +501,8 @@ Result: `VARCHAR`
 #### `ai_summarize_agg(text[, model[, provider]])`
 
 Description: Convenience wrapper around `ai_agg` with the built-in summarization
-instruction. It collects grouped input text and returns one summary per group.
+instruction. It uses the same hierarchical overflow behavior and returns one
+summary per group.
 
 Example:
 
@@ -421,6 +513,119 @@ GROUP BY customer_id;
 ```
 
 Result: `VARCHAR`
+
+#### `ai_build_classifier(text, labels[, ...])`
+
+Description: Experimental relation-level `MINIMIZE_COST` workflow. The
+aggregate samples up to `sample_size` rows, labels them with the configured task
+model, embeds the successful samples in packed requests, builds one centroid per
+label, and validates on a deterministic held-out subset. The returned versioned
+artifact includes quality, fallback margin, embedding profile, labels, and
+centroids. Version 1 supports single-label classification only.
+
+Example:
+
+```sql
+CREATE TABLE classifier_artifacts AS
+SELECT ai_build_classifier(
+    body,
+    ['billing', 'performance', 'support'],
+    optimization := 'minimize_cost',
+    sample_size := 256,
+    quality_threshold := 0.85,
+    confidence_margin := 0.08,
+    embedding_profile := 'support_embeddings',
+    profile := 'support_model'
+) AS artifact
+FROM support_tickets;
+```
+
+Result: `VARCHAR` containing a versioned JSON classifier artifact, or `NULL`
+when `fail_on_error := false` and training cannot produce a usable artifact.
+
+## RAG and document functions
+
+#### `ai_generate_chunks(input[, ...])`
+
+Description: Local deterministic chunking. `fixed` splits at exact Unicode code
+point counts. `recursive` prefers paragraph, sentence, line, then word
+boundaries. `overlap_percent` is limited to `0` through `50`; offsets are
+zero-based Unicode code points and `end_offset` is exclusive. IDs are stable for
+the same source text, source ID, strategy, size, overlap, and chunk index. Empty
+and `NULL` input return zero rows.
+
+Example:
+
+```sql
+SELECT *
+FROM ai_generate_chunks(
+    '# Introduction' || chr(10) || chr(10) ||
+        'DuckDB is an in-process analytical database.',
+    source_id := 'document-42',
+    chunk_size := 1000,
+    overlap_percent := 10,
+    strategy := 'recursive'
+);
+```
+
+Result columns: `source_id`, `chunk_id`, `chunk_index`, `start_offset`,
+`end_offset`, `chunk_length`, `estimated_tokens`, `chunk`.
+
+#### `ai_prep_search(input[, ...])`
+
+Description: Builds retrieval-ready rows from text or Markdown. It keeps the
+original chunk in `chunk_to_retrieve`, adds title and the active Markdown
+heading to `chunk_to_embed`, preserves page numbers separated by form-feed page
+breaks, and carries JSON metadata. Line-aware recursive boundaries keep
+Markdown table rows intact when a row fits the configured chunk size.
+
+`enrich := false` is fully local and deterministic. `enrich := true` makes one
+model call for concise document-level context and captures a row-level error
+when `fail_on_error := false`.
+
+Example:
+
+```sql
+SELECT *
+FROM ai_prep_search(
+    '# Billing' || chr(10) || chr(10) ||
+        'The invoice was charged twice.',
+    source_id := 'ticket-42',
+    title := 'Duplicate charge',
+    metadata := json_object('uri', '/tickets/42'),
+    chunk_size := 1000,
+    overlap_percent := 10,
+    enrich := false
+);
+```
+
+Result columns: `source_id`, `chunk_id`, `chunk_index`, `chunk_to_retrieve`,
+`chunk_to_embed`, `heading`, `page`, `start_offset`, `end_offset`, `metadata`,
+`error`.
+
+#### `ai_parse_document(content, mime_type, parser_profile[, ...])`
+
+Description: Sends binary content to the optional companion control plane's
+normalized document parser. The core extension performs base64 transport and
+schema normalization only; it does not bundle PDF, Office, OCR, or vendor SDK
+dependencies. For local extraction, use DuckDB's community `pdf` extension and
+pass its Markdown or text output to `ai_prep_search()`.
+
+Example:
+
+```sql
+SELECT *
+FROM ai_parse_document(
+    read_blob('contract.pdf').content,
+    'application/pdf',
+    'document-ai',
+    pages := '1-10',
+    fail_on_error := false
+);
+```
+
+Result columns: `document_id`, `page`, `element_index`, `element_type`, `text`,
+`markdown`, `bbox`, `confidence`, `metadata`, `error`.
 
 ## SQL assistant functions
 
@@ -681,9 +886,32 @@ ORDER BY event_id DESC;
 ```
 
 Result columns: `event_id`, `created_at`, `event`, `function_name`, `query_id`,
-`provider`, `protocol`, `model`, character counts, token counts,
+`operation_id`, `parent_operation_id`, `provider`, `protocol`, `model`, character counts, token counts,
 cached-token counts, elapsed time, retry count, HTTP status, cache hit flag,
 status, error, and estimated cost.
+
+#### `ai_usage_summary()`
+
+Description: Groups the retained usage buffer by `query_id`. `calls` counts
+per-input events, while `batch_count` counts distinct provider request operation
+IDs, so packed embedding execution is visible without losing row-level token and
+error details. The result also includes retries, cache hits, total tokens,
+elapsed time, estimated cost, retained events, and counters for usage or log
+events dropped from bounded buffers.
+
+Example:
+
+```sql
+SELECT query_id, provider, calls, batch_count, retries, cache_hits,
+       estimated_cost_usd, dropped_events
+FROM ai_usage_summary()
+ORDER BY estimated_cost_usd DESC;
+```
+
+Result columns: `query_id`, `provider`, `model`, `calls`, `batch_count`,
+`retries`, `failures`, `cache_hits`, `total_tokens`, `elapsed_ms`,
+`estimated_cost_usd`, `retained_events`, `dropped_events`, `queued_log_events`,
+`dropped_log_events`.
 
 #### `ai_clear_usage()`
 
@@ -702,8 +930,8 @@ Result: one `cleared BOOLEAN` column
 #### `ai_clear_cache()`
 
 Description: Clears the current DuckDB database instance's opt-in in-memory
-response cache and `ai_query_data()` generated-SQL cache, then returns one
-confirmation row.
+response cache, `ai_query_data()` generated-SQL cache, and bounded query-local
+`ai_similarity()` embedding cache, then returns one confirmation row.
 
 Example:
 
@@ -726,8 +954,82 @@ SELECT name, provider, model, base_url, has_api_key
 FROM ai_secrets();
 ```
 
-Result columns: `name`, `provider`, `model`, `base_url`, `scope`,
-`has_api_key`
+Result columns: `name`, `provider`, `model`, `base_url`, `scope`, `storage`,
+`persistent`, `has_api_key`
+
+#### `CREATE EXTERNAL MODEL` and `ai_models()`
+
+Description: `CREATE EXTERNAL MODEL` registers a non-secret model profile in
+DuckDB's local secret catalog. The object stores provider routing, a reference
+to a `TYPE duckdb_ai` credential secret, capabilities, and safe JSON options; it
+never stores API keys. Existing `profile :=` resolution checks external models
+first and then falls back to a credential-secret profile with that name.
+
+Example:
+
+```sql
+CREATE OR REPLACE SECRET azure_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'azure',
+    API_KEY '...'
+);
+
+CREATE OR REPLACE EXTERNAL MODEL support_model
+WITH (
+    provider = 'azure',
+    model = 'gpt-4o',
+    location = 'https://my-resource.openai.azure.com/openai/v1',
+    credential = 'azure_ai',
+    model_type = 'completion',
+    capabilities = 'completion,json_schema',
+    options = '{"max_input_tokens":128000,"max_batch_inputs":512,"input_token_price_per_million":2.5,"output_token_price_per_million":10}'
+);
+
+SELECT ai_complete('Summarize this ticket.', profile := 'support_model');
+SELECT * FROM ai_models();
+```
+
+Embedding profiles can set `max_batch_inputs`, `max_inputs`,
+`max_batch_tokens`, `max_request_bytes`, `context_size` or `max_input_tokens`,
+`embedding_dimensions`, and `native_batch_support` in `options`. Packing uses
+these limits before sending requests and recursively splits provider HTTP 413
+responses. Declared embedding dimensions are validated against provider output.
+Profiles can also set non-negative `input_token_price_per_million` and
+`output_token_price_per_million`; an explicit per-call or session price takes
+precedence.
+
+`ai_models()` result columns: `name`, `provider`, `model`, `location`,
+`credential`, `model_type`, `capabilities`, `options`, `max_batch_inputs`,
+`max_batch_tokens`, `max_request_bytes`, `context_tokens`,
+`embedding_dimensions`, `native_batch_jobs`, input/output token prices,
+`storage`, `persistent`, and `validation_status`.
+
+#### Endpoint control-plane functions
+
+Description: Optional table functions for an external, asynchronous endpoint
+service. Registration and inference never create billable cloud resources.
+`ai_provision_endpoint()` defaults to a local dry run. Submission requires both
+`dry_run := false` and a positive `max_hourly_cost_usd`; the service is expected
+to make operations idempotent and keep cloud credentials server-side.
+
+```sql
+SELECT * FROM ai_provision_endpoint('support_model');
+
+SELECT *
+FROM ai_provision_endpoint(
+    'support_model',
+    dry_run := false,
+    max_hourly_cost_usd := 5.00
+);
+
+SELECT * FROM ai_endpoint_status('operation-id');
+SELECT * FROM ai_deprovision_endpoint('support_model');
+```
+
+Set `DUCKDB_AI_CONTROL_PLANE_URL` for applied operations and optionally
+`DUCKDB_AI_CONTROL_PLANE_TOKEN` for bearer authentication. The normalized result
+columns are `operation_id`, `status`, `endpoint_url`,
+`estimated_hourly_cost_usd`, `action_required`, and `response`.
 
 #### `ai_model_prices()`
 
@@ -808,6 +1110,20 @@ Aggregate functions also accept:
 | `instruction`, `task` | `VARCHAR` | Constant instruction for `ai_agg`. |
 | `separator` | `VARCHAR` | Separator inserted between grouped input values. |
 | `max_context_chars` | `BIGINT` | Maximum grouped text characters sent to the model. |
+| `overflow_policy` | `VARCHAR` | `hierarchical` (default) recursively reduces every input, while `error` rejects groups that exceed `max_context_chars`. |
+
+Classification functions also accept:
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `label_descriptions` | `VARCHAR` | Constant label semantics, commonly encoded as JSON. |
+| `instructions` | `VARCHAR` | Constant global classification rules. |
+| `examples` | `VARCHAR` | Constant few-shot examples, commonly encoded as JSON. |
+
+`ai_build_classifier()` additionally accepts `optimization := 'minimize_cost'`,
+`sample_size`, `quality_threshold`, `confidence_margin`, `embedding_model`,
+`embedding_provider`, and `embedding_profile`. `ai_classify_optimized()` accepts
+`fallback_profile` plus completion options for the uncertain-row fallback.
 
 ## Provider settings and secrets
 
@@ -874,18 +1190,19 @@ highest precedence:
 
 | Setting | Applies to |
 | --- | --- |
-| `duckdb_ai_completion_model` | `ai_complete`, `ai_complete_json`, `ai_complete_record`, `ai_completion_request_json`, `ai_rerank` |
-| `duckdb_ai_task_model` | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_classify_labels`, `ai_extract`, `ai_filter` |
+| `duckdb_ai_completion_model` | `ai_complete`, `ai_complete_json`, `ai_complete_record`, `ai_completion_request_json`, `ai_rerank`, `ai_score` |
+| `duckdb_ai_task_model` | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_classify_labels`, `ai_classify_result`, `ai_extract`, `ai_filter`, classifier labeling and fallback |
 | `duckdb_ai_aggregate_model` | `ai_agg`, `ai_summarize_agg` |
 | `duckdb_ai_sql_assistant_model` | `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` |
-| `duckdb_ai_embedding_model` | `ai_embed`, `ai_embedding_request_json`, `ai_similarity` |
+| `duckdb_ai_embedding_model` | `ai_embed`, `ai_embedding_request_json`, `ai_similarity`, `ai_build_classifier`, `ai_classify_optimized` |
 
 Model resolution order is:
 
 1. Per-call `model := ...`
-2. Matching function-family setting
-3. `duckdb_ai_model`
-4. Provider default model
+2. External model selected through `profile := ...`
+3. Matching function-family setting
+4. `duckdb_ai_model`
+5. Provider default model
 
 Credentials should use environment variables or DuckDB secrets:
 

@@ -943,6 +943,218 @@ SELECT ai_provider_base_url('not-a-provider');
 ----
 Invalid Input Error: Unsupported AI provider "not-a-provider".
 
+# Deterministic Unicode-aware chunking uses code-point offsets and exclusive ends.
+query IIIII
+SELECT chunk_index, start_offset, end_offset, chunk_length, chunk
+FROM ai_generate_chunks('é🙂abc', chunk_size := 2, overlap_percent := 0, strategy := 'fixed')
+ORDER BY chunk_index;
+----
+0	0	2	2	é🙂
+1	2	4	2	ab
+2	4	5	1	c
+
+query IIII
+SELECT chunk_index, start_offset, end_offset, chunk
+FROM ai_generate_chunks('abcdef', chunk_size := 4, overlap_percent := 50, strategy := 'fixed')
+ORDER BY chunk_index;
+----
+0	0	4	abcd
+1	2	6	cdef
+
+query II
+SELECT (SELECT count(*) FROM ai_generate_chunks('')),
+       (SELECT count(*) FROM ai_generate_chunks(NULL));
+----
+0	0
+
+query I
+WITH first AS (
+  SELECT chunk_index, chunk_id FROM ai_generate_chunks('deterministic chunks', chunk_size := 5)
+), second AS (
+  SELECT chunk_index, chunk_id FROM ai_generate_chunks('deterministic chunks', chunk_size := 5)
+)
+SELECT bool_and(first.chunk_id = second.chunk_id)
+FROM first JOIN second USING (chunk_index);
+----
+true
+
+query I
+SELECT
+  (SELECT chunk_id FROM ai_generate_chunks('first revision', source_id := 'document-1') LIMIT 1) <>
+  (SELECT chunk_id FROM ai_generate_chunks('second revision', source_id := 'document-1') LIMIT 1);
+----
+true
+
+statement error
+SELECT * FROM ai_generate_chunks('invalid overlap', overlap_percent := 51);
+----
+Binder Error: overlap_percent must be between 0 and 50
+
+# Local RAG preparation preserves headings, page metadata, table rows, metadata, and row-level error shape.
+query IIII
+WITH chunks AS (
+  SELECT * FROM ai_prep_search(
+    '# Guide' || chr(10) || 'alpha beta gamma' || chr(12) || '# Page 2' || chr(10) || 'delta',
+    source_id := 'guide', title := 'Manual', metadata := '{"kind":"guide"}',
+    chunk_size := 14, overlap_percent := 0
+  )
+)
+SELECT min(page), max(page), bool_and(heading IS NOT NULL),
+       bool_and(metadata::VARCHAR = '{"kind":"guide"}' AND error IS NULL)
+FROM chunks;
+----
+1	2	true	true
+
+query I
+WITH chunks AS (
+  SELECT * FROM ai_prep_search(
+    '# T' || chr(10) || '| a | b |' || chr(10) || '|---|---|' || chr(10) || '| 1 | 2 |',
+    chunk_size := 12, overlap_percent := 0
+  )
+)
+SELECT string_agg(chunk_to_retrieve, '' ORDER BY chunk_index) =
+       '# T' || chr(10) || '| a | b |' || chr(10) || '|---|---|' || chr(10) || '| 1 | 2 |'
+FROM chunks;
+----
+true
+
+# Rich classification options bind without changing the existing return type.
+query I
+SELECT ai_classify('great', ['positive', 'negative'],
+                   label_descriptions := '{"positive":"favorable"}',
+                   instructions := 'Prefer explicit sentiment.',
+                   examples := '[{"input":"excellent","label":"positive"}]',
+                   provider := 'not-a-provider', fail_on_error := false) IS NULL;
+----
+true
+
+query II
+SELECT result.value IS NULL, contains(result.error, 'Unsupported AI provider')
+FROM (SELECT ai_classify_result('great', ['positive', 'negative'], provider := 'not-a-provider') AS result);
+----
+true	true
+
+query I
+SELECT ai_score('DuckDB runs in process', 'describes an embedded database',
+                provider := 'not-a-provider', fail_on_error := false) IS NULL;
+----
+true
+
+# Aggregate overflow is explicit and the experimental optimizer preserves diagnostics.
+statement error
+SELECT ai_agg(x, 'summarize', max_context_chars := 4, overflow_policy := 'error')
+FROM (VALUES ('abcdef')) t(x);
+----
+Invalid Input Error: AI aggregate input has
+
+statement error
+SELECT ai_summarize_agg(x, overflow_policy := 'truncate') FROM (VALUES ('duck')) t(x);
+----
+Binder Error: AI aggregate option "overflow_policy" must be hierarchical or error
+
+query I
+SELECT ai_build_classifier('x' || i::VARCHAR, ['a', 'b'], optimization := 'minimize_cost',
+                           sample_size := 8, provider := 'not-a-provider', fail_on_error := false) IS NULL
+FROM range(8) t(i);
+----
+true
+
+query II
+SELECT result.error IS NOT NULL, contains(result.metadata, 'invalid classifier artifact')
+FROM (SELECT ai_classify_optimized('x', '{}') AS result);
+----
+true	true
+
+query I
+SELECT contains(result.error, 'embedding provider and model are required')
+FROM (
+  SELECT ai_classify_optimized(
+    'x',
+    '{"version":1,"optimization":"minimize_cost","usable":true,"accuracy":0.9,"confidence_margin":0.1,"labels":["a","b"],"centroids":[[1,0],[0,1]],"embedding":{}}'
+  ) AS result
+);
+----
+true
+
+# External model profiles store only safe metadata and provisioning defaults to a local dry run.
+statement error
+CREATE EXTERNAL MODEL duplicate_ai_test_model WITH (
+  provider = 'openai',
+  provider = 'azure',
+  model = 'gpt-profile'
+);
+----
+Duplicate external model option: provider
+
+statement ok
+CREATE EXTERNAL MODEL ai_test_model WITH (
+  provider = 'openai',
+  model = 'gpt-profile',
+  location = 'https://api.openai.com/v1',
+  model_type = 'completion',
+  capabilities = 'completion,json_schema',
+  options = '{"max_input_tokens":128000,"input_token_price_per_million":0.5,"output_token_price_per_million":1.0}'
+);
+
+query IIIIII
+SELECT name, provider, model, location, capabilities, options
+FROM ai_models() WHERE name = 'ai_test_model';
+----
+ai_test_model	openai	gpt-profile	https://api.openai.com/v1	completion,json_schema	{"max_input_tokens":128000,"input_token_price_per_million":0.5,"output_token_price_per_million":1.0}
+
+query IIIIII
+SELECT max_batch_inputs = 512, context_tokens = 128000,
+       input_token_price_per_million = 0.5, output_token_price_per_million = 1.0,
+       native_batch_jobs = false, validation_status = 'valid'
+FROM ai_models() WHERE name = 'ai_test_model';
+----
+true	true	true	true	true	true
+
+query I
+SELECT contains(ai_completion_request_json('hello', profile := 'ai_test_model'), '"model":"gpt-profile"');
+----
+true
+
+statement ok
+SET duckdb_ai_completion_model = 'settings-model';
+
+query II
+SELECT contains(ai_completion_request_json('hello', profile := 'ai_test_model'), '"model":"gpt-profile"'),
+       contains(ai_completion_request_json('hello', profile := 'ai_test_model', model := 'explicit-model'), '"model":"explicit-model"');
+----
+true	true
+
+statement ok
+RESET duckdb_ai_completion_model;
+
+query II
+SELECT status, action_required FROM ai_provision_endpoint('ai_test_model');
+----
+planned	rerun with dry_run := false and an explicit max_hourly_cost_usd ceiling
+
+statement error
+SELECT * FROM ai_provision_endpoint('ai_test_model', dry_run := false);
+----
+Binder Error: ai_provision_endpoint requires max_hourly_cost_usd > 0 when dry_run is false
+
+query I
+SELECT error IS NOT NULL
+FROM ai_parse_document('plain text'::BLOB, 'text/plain', 'documents', fail_on_error := false);
+----
+true
+
+query III
+SELECT bool_and(batch_count <= calls), sum(retries) >= 0,
+       max(dropped_events) = 0 AND max(dropped_log_events) = 0
+FROM ai_usage_summary();
+----
+true	true	true
+
+query I
+SELECT count(*) > 0 FROM ai_usage() WHERE operation_id IS NOT NULL;
+----
+true
+
 # Every ai_* function exposes catalog documentation for duckdb_functions().
 query I
 SELECT count(*)

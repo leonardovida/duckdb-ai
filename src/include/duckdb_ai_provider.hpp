@@ -21,11 +21,26 @@ struct ProviderConfig {
 	bool requires_api_key;
 };
 
+//! Conservative provider limits used to plan embedding batches and expose runtime capabilities.
+struct ProviderCapabilities {
+	std::string provider;
+	std::string protocol;
+	int64_t max_batch_inputs;
+	int64_t max_batch_tokens;
+	int64_t max_request_bytes;
+	int64_t context_tokens;
+	int64_t embedding_dimensions;
+	bool native_batch_jobs;
+};
+
 //! Per-call completion, embedding, retry, rate-limit, logging, and cost-estimation options.
 struct CompletionOptions {
 	std::string model;
 	std::string provider;
 	std::string secret_name;
+	bool explicit_model = false;
+	bool explicit_provider = false;
+	bool explicit_base_url = false;
 	std::string system_prompt;
 	std::string base_url;
 	std::string api_key;
@@ -77,6 +92,9 @@ struct CompletionOptions {
 	std::string response_schema;
 	std::string function_name;
 	std::string query_id;
+	std::string operation_id;
+	std::string parent_operation_id;
+	std::string model_options;
 	ClientContext *client_context = nullptr;
 	void *runtime_state = nullptr;
 };
@@ -116,6 +134,8 @@ struct UsageEvent {
 	std::string event;
 	std::string function_name;
 	std::string query_id;
+	std::string operation_id;
+	std::string parent_operation_id;
 	std::string provider;
 	std::string protocol;
 	std::string model;
@@ -135,6 +155,14 @@ struct UsageEvent {
 	std::string status;
 	std::string error;
 	double estimated_cost_usd;
+};
+
+//! Bounded-buffer statistics exposed through ai_usage_summary().
+struct UsageBufferStats {
+	uint64_t retained_events;
+	uint64_t dropped_events;
+	uint64_t queued_log_events;
+	uint64_t dropped_log_events;
 };
 
 //! Built-in model pricing row exposed through ai_model_prices().
@@ -187,6 +215,10 @@ std::string NormalizeProviderName(const std::string &provider);
 std::string ProviderBaseUrl(const std::string &provider);
 //! Return the provider protocol used for request/response shaping.
 std::string ProviderProtocol(const std::string &provider);
+//! Return conservative execution limits for the resolved provider/model.
+ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options);
+//! Apply safe pricing metadata stored in an external model's JSON options.
+void ApplyModelProfileOptions(CompletionOptions &options);
 //! Return a local approximate token count used by ai_count_tokens() and token-aware pacing.
 int64_t EstimateTokenCount(const std::string &input);
 //! Build a completion request payload without making a network call.
@@ -209,6 +241,10 @@ EmbeddingResult Embed(const std::string &input, const std::string &model, const 
 EmbeddingResult Embed(const std::string &input, const CompletionOptions &options);
 //! Execute a batched embedding request from a full option set.
 std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, const CompletionOptions &options);
+//! Record an embedding served by the query-local similarity cache.
+void RecordEmbeddingCacheHit(const std::string &input, int64_t dimensions, const CompletionOptions &options);
+//! POST a JSON control-plane request to DUCKDB_AI_CONTROL_PLANE_URL.
+std::string ControlPlaneRequest(const std::string &path, const std::string &payload, const CompletionOptions &options);
 //! Return the effective max_concurrent_requests value from options or env.
 int64_t EffectiveMaxConcurrentRequests(const CompletionOptions &options);
 //! Initialize provider runtime dependencies such as libcurl.
@@ -219,6 +255,10 @@ void AttachProviderRuntimeState(CompletionOptions &options, ClientContext &conte
 std::vector<UsageEvent> UsageEvents();
 //! Return a snapshot of the bounded per-database usage buffer.
 std::vector<UsageEvent> UsageEvents(ClientContext &context);
+//! Return bounded usage/log buffer statistics.
+UsageBufferStats UsageStats();
+//! Return per-database bounded usage/log buffer statistics.
+UsageBufferStats UsageStats(ClientContext &context);
 //! Clear the in-process usage buffer.
 void ClearUsageEvents();
 //! Clear the per-database usage buffer.

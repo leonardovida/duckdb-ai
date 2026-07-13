@@ -39,7 +39,13 @@ One extension covers both ends of the spectrum:
 - Generate valid JSON, typed DuckDB columns, or per-row `STRUCT` values from
   model output, validated against a JSON Schema.
 - Create embeddings (batched automatically per chunk), compare text with cosine
-  similarity, and rerank candidates.
+  similarity with distinct-value deduplication, and rerank candidates.
+- Prepare RAG data with deterministic Unicode-aware chunks, Markdown heading
+  context, page metadata, and optional model enrichment.
+- Register safe external-model profiles that reference credential secrets, with
+  optional guarded endpoint provisioning through a separate control plane.
+- Build an experimental relation-level classifier that uses local embedding
+  centroids and falls back to an LLM only for uncertain rows.
 - Ask questions about local tables and generate read-only DuckDB `SELECT`
   statements — generated SQL is parser-validated before it runs.
 - Route model calls across local Ollama, hosted providers, and
@@ -216,6 +222,33 @@ FROM support_tickets AS left_ticket
 JOIN support_tickets AS right_ticket
     ON left_ticket.ticket_id < right_ticket.ticket_id
 ORDER BY similarity DESC;
+```
+
+Prepare Markdown for retrieval and embedding:
+
+```sql
+SELECT chunk_id, chunk_to_retrieve, chunk_to_embed, heading, page
+FROM ai_prep_search(
+    '# Billing' || chr(10) || 'The invoice was charged twice.',
+    source_id := 'ticket-42',
+    title := 'Duplicate charge',
+    chunk_size := 1000,
+    overlap_percent := 10
+);
+```
+
+Register a reusable model profile without putting credentials in the model
+object:
+
+```sql
+CREATE EXTERNAL MODEL support_model WITH (
+    provider = 'openai',
+    model = 'gpt-4o-mini',
+    credential = 'openai_ai',
+    capabilities = 'completion,json_schema'
+);
+
+SELECT ai_complete('Summarize this ticket.', profile := 'support_model');
 ```
 
 Create typed columns from one prompt:

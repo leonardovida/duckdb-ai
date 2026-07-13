@@ -40,6 +40,7 @@ The affected state includes:
 
 - `ai_usage()` and `ai_clear_usage()`,
 - opt-in response cache entries used by `cache := true` or `duckdb_ai_cache`,
+- bounded query-local embeddings used to deduplicate `ai_similarity()` inputs,
 - generated SQL cache entries for successful `ai_query_data()` binds,
 - `duckdb_ai_max_concurrent_requests`,
 - `duckdb_ai_min_request_interval_ms`, and
@@ -48,9 +49,10 @@ The affected state includes:
 ## Intra-chunk provider concurrency
 
 Row-wise provider scalar functions prepare row inputs, options, and secrets on
-the DuckDB execution thread, then run provider work in a bounded worker pool for
-the current vector chunk. The DuckDB result vectors are filled after worker
-completion on the execution thread.
+the DuckDB execution thread, then submit provider work to a bounded executor
+owned by the current DuckDB database instance. Worker threads persist across
+vector chunks instead of being created once per vector. The DuckDB result
+vectors are filled after worker completion on the execution thread.
 
 This applies to:
 
@@ -68,8 +70,39 @@ provider rate limiter still controls outbound request pacing.
 Configured worker caps must be between 0 and 64; larger values are rejected
 instead of being silently clamped.
 
-Aggregate functions and SQL-assistant table functions perform one provider call
-per group or invocation and do not need intra-chunk fan-out.
+SQL-assistant table functions perform one provider call per invocation.
+Aggregate functions use one request for groups that fit `max_context_chars` and
+a bounded parallel map/reduce request tree for larger groups.
+
+## Embedding request packing
+
+`ai_embed()`, `ai_similarity()`, classifier training, and optimized
+classification pack embedding inputs by provider/model option group. A request
+is closed when the configured input count, estimated token count, or request
+byte limit would be exceeded. External model `options` can override these
+limits; conservative built-in defaults apply otherwise.
+
+`ai_similarity()` deduplicates both sides of every row, keeps a bounded
+query-local embedding cache across DuckDB vector chunks, embeds each distinct
+value once, and computes cosine similarity locally. Its request count therefore
+scales with packed distinct values rather than two HTTP requests per row. The
+query cache is capped at 8 MiB and the database keeps at most eight recent query
+caches; `ai_clear_cache()` clears it explicitly. Query-cache hits appear in
+`ai_usage_summary()` without increasing `batch_count`.
+
+When a provider rejects a multi-input embedding request with HTTP 413 or a
+recognized payload/context-size error, the extension recursively bisects that
+request. A single input that exceeds an external model's declared context or
+byte limit fails explicitly.
+
+## Context-safe aggregate reduction
+
+`ai_agg()` and `ai_summarize_agg()` never truncate grouped input. Groups within
+`max_context_chars` use one final request. Larger groups are split on UTF-8-safe
+boundaries, mapped concurrently into compact evidence, packed, and recursively
+reduced until one final request fits. Every child uses the parent query's
+operation tree for usage attribution. Set `overflow_policy := 'error'` to reject
+an oversized group before any provider call.
 
 ## Cancellation and retries
 
@@ -81,6 +114,12 @@ Retries are disabled by default. When enabled with `retry_count` or
 `duckdb_ai_retry_count`, retryable HTTP failures use exponential backoff with
 jitter. HTTP `Retry-After` headers on provider responses take precedence over
 the configured backoff.
+
+Usage events keep one `operation_id` for all input events produced by a packed
+request. Hierarchical aggregate children additionally carry a
+`parent_operation_id`; retries retain the same operation ID and increment the
+event's retry count. `ai_usage_summary()` exposes both row-event calls and
+distinct request batches, plus bounded-buffer drop counters.
 
 ## HTTP connection behavior
 
@@ -96,6 +135,15 @@ connect timeout defaults to the smaller of 10 seconds and the total timeout. Set
 
 Provider redirects are not followed. This avoids forwarding authorization or
 API-key headers to an unexpected redirect target.
+
+Provider and usage-log destinations must use `http` or `https`. URLs containing
+embedded credentials or raw control characters are rejected before libcurl is
+called. The same control-character check applies to generated HTTP headers.
+
+Provider and usage-log response bodies are limited to 64 MiB by default to
+prevent an untrusted endpoint from growing an unbounded in-memory buffer. Set
+`DUCKDB_AI_MAX_RESPONSE_BYTES` to a positive byte count, up to 1 GiB, when a
+large batched embedding response requires a different bound.
 
 `CURLOPT_NOSIGNAL` is enabled so DuckDB host processes are not exposed to
 libcurl signal behavior during DNS or timeout handling.
@@ -126,7 +174,23 @@ The maximum number of cached entries defaults to `1024`. Set
 response-cache storage.
 
 `ai_query_data()` also keeps a small in-memory generated-SQL cache for successful
-binds. `ai_clear_cache()` clears both caches.
+binds. `ai_clear_cache()` clears the response, generated-SQL, and similarity
+query caches.
+
+## Deterministic performance benchmark
+
+The local benchmark uses a threaded mock embedding endpoint and reports request
+count, wall time, peak DuckDB thread count, peak resident memory, and dropped
+usage events for 1,000 and 10,000 rows. It also derives a provider cost estimate
+from mock token usage at a fixed price:
+
+```sh
+python3 test/benchmarks/ai_runtime_benchmark.py
+```
+
+It covers unique `ai_embed()` inputs and repeated `ai_similarity()` inputs. The
+latter uses 20 distinct values at both row counts, making a regression from
+query-level distinct-value scaling directly visible in `http_requests`.
 
 ## Egress allowlisting
 
@@ -157,3 +221,5 @@ embedding arrays, `ai_complete_json()` validation, and
 
 `ai_complete_json()` and `ai_complete_record()` intentionally implement a
 documented JSON Schema subset rather than full JSON Schema draft parity.
+Schema `pattern` checks use RE2-compatible regular expressions so validation
+has bounded-time matching behavior; constructs unsupported by RE2 are rejected.

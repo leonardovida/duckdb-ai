@@ -2,6 +2,7 @@
 
 #include "ai_extension.hpp"
 #include "duckdb_ai_provider.hpp"
+#include "yyjson.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -15,6 +16,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/parser/parser_extension.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
@@ -37,11 +39,13 @@
 #include <cerrno>
 #include <cctype>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <exception>
-#include <future>
+#include <functional>
+#include <iomanip>
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -58,6 +62,8 @@ namespace {
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr idx_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr size_t MAX_PROMPT_QUERY_CACHE_ENTRIES = 1024;
+constexpr size_t MAX_SIMILARITY_QUERY_CACHES = 8;
+constexpr size_t MAX_SIMILARITY_QUERY_CACHE_BYTES = 8 * 1024 * 1024;
 constexpr int64_t MAX_SQL_FIX_ATTEMPTS = 5;
 std::atomic<uint64_t> NEXT_QUERY_ID {1};
 
@@ -65,19 +71,21 @@ std::atomic<uint64_t> NEXT_QUERY_ID {1};
 // ABI-specific (std::string layout differs per standard library), so only enforce it on the
 // toolchains where the expected values are known instead of breaking every other build.
 #if defined(__APPLE__)
-static_assert(sizeof(duckdb_ai::CompletionOptions) == 608 || sizeof(duckdb_ai::CompletionOptions) == 728,
+static_assert(sizeof(duckdb_ai::CompletionOptions) == 688 || sizeof(duckdb_ai::CompletionOptions) == 808,
               "Update CompletionOptionsEqual when CompletionOptions fields change");
 #endif
 
 bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duckdb_ai::CompletionOptions &right) {
+	// Request operation IDs intentionally do not affect batching or provider configuration equality.
 	return left.model == right.model && left.provider == right.provider && left.secret_name == right.secret_name &&
-	       left.system_prompt == right.system_prompt && left.base_url == right.base_url &&
-	       left.api_key == right.api_key && left.has_temperature == right.has_temperature &&
-	       left.temperature == right.temperature && left.has_max_tokens == right.has_max_tokens &&
-	       left.max_tokens == right.max_tokens && left.has_timeout_seconds == right.has_timeout_seconds &&
-	       left.timeout_seconds == right.timeout_seconds && left.has_retry_count == right.has_retry_count &&
-	       left.retry_count == right.retry_count && left.has_retry_backoff_ms == right.has_retry_backoff_ms &&
-	       left.retry_backoff_ms == right.retry_backoff_ms &&
+	       left.explicit_model == right.explicit_model && left.explicit_provider == right.explicit_provider &&
+	       left.explicit_base_url == right.explicit_base_url && left.system_prompt == right.system_prompt &&
+	       left.base_url == right.base_url && left.api_key == right.api_key &&
+	       left.has_temperature == right.has_temperature && left.temperature == right.temperature &&
+	       left.has_max_tokens == right.has_max_tokens && left.max_tokens == right.max_tokens &&
+	       left.has_timeout_seconds == right.has_timeout_seconds && left.timeout_seconds == right.timeout_seconds &&
+	       left.has_retry_count == right.has_retry_count && left.retry_count == right.retry_count &&
+	       left.has_retry_backoff_ms == right.has_retry_backoff_ms && left.retry_backoff_ms == right.retry_backoff_ms &&
 	       left.has_max_concurrent_requests == right.has_max_concurrent_requests &&
 	       left.max_concurrent_requests == right.max_concurrent_requests &&
 	       left.has_min_request_interval_ms == right.has_min_request_interval_ms &&
@@ -104,7 +112,7 @@ bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duck
 	       left.log_sample_rate == right.log_sample_rate && left.fail_on_error == right.fail_on_error &&
 	       left.on_error == right.on_error && left.response_format == right.response_format &&
 	       left.response_schema == right.response_schema && left.function_name == right.function_name &&
-	       left.query_id == right.query_id;
+	       left.query_id == right.query_id && left.model_options == right.model_options;
 }
 
 void AddTableColumns(vector<LogicalType> &return_types, vector<string> &names,
@@ -130,6 +138,243 @@ struct AiUsageScanData : public GlobalTableFunctionState {
 	vector<duckdb_ai::UsageEvent> events;
 };
 
+struct AiUsageSummaryRow {
+	std::string query_id;
+	std::string provider;
+	std::string model;
+	uint64_t calls = 0;
+	uint64_t retries = 0;
+	uint64_t failures = 0;
+	uint64_t cache_hits = 0;
+	std::set<std::string> operation_ids;
+	int64_t total_tokens = 0;
+	int64_t elapsed_ms = 0;
+	double estimated_cost_usd = 0;
+};
+
+struct AiUsageSummaryScanData : public GlobalTableFunctionState {
+	idx_t offset = 0;
+	vector<AiUsageSummaryRow> rows;
+	duckdb_ai::UsageBufferStats stats;
+};
+
+struct AiTextChunk {
+	std::string source_id;
+	std::string chunk_id;
+	idx_t chunk_index;
+	idx_t start_offset;
+	idx_t end_offset;
+	std::string text;
+	std::string heading;
+	idx_t page;
+};
+
+struct AiChunkBindData : public FunctionData {
+	std::string input;
+	std::string source_id;
+	std::string title;
+	std::string metadata;
+	std::string strategy = "recursive";
+	idx_t chunk_size = 1000;
+	double overlap_percent = 10;
+	bool prep_search = false;
+	bool enrich = false;
+	duckdb_ai::CompletionOptions options;
+	vector<AiTextChunk> chunks;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<AiChunkBindData>();
+		result->input = input;
+		result->source_id = source_id;
+		result->title = title;
+		result->metadata = metadata;
+		result->strategy = strategy;
+		result->chunk_size = chunk_size;
+		result->overlap_percent = overlap_percent;
+		result->prep_search = prep_search;
+		result->enrich = enrich;
+		result->options = options;
+		result->chunks = chunks;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<AiChunkBindData>();
+		return input == other.input && source_id == other.source_id && title == other.title &&
+		       metadata == other.metadata && strategy == other.strategy && chunk_size == other.chunk_size &&
+		       overlap_percent == other.overlap_percent && prep_search == other.prep_search && enrich == other.enrich &&
+		       CompletionOptionsEqual(options, other.options);
+	}
+};
+
+struct AiChunkScanData : public GlobalTableFunctionState {
+	idx_t offset = 0;
+	bool prepared = false;
+	std::string document_context;
+	std::string enrichment_error;
+};
+
+struct ExternalModelBindData : public FunctionData {
+	std::string name;
+	std::string provider;
+	std::string model;
+	std::string location;
+	std::string credential;
+	std::string model_type;
+	std::string capabilities;
+	std::string options;
+	bool replace = false;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<ExternalModelBindData>();
+		result->name = name;
+		result->provider = provider;
+		result->model = model;
+		result->location = location;
+		result->credential = credential;
+		result->model_type = model_type;
+		result->capabilities = capabilities;
+		result->options = options;
+		result->replace = replace;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<ExternalModelBindData>();
+		return name == other.name && provider == other.provider && model == other.model && location == other.location &&
+		       credential == other.credential && model_type == other.model_type && capabilities == other.capabilities &&
+		       options == other.options && replace == other.replace;
+	}
+};
+
+enum class ControlPlaneOperation : uint8_t { PROVISION, STATUS, DEPROVISION };
+
+struct ControlPlaneBindData : public FunctionData {
+	explicit ControlPlaneBindData(ControlPlaneOperation operation_p) : operation(operation_p) {
+	}
+
+	ControlPlaneOperation operation;
+	std::string argument;
+	bool dry_run = true;
+	bool has_max_hourly_cost = false;
+	double max_hourly_cost_usd = 0;
+	duckdb_ai::CompletionOptions options;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<ControlPlaneBindData>(operation);
+		result->argument = argument;
+		result->dry_run = dry_run;
+		result->has_max_hourly_cost = has_max_hourly_cost;
+		result->max_hourly_cost_usd = max_hourly_cost_usd;
+		result->options = options;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<ControlPlaneBindData>();
+		return operation == other.operation && argument == other.argument && dry_run == other.dry_run &&
+		       has_max_hourly_cost == other.has_max_hourly_cost && max_hourly_cost_usd == other.max_hourly_cost_usd &&
+		       CompletionOptionsEqual(options, other.options);
+	}
+};
+
+struct DocumentParseBindData : public FunctionData {
+	std::string content;
+	std::string mime_type;
+	std::string parser_profile;
+	std::string pages;
+	duckdb_ai::CompletionOptions options;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<DocumentParseBindData>();
+		result->content = content;
+		result->mime_type = mime_type;
+		result->parser_profile = parser_profile;
+		result->pages = pages;
+		result->options = options;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<DocumentParseBindData>();
+		return content == other.content && mime_type == other.mime_type && parser_profile == other.parser_profile &&
+		       pages == other.pages && CompletionOptionsEqual(options, other.options);
+	}
+};
+
+struct DocumentElement {
+	std::string document_id;
+	int64_t page = -1;
+	int64_t element_index = -1;
+	std::string element_type;
+	std::string text;
+	std::string markdown;
+	std::string bbox;
+	double confidence = 0;
+	bool has_confidence = false;
+	std::string metadata;
+	std::string error;
+};
+
+struct DocumentParseScanData : public GlobalTableFunctionState {
+	idx_t offset = 0;
+	bool loaded = false;
+	vector<DocumentElement> elements;
+};
+
+struct ClassifierBuildBindData : public FunctionData {
+	std::vector<std::string> labels;
+	duckdb_ai::CompletionOptions label_options;
+	duckdb_ai::CompletionOptions embedding_options;
+	idx_t sample_size = 256;
+	double quality_threshold = 0.8;
+	double confidence_margin = 0.05;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<ClassifierBuildBindData>();
+		result->labels = labels;
+		result->label_options = label_options;
+		result->embedding_options = embedding_options;
+		result->sample_size = sample_size;
+		result->quality_threshold = quality_threshold;
+		result->confidence_margin = confidence_margin;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<ClassifierBuildBindData>();
+		return labels == other.labels && CompletionOptionsEqual(label_options, other.label_options) &&
+		       CompletionOptionsEqual(embedding_options, other.embedding_options) && sample_size == other.sample_size &&
+		       quality_threshold == other.quality_threshold && confidence_margin == other.confidence_margin;
+	}
+
+	bool SupportStatementCache() const override {
+		return false;
+	}
+};
+
+struct ClassifierBuildState {
+	idx_t size;
+	idx_t alloc_size;
+	idx_t sample_count;
+	idx_t row_count;
+	char *dataptr;
+};
+
+struct OptimizedClassifierBindData : public FunctionData {
+	duckdb_ai::CompletionOptions fallback_options;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<OptimizedClassifierBindData>();
+		result->fallback_options = fallback_options;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		return CompletionOptionsEqual(fallback_options, other_p.Cast<OptimizedClassifierBindData>().fallback_options);
+	}
+};
+
 struct AiClearUsageScanData : public GlobalTableFunctionState {
 	AiClearUsageScanData() : emitted(false) {
 	}
@@ -148,6 +393,11 @@ struct AiModelPricesScanData : public GlobalTableFunctionState {
 struct AiSecretsScanData : public GlobalTableFunctionState {
 	idx_t offset = 0;
 	vector<SecretEntry> secrets;
+};
+
+struct AiModelsScanData : public GlobalTableFunctionState {
+	idx_t offset = 0;
+	vector<SecretEntry> models;
 };
 
 struct PromptSchemaOptions {
@@ -399,6 +649,9 @@ struct AiTaskBindData : public FunctionData {
 	bool has_provider_arg = false;
 	idx_t provider_index = 0;
 	bool parameter_is_label_list = false;
+	std::string label_descriptions;
+	std::string instructions;
+	std::string examples;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<AiTaskBindData>(task, required_args);
@@ -408,6 +661,9 @@ struct AiTaskBindData : public FunctionData {
 		result->has_provider_arg = has_provider_arg;
 		result->provider_index = provider_index;
 		result->parameter_is_label_list = parameter_is_label_list;
+		result->label_descriptions = label_descriptions;
+		result->instructions = instructions;
+		result->examples = examples;
 		return std::move(result);
 	}
 
@@ -416,7 +672,9 @@ struct AiTaskBindData : public FunctionData {
 		return task == other.task && required_args == other.required_args &&
 		       CompletionOptionsEqual(options, other.options) && has_model_arg == other.has_model_arg &&
 		       model_index == other.model_index && has_provider_arg == other.has_provider_arg &&
-		       provider_index == other.provider_index && parameter_is_label_list == other.parameter_is_label_list;
+		       provider_index == other.provider_index && parameter_is_label_list == other.parameter_is_label_list &&
+		       label_descriptions == other.label_descriptions && instructions == other.instructions &&
+		       examples == other.examples;
 	}
 };
 
@@ -429,6 +687,7 @@ struct AiAggregateBindData : public FunctionData {
 	std::string instruction;
 	std::string separator = "\n---\n";
 	idx_t max_context_chars = 100000;
+	std::string overflow_policy = "hierarchical";
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<AiAggregateBindData>(kind);
@@ -436,6 +695,7 @@ struct AiAggregateBindData : public FunctionData {
 		result->instruction = instruction;
 		result->separator = separator;
 		result->max_context_chars = max_context_chars;
+		result->overflow_policy = overflow_policy;
 		return std::move(result);
 	}
 
@@ -443,7 +703,7 @@ struct AiAggregateBindData : public FunctionData {
 		auto &other = other_p.Cast<AiAggregateBindData>();
 		return kind == other.kind && CompletionOptionsEqual(options, other.options) &&
 		       instruction == other.instruction && separator == other.separator &&
-		       max_context_chars == other.max_context_chars;
+		       max_context_chars == other.max_context_chars && overflow_policy == other.overflow_policy;
 	}
 
 	bool SupportStatementCache() const override {
@@ -455,7 +715,6 @@ struct AiAggregateState {
 	idx_t size;
 	idx_t alloc_size;
 	idx_t row_count;
-	bool truncated;
 	char *dataptr;
 };
 
@@ -649,10 +908,12 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
                                 bool allow_log_payload_options) {
 	if (name == "model") {
 		options.model = OptionStringValue(value, function_name, name);
+		options.explicit_model = true;
 		return true;
 	}
 	if (name == "provider") {
 		options.provider = OptionStringValue(value, function_name, name);
+		options.explicit_provider = true;
 		return true;
 	}
 	if (name == "profile" || name == "secret" || name == "secret_name") {
@@ -665,6 +926,7 @@ bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std
 	}
 	if (name == "base_url") {
 		options.base_url = OptionStringValue(value, function_name, name);
+		options.explicit_base_url = true;
 		return true;
 	}
 	if (name == "allowed_hosts") {
@@ -885,6 +1147,15 @@ void ApplyAggregateOption(ClientContext &context, AiAggregateBindData &bind_data
 			throw BinderException("AI aggregate option \"max_context_chars\" must be greater than 0");
 		}
 		bind_data.max_context_chars = NumericCast<idx_t>(max_context_chars);
+		return;
+	}
+	if (name == "overflow_policy") {
+		auto option = EvaluateConstantOption(context, expr, name, LogicalType::VARCHAR);
+		auto value = LowerAscii(StringValue::Get(option));
+		if (value != "hierarchical" && value != "error") {
+			throw BinderException("AI aggregate option \"overflow_policy\" must be hierarchical or error");
+		}
+		bind_data.overflow_policy = value;
 		return;
 	}
 	ApplyNamedOption(context, bind_data.options, expr, name);
@@ -1112,6 +1383,33 @@ std::string OptionalSecretInputString(const CreateSecretInput &input, const std:
 	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 }
 
+std::string ExternalModelSecretName(const std::string &name) {
+	return "__duckdb_ai_model_" + name;
+}
+
+unique_ptr<BaseSecret> CreateAiModelSecretFromConfig(ClientContext &, CreateSecretInput &input) {
+	auto provider = OptionalSecretInputString(input, "ai_provider");
+	auto model = OptionalSecretInputString(input, "model");
+	if (provider.empty() || model.empty()) {
+		throw InvalidInputException("duckdb_ai_model entries require AI_PROVIDER and MODEL");
+	}
+	provider = duckdb_ai::NormalizeProviderName(provider);
+	auto scope = input.scope;
+	if (scope.empty()) {
+		scope.push_back(provider);
+	}
+	auto secret = make_uniq<KeyValueSecret>(scope, input.type, input.provider, input.name);
+	secret->secret_map["provider"] = Value(provider);
+	secret->secret_map["model"] = Value(model);
+	for (auto key : {"location", "credential", "model_type", "capabilities", "options"}) {
+		auto value = OptionalSecretInputString(input, key);
+		if (!value.empty()) {
+			secret->secret_map[key] = Value(value);
+		}
+	}
+	return std::move(secret);
+}
+
 unique_ptr<BaseSecret> CreateAiProviderSecretFromConfig(ClientContext &, CreateSecretInput &input) {
 	auto scope = input.scope;
 	auto provider = OptionalSecretInputString(input, "ai_provider");
@@ -1141,6 +1439,34 @@ void ApplyAiProviderSecret(ClientContext &context, duckdb_ai::CompletionOptions 
 	unique_ptr<SecretEntry> secret_entry;
 	bool explicit_secret = !options.secret_name.empty();
 	if (explicit_secret) {
+		auto profile_name = options.secret_name;
+		auto model_entry = secret_manager.GetSecretByName(transaction, ExternalModelSecretName(profile_name));
+		if (model_entry && model_entry->secret && model_entry->secret->GetType() == "duckdb_ai_model") {
+			const auto &model_secret = dynamic_cast<const KeyValueSecret &>(*model_entry->secret);
+			std::string value;
+			if (!options.explicit_provider && TryReadSecretString(model_secret, "provider", value)) {
+				options.provider = value;
+			}
+			value.clear();
+			if (!options.explicit_model && TryReadSecretString(model_secret, "model", value)) {
+				options.model = value;
+			}
+			value.clear();
+			if (!options.explicit_base_url && TryReadSecretString(model_secret, "location", value)) {
+				options.base_url = value;
+			}
+			value.clear();
+			if (TryReadSecretString(model_secret, "options", value)) {
+				options.model_options = value;
+				duckdb_ai::ApplyModelProfileOptions(options);
+			}
+			std::string credential;
+			if (!TryReadSecretString(model_secret, "credential", credential)) {
+				options.secret_name.clear();
+				return;
+			}
+			options.secret_name = credential;
+		}
 		secret_entry = secret_manager.GetSecretByName(transaction, options.secret_name);
 		if (!secret_entry || !secret_entry->secret) {
 			throw InvalidInputException("AI secret \"%s\" was not found", options.secret_name);
@@ -1375,16 +1701,138 @@ struct ProviderDoubleJob : public ProviderJobBase {
 	double output = 0;
 };
 
-struct SimilarityEmbeddingCacheEntry {
-	std::string input;
-	duckdb_ai::CompletionOptions options;
-	std::vector<double> values;
-};
-
 struct SecretResolutionCacheEntry {
 	duckdb_ai::CompletionOptions input_options;
 	duckdb_ai::CompletionOptions resolved_options;
 };
+
+struct ProviderExecutorState : public ObjectCacheEntry {
+	~ProviderExecutorState() override {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			shutdown = true;
+		}
+		cv.notify_all();
+		for (auto &worker : workers) {
+			if (worker.joinable()) {
+				worker.join();
+			}
+		}
+	}
+
+	static std::string ObjectType() {
+		return "duckdb_ai_provider_executor";
+	}
+
+	std::string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	void EnsureWorkers(idx_t requested_workers) {
+		std::lock_guard<std::mutex> lock(mutex);
+		while (workers.size() < requested_workers) {
+			workers.emplace_back([this]() {
+				while (true) {
+					std::function<void()> task;
+					{
+						std::unique_lock<std::mutex> lock(mutex);
+						cv.wait(lock, [&]() { return shutdown || !queue.empty(); });
+						if (shutdown && queue.empty()) {
+							return;
+						}
+						task = std::move(queue.front());
+						queue.pop_front();
+					}
+					task();
+				}
+			});
+		}
+	}
+
+	void Submit(std::function<void()> task) {
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			queue.push_back(std::move(task));
+		}
+		cv.notify_one();
+	}
+
+	std::mutex mutex;
+	std::condition_variable cv;
+	std::deque<std::function<void()>> queue;
+	std::vector<std::thread> workers;
+	bool shutdown = false;
+};
+
+struct SimilarityOptionCache {
+	duckdb_ai::CompletionOptions options;
+	std::unordered_map<std::string, std::vector<double>> embeddings;
+};
+
+struct SimilarityQueryCache {
+	std::mutex mutex;
+	std::vector<SimilarityOptionCache> option_groups;
+	size_t estimated_bytes = 0;
+};
+
+struct SimilarityCacheState : public ObjectCacheEntry {
+	static std::string ObjectType() {
+		return "duckdb_ai_similarity_query_cache";
+	}
+
+	std::string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	std::mutex mutex;
+	std::unordered_map<idx_t, std::shared_ptr<SimilarityQueryCache>> queries;
+	std::deque<idx_t> recency_order;
+};
+
+ProviderExecutorState fallback_provider_executor;
+
+ProviderExecutorState &ProviderExecutor(const duckdb_ai::CompletionOptions &options) {
+	if (!options.client_context) {
+		return fallback_provider_executor;
+	}
+	return *ObjectCache::GetObjectCache(*options.client_context)
+	            .GetOrCreate<ProviderExecutorState>(ProviderExecutorState::ObjectType());
+}
+
+std::shared_ptr<SimilarityQueryCache> SimilarityCache(ClientContext &context) {
+	auto &state =
+	    *ObjectCache::GetObjectCache(context).GetOrCreate<SimilarityCacheState>(SimilarityCacheState::ObjectType());
+	auto query_id = context.transaction.HasActiveTransaction() ? context.transaction.GetActiveQuery() : 0;
+	std::lock_guard<std::mutex> lock(state.mutex);
+	auto entry = state.queries.find(query_id);
+	if (entry != state.queries.end()) {
+		return entry->second;
+	}
+	while (state.queries.size() >= MAX_SIMILARITY_QUERY_CACHES && !state.recency_order.empty()) {
+		state.queries.erase(state.recency_order.front());
+		state.recency_order.pop_front();
+	}
+	auto cache = std::make_shared<SimilarityQueryCache>();
+	state.queries.emplace(query_id, cache);
+	state.recency_order.push_back(query_id);
+	return cache;
+}
+
+void ClearSimilarityCache(ClientContext &context) {
+	auto &state =
+	    *ObjectCache::GetObjectCache(context).GetOrCreate<SimilarityCacheState>(SimilarityCacheState::ObjectType());
+	std::lock_guard<std::mutex> lock(state.mutex);
+	state.queries.clear();
+	state.recency_order.clear();
+}
 
 void ApplyAiProviderSecretCached(ClientContext &context, duckdb_ai::CompletionOptions &options,
                                  std::vector<SecretResolutionCacheEntry> &cache) {
@@ -1410,8 +1858,9 @@ idx_t ProviderWorkerCount(const std::vector<JOB> &jobs) {
 	for (auto &job : jobs) {
 		auto cap = duckdb_ai::EffectiveMaxConcurrentRequests(job.options);
 		if (cap > 0) {
-			configured_workers = std::max<idx_t>(
-			    configured_workers, static_cast<idx_t>(std::min<int64_t>(cap, MAX_PROVIDER_CHUNK_WORKERS)));
+			auto bounded_cap = static_cast<idx_t>(std::min<int64_t>(cap, MAX_PROVIDER_CHUNK_WORKERS));
+			configured_workers =
+			    configured_workers == 0 ? bounded_cap : MinValue<idx_t>(configured_workers, bounded_cap);
 		}
 	}
 	idx_t worker_count = configured_workers;
@@ -1426,6 +1875,9 @@ idx_t ProviderWorkerCount(const std::vector<JOB> &jobs) {
 
 template <class JOB, class CALLBACK>
 void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
+	if (jobs.empty()) {
+		return;
+	}
 	auto worker_count = ProviderWorkerCount(jobs);
 	std::atomic<bool> stop {false};
 	auto run_one = [&](JOB &job) {
@@ -1457,23 +1909,29 @@ void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
 		return;
 	}
 
-	std::atomic<idx_t> next_job {0};
-	std::vector<std::future<void>> workers;
-	workers.reserve(worker_count);
-	for (idx_t worker = 0; worker < worker_count; worker++) {
-		workers.push_back(std::async(std::launch::async, [&]() {
-			while (!stop.load()) {
-				auto job_index = next_job.fetch_add(1);
-				if (job_index >= jobs.size()) {
-					return;
-				}
+	struct BatchWaitState {
+		std::mutex mutex;
+		std::condition_variable cv;
+		idx_t remaining = 0;
+	};
+	auto wait_state = std::make_shared<BatchWaitState>();
+	wait_state->remaining = jobs.size();
+	auto &executor = ProviderExecutor(jobs[0].options);
+	executor.EnsureWorkers(worker_count);
+	for (idx_t job_index = 0; job_index < jobs.size(); job_index++) {
+		executor.Submit([&, job_index, wait_state]() {
+			if (!stop.load()) {
 				run_one(jobs[job_index]);
 			}
-		}));
+			{
+				std::lock_guard<std::mutex> lock(wait_state->mutex);
+				wait_state->remaining--;
+			}
+			wait_state->cv.notify_one();
+		});
 	}
-	for (auto &worker : workers) {
-		worker.get();
-	}
+	std::unique_lock<std::mutex> lock(wait_state->mutex);
+	wait_state->cv.wait(lock, [&]() { return wait_state->remaining == 0; });
 }
 
 bool ReadRuntimeOptions(ClientContext &context, const duckdb_ai::CompletionOptions &base_options, bool has_model_arg,
@@ -1481,11 +1939,17 @@ bool ReadRuntimeOptions(ClientContext &context, const duckdb_ai::CompletionOptio
                         const StringVectorReader *provider_reader, idx_t row, duckdb_ai::CompletionOptions &options) {
 	options = base_options;
 	duckdb_ai::AttachProviderRuntimeState(options, context);
-	if (has_model_arg && !model_reader->Read(row, options.model)) {
-		return false;
+	if (has_model_arg) {
+		if (!model_reader->Read(row, options.model)) {
+			return false;
+		}
+		options.explicit_model = true;
 	}
-	if (has_provider_arg && !provider_reader->Read(row, options.provider)) {
-		return false;
+	if (has_provider_arg) {
+		if (!provider_reader->Read(row, options.provider)) {
+			return false;
+		}
+		options.explicit_provider = true;
 	}
 	return true;
 }
@@ -2311,6 +2775,16 @@ std::string BuildRerankPrompt(const std::string &query, const std::string &candi
 	return "Query:\n" + query + "\n\nCandidate:\n" + candidate;
 }
 
+std::string BuildScoreSystemPrompt() {
+	return "Score how well the input satisfies the supplied criteria on a scale from 0 to 1. Return only a JSON "
+	       "object with one numeric field named score. Use 0 when it does not satisfy the criteria and 1 when it fully "
+	       "satisfies them.";
+}
+
+std::string BuildScorePrompt(const std::string &input, const std::string &criteria) {
+	return "Criteria:\n" + criteria + "\n\nInput:\n" + input;
+}
+
 bool ParseRerankScore(const std::string &input, double &score) {
 	auto trimmed = StripMarkdownJsonFence(input);
 	if (trimmed.size() >= 2 && trimmed.front() == '"' && trimmed.back() == '"') {
@@ -2336,9 +2810,22 @@ bool ParseRerankScore(const std::string &input, double &score) {
 	return true;
 }
 
+bool ParseStructuredScore(const std::string &input, double &score) {
+	std::vector<duckdb_ai::JsonExtractedValue> fields;
+	std::string error;
+	if (!duckdb_ai::ExtractJsonObjectFields(StripMarkdownJsonFence(input), {"score"}, fields, error) ||
+	    fields.size() != 1 || fields[0].kind != duckdb_ai::JsonExtractedKind::NUMBER ||
+	    !std::isfinite(fields[0].number_value) || fields[0].number_value < 0 || fields[0].number_value > 1) {
+		return false;
+	}
+	score = fields[0].number_value;
+	return true;
+}
+
 void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto generic_score = func_expr.function.name == "ai_score";
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<double>(result);
@@ -2384,10 +2871,18 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 
 	RunProviderJobs(jobs, [&](ProviderDoubleJob &job) {
-		AppendSystemPrompt(job.options, BuildRerankSystemPrompt());
-		auto output = duckdb_ai::Complete(BuildRerankPrompt(job.left, job.right), job.options).text;
-		if (!ParseRerankScore(output, job.output)) {
-			throw InvalidInputException("ai_rerank expected a numeric score from 0 to 1, got: %s", output);
+		if (generic_score) {
+			job.options.response_format = "json_schema";
+			job.options.response_schema =
+			    R"({"type":"object","properties":{"score":{"type":"number","minimum":0,"maximum":1}},"required":["score"],"additionalProperties":false})";
+		}
+		AppendSystemPrompt(job.options, generic_score ? BuildScoreSystemPrompt() : BuildRerankSystemPrompt());
+		auto prompt = generic_score ? BuildScorePrompt(job.left, job.right) : BuildRerankPrompt(job.left, job.right);
+		auto output = duckdb_ai::Complete(prompt, job.options).text;
+		auto parsed = generic_score ? ParseStructuredScore(output, job.output) : ParseRerankScore(output, job.output);
+		if (!parsed) {
+			throw InvalidInputException("%s expected a numeric score from 0 to 1, got: %s", func_expr.function.name,
+			                            output);
 		}
 	});
 
@@ -2407,36 +2902,96 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 }
 
-void PrecomputeConstantSimilarityEmbeddings(std::vector<ProviderDoubleJob> &jobs, bool left_side) {
-	std::vector<SimilarityEmbeddingCacheEntry> cache;
-	for (auto &job : jobs) {
-		if (job.exception) {
+void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<ProviderDoubleJob> &jobs) {
+	auto query_cache = SimilarityCache(context);
+	std::vector<bool> grouped(jobs.size(), false);
+	for (idx_t group_start = 0; group_start < jobs.size(); group_start++) {
+		if (grouped[group_start] || jobs[group_start].exception) {
 			continue;
 		}
-		auto &input = left_side ? job.left : job.right;
-		auto cache_entry = std::find_if(cache.begin(), cache.end(), [&](const SimilarityEmbeddingCacheEntry &entry) {
-			return entry.input == input && CompletionOptionsEqual(entry.options, job.options);
-		});
-		try {
-			if (cache_entry == cache.end()) {
-				SimilarityEmbeddingCacheEntry entry;
-				entry.input = input;
-				entry.options = job.options;
-				entry.values = duckdb_ai::Embed(input, job.options).values;
-				cache.push_back(std::move(entry));
-				cache_entry = cache.end() - 1;
+		std::vector<idx_t> group_rows;
+		for (idx_t row = group_start; row < jobs.size(); row++) {
+			if (!grouped[row] && !jobs[row].exception &&
+			    CompletionOptionsEqual(jobs[group_start].options, jobs[row].options)) {
+				grouped[row] = true;
+				group_rows.push_back(row);
 			}
-			if (left_side) {
-				job.has_left_embedding = true;
-				job.left_embedding = cache_entry->values;
-			} else {
-				job.has_right_embedding = true;
-				job.right_embedding = cache_entry->values;
+		}
+
+		std::vector<std::string> unique_inputs;
+		std::unordered_map<std::string, idx_t> input_indexes;
+		for (auto row : group_rows) {
+			for (auto *input : {&jobs[row].left, &jobs[row].right}) {
+				if (input_indexes.find(*input) == input_indexes.end()) {
+					input_indexes[*input] = unique_inputs.size();
+					unique_inputs.push_back(*input);
+				}
+			}
+		}
+
+		try {
+			std::unique_lock<std::mutex> cache_lock(query_cache->mutex);
+			SimilarityOptionCache *option_cache = nullptr;
+			for (auto &candidate : query_cache->option_groups) {
+				if (CompletionOptionsEqual(candidate.options, jobs[group_start].options)) {
+					option_cache = &candidate;
+					break;
+				}
+			}
+			if (!option_cache) {
+				SimilarityOptionCache candidate;
+				candidate.options = jobs[group_start].options;
+				query_cache->option_groups.push_back(std::move(candidate));
+				option_cache = &query_cache->option_groups.back();
+			}
+
+			std::vector<const std::vector<double> *> resolved_embeddings(unique_inputs.size(), nullptr);
+			std::vector<std::string> missing_inputs;
+			std::vector<idx_t> missing_indexes;
+			for (idx_t input_index = 0; input_index < unique_inputs.size(); input_index++) {
+				auto cached = option_cache->embeddings.find(unique_inputs[input_index]);
+				if (cached != option_cache->embeddings.end()) {
+					resolved_embeddings[input_index] = &cached->second;
+					duckdb_ai::RecordEmbeddingCacheHit(unique_inputs[input_index],
+					                                   NumericCast<int64_t>(cached->second.size()),
+					                                   jobs[group_start].options);
+				} else {
+					missing_indexes.push_back(input_index);
+					missing_inputs.push_back(unique_inputs[input_index]);
+				}
+			}
+
+			auto embeddings = duckdb_ai::EmbedMany(missing_inputs, jobs[group_start].options);
+			if (embeddings.size() != missing_inputs.size()) {
+				throw InvalidInputException("AI embedding provider returned %llu embeddings for %llu inputs",
+				                            static_cast<unsigned long long>(embeddings.size()),
+				                            static_cast<unsigned long long>(missing_inputs.size()));
+			}
+			for (idx_t missing_index = 0; missing_index < missing_inputs.size(); missing_index++) {
+				auto input_index = missing_indexes[missing_index];
+				auto estimated_bytes = missing_inputs[missing_index].size() +
+				                       embeddings[missing_index].values.size() * sizeof(double) + 64;
+				if (query_cache->estimated_bytes + estimated_bytes <= MAX_SIMILARITY_QUERY_CACHE_BYTES) {
+					auto inserted = option_cache->embeddings.emplace(missing_inputs[missing_index],
+					                                                 std::move(embeddings[missing_index].values));
+					resolved_embeddings[input_index] = &inserted.first->second;
+					query_cache->estimated_bytes += estimated_bytes;
+				} else {
+					resolved_embeddings[input_index] = &embeddings[missing_index].values;
+				}
+			}
+			for (auto row : group_rows) {
+				jobs[row].left_embedding = *resolved_embeddings[input_indexes[jobs[row].left]];
+				jobs[row].right_embedding = *resolved_embeddings[input_indexes[jobs[row].right]];
+				jobs[row].has_left_embedding = true;
+				jobs[row].has_right_embedding = true;
 			}
 		} catch (std::exception &ex) {
-			job.exception = std::current_exception();
-			job.error_message = ex.what();
-			if (job.fail_on_error) {
+			for (auto row : group_rows) {
+				jobs[row].exception = std::current_exception();
+				jobs[row].error_message = ex.what();
+			}
+			if (jobs[group_start].fail_on_error) {
 				throw;
 			}
 		}
@@ -2450,8 +3005,6 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<double>(result);
 	auto &result_validity = FlatVector::Validity(result);
-	auto left_is_constant = args.data[0].GetVectorType() == VectorType::CONSTANT_VECTOR;
-	auto right_is_constant = args.data[1].GetVectorType() == VectorType::CONSTANT_VECTOR;
 	StringVectorReader left_reader(args, 0);
 	StringVectorReader right_reader(args, 1);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
@@ -2492,22 +3045,13 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 		}
 	}
 
-	if (left_is_constant) {
-		PrecomputeConstantSimilarityEmbeddings(jobs, true);
-	}
-	if (right_is_constant) {
-		PrecomputeConstantSimilarityEmbeddings(jobs, false);
-	}
+	PrecomputeSimilarityEmbeddings(state.GetContext(), jobs);
 
 	RunProviderJobs(jobs, [&](ProviderDoubleJob &job) {
 		if (job.exception) {
 			return;
 		}
-		auto left_embedding =
-		    job.has_left_embedding ? job.left_embedding : duckdb_ai::Embed(job.left, job.options).values;
-		auto right_embedding =
-		    job.has_right_embedding ? job.right_embedding : duckdb_ai::Embed(job.right, job.options).values;
-		job.output = CosineSimilarity(left_embedding, right_embedding);
+		job.output = CosineSimilarity(job.left_embedding, job.right_embedding);
 	});
 
 	for (auto &job : jobs) {
@@ -2707,6 +3251,20 @@ unique_ptr<FunctionData> AiTaskBindInternal(ClientContext &context, ScalarFuncti
 				throw BinderException("%s supports at most two positional options: model and provider",
 				                      bound_function.name);
 			}
+			continue;
+		}
+		if (task == AiTaskKind::CLASSIFY &&
+		    (alias == "label_descriptions" || alias == "instructions" || alias == "examples")) {
+			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::VARCHAR);
+			auto text = StringValue::Get(value);
+			if (alias == "label_descriptions") {
+				bind_data->label_descriptions = std::move(text);
+			} else if (alias == "instructions") {
+				bind_data->instructions = std::move(text);
+			} else {
+				bind_data->examples = std::move(text);
+			}
+			bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 			continue;
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
@@ -2945,36 +3503,25 @@ void AiAggregateAppendBytes(AiAggregateState &state, ArenaAllocator &allocator, 
 void AiAggregateAppend(AiAggregateState &state, ArenaAllocator &allocator, const char *data, idx_t size,
                        const AiAggregateBindData &bind_data) {
 	state.row_count++;
-	if (state.size >= bind_data.max_context_chars) {
-		state.truncated = true;
-		return;
+	if (state.size > 0 && !bind_data.separator.empty()) {
+		AiAggregateAppendBytes(state, allocator, bind_data.separator.c_str(), bind_data.separator.size());
 	}
-
-	auto separator_size = state.size == 0 ? 0 : bind_data.separator.size();
-	auto available = bind_data.max_context_chars - state.size;
-	if (separator_size >= available) {
-		state.truncated = true;
-		return;
-	}
-	if (separator_size > 0) {
-		AiAggregateAppendBytes(state, allocator, bind_data.separator.c_str(), separator_size);
-		available -= separator_size;
-	}
-
-	auto append_size = MinValue<idx_t>(size, available);
-	AiAggregateAppendBytes(state, allocator, data, append_size);
-	if (append_size < size) {
-		state.truncated = true;
-	}
+	AiAggregateAppendBytes(state, allocator, data, size);
 }
 
-std::string BuildAiAggregatePrompt(const AiAggregateBindData &bind_data, const AiAggregateState &state) {
-	std::string values;
-	if (state.dataptr && state.size > 0) {
-		values.assign(state.dataptr, state.size);
-	}
+std::string BuildAiAggregatePrompt(const AiAggregateBindData &bind_data, const std::string &values, idx_t row_count,
+                                   bool intermediate) {
 	std::string prompt;
-	if (bind_data.kind == AiAggregateKind::SUMMARIZE) {
+	if (intermediate && bind_data.kind == AiAggregateKind::SUMMARIZE) {
+		prompt = "Create a compact intermediate summary of this portion of a larger SQL aggregate. Preserve facts, "
+		         "numbers, qualifications, and exceptions needed by the final summary. Return only the intermediate "
+		         "summary.\n\nInput values:\n";
+	} else if (intermediate) {
+		prompt = "Extract and compact all evidence from this portion of a larger SQL aggregate that is relevant to the "
+		         "instruction. Preserve facts, numbers, qualifications, and exceptions. Do not answer beyond the "
+		         "provided evidence. Return only the compacted evidence.\n\nInstruction:\n" +
+		         bind_data.instruction + "\n\nInput values:\n";
+	} else if (bind_data.kind == AiAggregateKind::SUMMARIZE) {
 		prompt =
 		    "Summarize the following SQL aggregate input values concisely. Return only the summary.\n\nInput values:\n";
 	} else {
@@ -2984,11 +3531,113 @@ std::string BuildAiAggregatePrompt(const AiAggregateBindData &bind_data, const A
 		    bind_data.instruction + "\n\nInput values:\n";
 	}
 	prompt += values;
-	if (state.truncated) {
-		prompt += "\n\nNote: the input values were truncated to fit the configured context limit.";
-	}
-	prompt += "\n\nInput row count: " + std::to_string(state.row_count);
+	prompt += "\n\nInput row count: " + std::to_string(row_count);
 	return prompt;
+}
+
+idx_t Utf8SafeChunkEnd(const std::string &input, idx_t start, idx_t requested_end) {
+	auto end = MinValue<idx_t>(requested_end, input.size());
+	while (end > start && end < input.size() && (static_cast<unsigned char>(input[end]) & 0xc0) == 0x80) {
+		end--;
+	}
+	return end == start ? MinValue<idx_t>(requested_end, input.size()) : end;
+}
+
+std::vector<std::string> SplitAggregateValues(const std::string &values, idx_t max_chars) {
+	std::vector<std::string> chunks;
+	for (idx_t start = 0; start < values.size();) {
+		auto end = Utf8SafeChunkEnd(values, start, start + max_chars);
+		chunks.push_back(values.substr(start, end - start));
+		start = end;
+	}
+	return chunks;
+}
+
+std::vector<std::string> PackAggregateValues(const std::vector<std::string> &values, const std::string &separator,
+                                             idx_t max_chars) {
+	std::vector<std::string> chunks;
+	std::string packed;
+	for (auto &value : values) {
+		if (value.size() > max_chars) {
+			if (!packed.empty()) {
+				chunks.push_back(std::move(packed));
+				packed.clear();
+			}
+			auto split = SplitAggregateValues(value, max_chars);
+			chunks.insert(chunks.end(), std::make_move_iterator(split.begin()), std::make_move_iterator(split.end()));
+			continue;
+		}
+		if (!packed.empty() && packed.size() + separator.size() + value.size() > max_chars) {
+			chunks.push_back(std::move(packed));
+			packed.clear();
+		}
+		if (!packed.empty()) {
+			packed += separator;
+		}
+		packed += value;
+	}
+	if (!packed.empty()) {
+		chunks.push_back(std::move(packed));
+	}
+	return chunks;
+}
+
+std::string RunHierarchicalAggregate(const AiAggregateBindData &bind_data, const std::string &values, idx_t row_count) {
+	auto root_operation_id = bind_data.options.query_id + ":aggregate";
+	if (values.size() <= bind_data.max_context_chars) {
+		auto options = bind_data.options;
+		options.parent_operation_id = root_operation_id;
+		options.operation_id = root_operation_id + ":final";
+		return duckdb_ai::Complete(BuildAiAggregatePrompt(bind_data, values, row_count, false), options).text;
+	}
+	if (bind_data.overflow_policy == "error") {
+		throw InvalidInputException("AI aggregate input has %llu bytes, exceeding max_context_chars=%llu",
+		                            static_cast<unsigned long long>(values.size()),
+		                            static_cast<unsigned long long>(bind_data.max_context_chars));
+	}
+
+	auto chunks = SplitAggregateValues(values, bind_data.max_context_chars);
+	for (idx_t level = 0; chunks.size() > 1; level++) {
+		if (level >= 32) {
+			throw InvalidInputException("AI aggregate hierarchical reduction did not converge after 32 levels");
+		}
+		std::vector<ProviderStringJob> jobs;
+		jobs.reserve(chunks.size());
+		for (idx_t i = 0; i < chunks.size(); i++) {
+			ProviderStringJob job;
+			job.row = i;
+			job.input = std::move(chunks[i]);
+			job.options = bind_data.options;
+			job.options.function_name += "_map";
+			job.options.parent_operation_id = root_operation_id;
+			job.options.operation_id = root_operation_id + ":map:" + std::to_string(level) + ":" + std::to_string(i);
+			job.fail_on_error = bind_data.options.fail_on_error;
+			jobs.push_back(std::move(job));
+		}
+		RunProviderJobs(jobs, [&](ProviderStringJob &job) {
+			job.output =
+			    duckdb_ai::Complete(BuildAiAggregatePrompt(bind_data, job.input, row_count, true), job.options).text;
+		});
+		std::vector<std::string> partials;
+		partials.reserve(jobs.size());
+		for (auto &job : jobs) {
+			if (job.exception) {
+				std::rethrow_exception(job.exception);
+			}
+			if (job.output.empty()) {
+				throw InvalidInputException("AI aggregate provider returned an empty intermediate result");
+			}
+			partials.push_back(std::move(job.output));
+		}
+		chunks = PackAggregateValues(partials, bind_data.separator, bind_data.max_context_chars);
+		if (chunks.empty()) {
+			throw InvalidInputException("AI aggregate hierarchical reduction produced no intermediate results");
+		}
+	}
+	auto options = bind_data.options;
+	options.parent_operation_id = root_operation_id;
+	options.operation_id = root_operation_id + ":final";
+	return duckdb_ai::Complete(BuildAiAggregatePrompt(bind_data, chunks[0], row_count, false), options).text;
 }
 
 struct AiAggregateOperation {
@@ -2997,7 +3646,6 @@ struct AiAggregateOperation {
 		state.size = 0;
 		state.alloc_size = 0;
 		state.row_count = 0;
-		state.truncated = false;
 		state.dataptr = nullptr;
 	}
 
@@ -3019,7 +3667,6 @@ struct AiAggregateOperation {
 	static void Combine(const STATE &source, STATE &target, AggregateInputData &aggr_input_data) {
 		if (!source.dataptr) {
 			target.row_count += source.row_count;
-			target.truncated = target.truncated || source.truncated;
 			return;
 		}
 		auto &bind_data = aggr_input_data.bind_data->Cast<AiAggregateBindData>();
@@ -3032,7 +3679,6 @@ struct AiAggregateOperation {
 			AiAggregateAppend(target, aggr_input_data.allocator, source.dataptr, source.size, bind_data);
 			target.row_count = before_count + source.row_count;
 		}
-		target.truncated = target.truncated || source.truncated;
 	}
 
 	template <class T, class STATE>
@@ -3043,8 +3689,11 @@ struct AiAggregateOperation {
 		}
 		auto &bind_data = finalize_data.input.bind_data->Cast<AiAggregateBindData>();
 		try {
-			auto prompt = BuildAiAggregatePrompt(bind_data, state);
-			auto output = duckdb_ai::Complete(prompt, bind_data.options).text;
+			std::string values;
+			if (state.dataptr && state.size > 0) {
+				values.assign(state.dataptr, state.size);
+			}
+			auto output = RunHierarchicalAggregate(bind_data, values, state.row_count);
 			target = finalize_data.ReturnString(string_t(output));
 		} catch (std::exception &ex) {
 			if (bind_data.options.fail_on_error) {
@@ -3102,6 +3751,20 @@ std::string BuildTaskUserPrompt(AiTaskKind task, const std::string &input, const
 std::string BuildMultiLabelClassifySystemPrompt(const std::string &labels) {
 	return "Classify the following text into zero or more of these labels: " + labels +
 	       ". Return only a JSON array of chosen labels. Use [] when none apply.";
+}
+
+std::string BuildClassificationGuidance(const AiTaskBindData &bind_data) {
+	std::string guidance;
+	if (!bind_data.label_descriptions.empty()) {
+		guidance += "\nLabel descriptions:\n" + bind_data.label_descriptions;
+	}
+	if (!bind_data.instructions.empty()) {
+		guidance += "\nAdditional classification instructions:\n" + bind_data.instructions;
+	}
+	if (!bind_data.examples.empty()) {
+		guidance += "\nExamples:\n" + bind_data.examples;
+	}
+	return guidance;
 }
 
 bool IsAsciiWhitespace(char c) {
@@ -3598,7 +4261,11 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			job.output = duckdb_ai::Redact(job.input, job.options).text;
 			return;
 		}
-		AppendSystemPrompt(job.options, BuildTaskSystemPrompt(bind_data.task, job.parameter));
+		auto system_prompt = BuildTaskSystemPrompt(bind_data.task, job.parameter);
+		if (bind_data.task == AiTaskKind::CLASSIFY) {
+			system_prompt += BuildClassificationGuidance(bind_data);
+		}
+		AppendSystemPrompt(job.options, system_prompt);
 		auto prompt = BuildTaskUserPrompt(bind_data.task, job.input, job.parameter);
 		job.output = duckdb_ai::Complete(prompt, job.options).text;
 	});
@@ -3676,7 +4343,8 @@ void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &r
 	}
 
 	RunProviderJobs(jobs, [&](ProviderStringListJob &job) {
-		AppendSystemPrompt(job.options, BuildMultiLabelClassifySystemPrompt(job.parameter));
+		AppendSystemPrompt(job.options,
+		                   BuildMultiLabelClassifySystemPrompt(job.parameter) + BuildClassificationGuidance(bind_data));
 		auto prompt = BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter);
 		auto output = StripMarkdownJsonFence(duckdb_ai::Complete(prompt, job.options).text);
 		std::string error;
@@ -3705,6 +4373,493 @@ void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &r
 		}
 	}
 }
+
+LogicalType AiClassifyResultReturnType() {
+	child_list_t<LogicalType> children;
+	children.emplace_back("value", LogicalType::LIST(LogicalType::VARCHAR));
+	children.emplace_back("error", LogicalType::VARCHAR);
+	children.emplace_back("metadata", LogicalType::VARCHAR);
+	return LogicalType::STRUCT(std::move(children));
+}
+
+unique_ptr<FunctionData> AiClassifyResultBind(ClientContext &context, ScalarFunction &bound_function,
+                                              vector<unique_ptr<Expression>> &arguments) {
+	auto bind_data = AiClassifyLabelsBind(context, bound_function, arguments);
+	auto &task_bind_data = bind_data->Cast<AiTaskBindData>();
+	task_bind_data.options.on_error = "capture";
+	task_bind_data.options.fail_on_error = false;
+	bound_function.SetReturnType(AiClassifyResultReturnType());
+	return bind_data;
+}
+
+std::string JsonEscapeSqlText(const std::string &input) {
+	std::string output;
+	for (auto c : input) {
+		switch (c) {
+		case '\\':
+			output += "\\\\";
+			break;
+		case '"':
+			output += "\\\"";
+			break;
+		case '\n':
+			output += "\\n";
+			break;
+		case '\r':
+			output += "\\r";
+			break;
+		case '\t':
+			output += "\\t";
+			break;
+		default:
+			output.push_back(c);
+			break;
+		}
+	}
+	return output;
+}
+
+Value AiClassifyResultValue(const LogicalType &result_type, const std::vector<std::string> &labels,
+                            const std::string &error, const std::string &metadata) {
+	vector<Value> children;
+	if (error.empty()) {
+		vector<Value> label_values;
+		for (auto &label : labels) {
+			label_values.emplace_back(label);
+		}
+		children.push_back(Value::LIST(LogicalType::VARCHAR, std::move(label_values)));
+		children.emplace_back(LogicalType::VARCHAR);
+		children.emplace_back(metadata);
+	} else {
+		children.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
+		children.emplace_back(error);
+		children.emplace_back(LogicalType::VARCHAR);
+	}
+	return Value::STRUCT(result_type, std::move(children));
+}
+
+void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	auto &bind_data = func_expr.bind_info->Cast<AiTaskBindData>();
+	auto result_type = AiClassifyResultReturnType();
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader input_reader(args, 0);
+	auto label_reader = OptionalStringReader(args, !bind_data.parameter_is_label_list, 1);
+	unique_ptr<StringListVectorReader> label_list_reader;
+	if (bind_data.parameter_is_label_list) {
+		label_list_reader = make_uniq<StringListVectorReader>(args, 1);
+	}
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
+	std::vector<ProviderStringListJob> jobs;
+	std::vector<SecretResolutionCacheEntry> secret_cache;
+	for (idx_t row = 0; row < args.size(); row++) {
+		std::string input;
+		std::string labels;
+		auto read_labels =
+		    bind_data.parameter_is_label_list ? label_list_reader->Read(row, labels) : label_reader->Read(row, labels);
+		if (!input_reader.Read(row, input) || !read_labels) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+		try {
+			ApplyAiProviderSecretCached(state.GetContext(), options, secret_cache);
+			ProviderStringListJob job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = false;
+			job.input = std::move(input);
+			job.parameter = std::move(labels);
+			jobs.push_back(std::move(job));
+		} catch (std::exception &ex) {
+			result.SetValue(row, AiClassifyResultValue(result_type, {}, ex.what(), ""));
+		}
+	}
+	RunProviderJobs(jobs, [&](ProviderStringListJob &job) {
+		AppendSystemPrompt(job.options,
+		                   BuildMultiLabelClassifySystemPrompt(job.parameter) + BuildClassificationGuidance(bind_data));
+		auto output = StripMarkdownJsonFence(
+		    duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter), job.options).text);
+		std::string error;
+		if (!duckdb_ai::ExtractJsonStringArray(output, job.output, error)) {
+			throw InvalidInputException("ai_classify_result expected a JSON array of strings: %s", error);
+		}
+	});
+	for (auto &job : jobs) {
+		if (job.exception) {
+			result.SetValue(job.row, AiClassifyResultValue(result_type, {}, job.error_message, ""));
+			continue;
+		}
+		auto config = duckdb_ai::ResolveProvider(job.options);
+		auto metadata = "{\"provider\":\"" + JsonEscapeSqlText(config.provider) + "\",\"model\":\"" +
+		                JsonEscapeSqlText(config.model) + "\",\"multi_label\":true}";
+		result.SetValue(job.row, AiClassifyResultValue(result_type, job.output, "", metadata));
+	}
+}
+
+std::vector<std::string> ReadClassifierLabels(ClientContext &context, Expression &expression) {
+	if (expression.return_type.id() != LogicalTypeId::LIST) {
+		throw BinderException("ai_build_classifier labels must be a constant VARCHAR[]");
+	}
+	auto value = EvaluateConstantOption(context, expression, "labels", LogicalType::LIST(LogicalType::VARCHAR));
+	std::vector<std::string> labels;
+	std::set<std::string> seen;
+	for (auto &child : ListValue::GetChildren(value)) {
+		if (child.IsNull()) {
+			throw BinderException("ai_build_classifier labels must not contain NULL");
+		}
+		auto label_value = child;
+		auto label = StringValue::Get(label_value.DefaultCastAs(LogicalType::VARCHAR));
+		if (label.empty() || !seen.insert(LowerAscii(label)).second) {
+			throw BinderException("ai_build_classifier labels must be non-empty and unique");
+		}
+		labels.push_back(std::move(label));
+	}
+	if (labels.size() < 2) {
+		throw BinderException("ai_build_classifier requires at least two labels");
+	}
+	return labels;
+}
+
+unique_ptr<FunctionData> ClassifierBuildBind(ClientContext &context, AggregateFunction &function,
+                                             vector<unique_ptr<Expression>> &arguments) {
+	if (arguments.size() < 2) {
+		throw BinderException("ai_build_classifier requires input text and a constant VARCHAR[] label list");
+	}
+	auto bind_data = make_uniq<ClassifierBuildBindData>();
+	ApplySettings(context, bind_data->label_options, AiModelSettingKind::TASK);
+	ApplySettings(context, bind_data->embedding_options, AiModelSettingKind::EMBEDDING);
+	StampProviderFunction(bind_data->label_options, "ai_build_classifier_label");
+	StampProviderFunction(bind_data->embedding_options, "ai_build_classifier_embed");
+	duckdb_ai::AttachProviderRuntimeState(bind_data->label_options, context);
+	duckdb_ai::AttachProviderRuntimeState(bind_data->embedding_options, context);
+	bind_data->labels = ReadClassifierLabels(context, *arguments[1]);
+	vector<idx_t> erase_indexes {1};
+	for (idx_t i = 2; i < arguments.size(); i++) {
+		auto alias = LowerAscii(arguments[i]->GetAlias());
+		if (alias.empty()) {
+			throw BinderException("ai_build_classifier options must use named arguments");
+		}
+		if (alias == "optimization") {
+			auto value = LowerAscii(EvaluateConstantString(context, *arguments[i], alias));
+			if (value != "minimize_cost") {
+				throw BinderException("ai_build_classifier optimization must be minimize_cost");
+			}
+		} else if (alias == "sample_size") {
+			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::BIGINT);
+			auto sample_size = BigIntValue::Get(value);
+			if (sample_size < 8 || sample_size > 10000) {
+				throw BinderException("ai_build_classifier sample_size must be between 8 and 10000");
+			}
+			bind_data->sample_size = NumericCast<idx_t>(sample_size);
+		} else if (alias == "quality_threshold" || alias == "confidence_margin") {
+			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::DOUBLE);
+			auto number = DoubleValue::Get(value);
+			if (!std::isfinite(number) || number < 0 || number > 1) {
+				throw BinderException("ai_build_classifier %s must be between 0 and 1", alias);
+			}
+			if (alias == "quality_threshold") {
+				bind_data->quality_threshold = number;
+			} else {
+				bind_data->confidence_margin = number;
+			}
+		} else if (alias == "embedding_model" || alias == "embedding_provider" || alias == "embedding_profile") {
+			auto value = EvaluateConstantString(context, *arguments[i], alias);
+			if (alias == "embedding_model") {
+				bind_data->embedding_options.model = value;
+				bind_data->embedding_options.explicit_model = true;
+			} else if (alias == "embedding_provider") {
+				bind_data->embedding_options.provider = value;
+				bind_data->embedding_options.explicit_provider = true;
+			} else {
+				bind_data->embedding_options.secret_name = value;
+			}
+		} else {
+			ApplyNamedOption(context, bind_data->label_options, *arguments[i], alias);
+		}
+		erase_indexes.push_back(i);
+	}
+	ApplyAiProviderSecret(context, bind_data->label_options);
+	ApplyAiProviderSecret(context, bind_data->embedding_options);
+	for (idx_t offset = erase_indexes.size(); offset > 0; offset--) {
+		Function::EraseArgument(function, arguments, erase_indexes[offset - 1]);
+	}
+	function.SetReturnType(LogicalType::VARCHAR);
+	return std::move(bind_data);
+}
+
+void ClassifierEnsureCapacity(ClassifierBuildState &state, ArenaAllocator &allocator, idx_t required_size) {
+	if (state.alloc_size >= required_size) {
+		return;
+	}
+	auto new_size = state.alloc_size == 0 ? MaxValue<idx_t>(64, required_size) : state.alloc_size;
+	while (new_size < required_size) {
+		new_size *= 2;
+	}
+	if (!state.dataptr) {
+		state.dataptr = char_ptr_cast(allocator.Allocate(new_size));
+	} else {
+		state.dataptr = char_ptr_cast(allocator.Reallocate(data_ptr_cast(state.dataptr), state.alloc_size, new_size));
+	}
+	state.alloc_size = new_size;
+}
+
+void ClassifierAppendSample(ClassifierBuildState &state, ArenaAllocator &allocator, const char *data, idx_t size,
+                            idx_t sample_size) {
+	state.row_count++;
+	if (state.sample_count >= sample_size) {
+		return;
+	}
+	ClassifierEnsureCapacity(state, allocator, state.size + sizeof(uint64_t) + size);
+	auto length = static_cast<uint64_t>(size);
+	memcpy(state.dataptr + state.size, &length, sizeof(uint64_t));
+	state.size += sizeof(uint64_t);
+	memcpy(state.dataptr + state.size, data, size);
+	state.size += size;
+	state.sample_count++;
+}
+
+std::vector<std::string> ClassifierSamples(const ClassifierBuildState &state) {
+	std::vector<std::string> samples;
+	idx_t offset = 0;
+	while (offset + sizeof(uint64_t) <= state.size && samples.size() < state.sample_count) {
+		uint64_t length;
+		memcpy(&length, state.dataptr + offset, sizeof(uint64_t));
+		offset += sizeof(uint64_t);
+		if (length > state.size - offset) {
+			throw InternalException("ai_build_classifier aggregate state is corrupt");
+		}
+		samples.emplace_back(state.dataptr + offset, NumericCast<idx_t>(length));
+		offset += NumericCast<idx_t>(length);
+	}
+	return samples;
+}
+
+std::string JoinClassifierLabels(const std::vector<std::string> &labels) {
+	std::string result;
+	for (idx_t i = 0; i < labels.size(); i++) {
+		if (i > 0) {
+			result += ", ";
+		}
+		result += labels[i];
+	}
+	return result;
+}
+
+idx_t ClassifierLabelIndex(const std::vector<std::string> &labels, const std::string &input) {
+	auto normalized = LowerAscii(TrimAscii(StripMarkdownJsonFence(input)));
+	if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"') {
+		normalized = normalized.substr(1, normalized.size() - 2);
+	}
+	for (idx_t i = 0; i < labels.size(); i++) {
+		if (LowerAscii(labels[i]) == normalized) {
+			return i;
+		}
+	}
+	return DConstants::INVALID_INDEX;
+}
+
+std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, const ClassifierBuildState &state) {
+	auto samples = ClassifierSamples(state);
+	std::vector<ProviderStringJob> label_jobs;
+	for (idx_t i = 0; i < samples.size(); i++) {
+		ProviderStringJob job;
+		job.row = i;
+		job.input = samples[i];
+		job.options = bind_data.label_options;
+		job.fail_on_error = bind_data.label_options.fail_on_error;
+		label_jobs.push_back(std::move(job));
+	}
+	auto labels_text = JoinClassifierLabels(bind_data.labels);
+	RunProviderJobs(label_jobs, [&](ProviderStringJob &job) {
+		AppendSystemPrompt(job.options, BuildTaskSystemPrompt(AiTaskKind::CLASSIFY, labels_text));
+		job.output =
+		    duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, labels_text), job.options).text;
+	});
+	std::vector<std::string> labelled_samples;
+	std::vector<idx_t> labelled_classes;
+	for (auto &job : label_jobs) {
+		if (job.exception) {
+			if (job.fail_on_error) {
+				std::rethrow_exception(job.exception);
+			}
+			continue;
+		}
+		auto label_index = ClassifierLabelIndex(bind_data.labels, job.output);
+		if (label_index == DConstants::INVALID_INDEX) {
+			if (job.fail_on_error) {
+				throw InvalidInputException("ai_build_classifier received an unknown label: %s", job.output);
+			}
+			continue;
+		}
+		labelled_samples.push_back(std::move(job.input));
+		labelled_classes.push_back(label_index);
+	}
+	if (labelled_samples.empty()) {
+		throw InvalidInputException("ai_build_classifier could not label any sampled rows");
+	}
+	auto embeddings = duckdb_ai::EmbedMany(labelled_samples, bind_data.embedding_options);
+	auto dimensions = embeddings.empty() ? 0 : embeddings[0].values.size();
+	std::vector<idx_t> class_totals(bind_data.labels.size(), 0);
+	for (auto label : labelled_classes) {
+		class_totals[label]++;
+	}
+	std::vector<bool> validation_rows(embeddings.size(), false);
+	for (idx_t i = 0; i < embeddings.size(); i++) {
+		validation_rows[i] = i % 5 == 0 && class_totals[labelled_classes[i]] > 1;
+	}
+	std::vector<std::vector<double>> centroids(bind_data.labels.size(), std::vector<double>(dimensions, 0));
+	std::vector<idx_t> counts(bind_data.labels.size(), 0);
+	for (idx_t i = 0; i < embeddings.size(); i++) {
+		if (embeddings[i].values.size() != dimensions) {
+			throw InvalidInputException("ai_build_classifier embedding dimensions are inconsistent");
+		}
+		if (validation_rows[i]) {
+			continue;
+		}
+		counts[labelled_classes[i]]++;
+		for (idx_t dimension = 0; dimension < dimensions; dimension++) {
+			centroids[labelled_classes[i]][dimension] += embeddings[i].values[dimension];
+		}
+	}
+	for (idx_t label = 0; label < centroids.size(); label++) {
+		if (counts[label] == 0) {
+			continue;
+		}
+		for (auto &value : centroids[label]) {
+			value /= static_cast<double>(counts[label]);
+		}
+	}
+	idx_t correct = 0;
+	idx_t evaluated = 0;
+	for (idx_t i = 0; i < embeddings.size(); i++) {
+		if (!validation_rows[i]) {
+			continue;
+		}
+		double best_score = -std::numeric_limits<double>::infinity();
+		idx_t best_label = DConstants::INVALID_INDEX;
+		for (idx_t label = 0; label < centroids.size(); label++) {
+			if (counts[label] == 0) {
+				continue;
+			}
+			auto score = CosineSimilarity(embeddings[i].values, centroids[label]);
+			if (score > best_score) {
+				best_score = score;
+				best_label = label;
+			}
+		}
+		correct += best_label == labelled_classes[i] ? 1 : 0;
+		evaluated++;
+	}
+	auto accuracy = evaluated == 0 ? 0 : static_cast<double>(correct) / static_cast<double>(evaluated);
+	auto all_classes_present = std::all_of(counts.begin(), counts.end(), [](idx_t count) { return count > 0; });
+	auto usable = all_classes_present && accuracy >= bind_data.quality_threshold;
+	auto embedding_config = duckdb_ai::ResolveProvider(bind_data.embedding_options);
+	std::ostringstream artifact;
+	artifact << std::setprecision(17);
+	artifact << "{\"version\":1,\"optimization\":\"minimize_cost\",\"usable\":" << (usable ? "true" : "false")
+	         << ",\"accuracy\":" << accuracy << ",\"quality_threshold\":" << bind_data.quality_threshold
+	         << ",\"validation_count\":" << evaluated << ",\"confidence_margin\":" << bind_data.confidence_margin
+	         << ",\"sample_count\":" << labelled_samples.size() << ",\"total_count\":" << state.row_count
+	         << ",\"embedding\":{\"provider\":\"" << JsonEscapeSqlText(embedding_config.provider) << "\",\"model\":\""
+	         << JsonEscapeSqlText(embedding_config.model) << "\",\"profile\":\""
+	         << JsonEscapeSqlText(bind_data.embedding_options.secret_name) << "\",\"base_url\":\""
+	         << JsonEscapeSqlText(bind_data.embedding_options.base_url) << "\",\"options\":\""
+	         << JsonEscapeSqlText(bind_data.embedding_options.model_options) << "\"},\"labels\":[";
+	for (idx_t label = 0; label < bind_data.labels.size(); label++) {
+		if (label > 0) {
+			artifact << ',';
+		}
+		artifact << '"' << JsonEscapeSqlText(bind_data.labels[label]) << '"';
+	}
+	artifact << "],\"centroids\":[";
+	for (idx_t label = 0; label < centroids.size(); label++) {
+		if (label > 0) {
+			artifact << ',';
+		}
+		artifact << '[';
+		for (idx_t dimension = 0; dimension < centroids[label].size(); dimension++) {
+			if (dimension > 0) {
+				artifact << ',';
+			}
+			artifact << centroids[label][dimension];
+		}
+		artifact << ']';
+	}
+	artifact << "]}";
+	return artifact.str();
+}
+
+struct ClassifierBuildOperation {
+	template <class STATE>
+	static void Initialize(STATE &state) {
+		state.size = 0;
+		state.alloc_size = 0;
+		state.sample_count = 0;
+		state.row_count = 0;
+		state.dataptr = nullptr;
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input) {
+		auto &bind_data = unary_input.input.bind_data->Cast<ClassifierBuildBindData>();
+		ClassifierAppendSample(state, unary_input.input.allocator, input.GetData(), input.GetSize(),
+		                       bind_data.sample_size);
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input,
+	                              idx_t count) {
+		for (idx_t i = 0; i < count; i++) {
+			Operation<INPUT_TYPE, STATE, OP>(state, input, unary_input);
+		}
+	}
+
+	template <class STATE, class OP>
+	static void Combine(const STATE &source, STATE &target, AggregateInputData &aggregate_input) {
+		auto &bind_data = aggregate_input.bind_data->Cast<ClassifierBuildBindData>();
+		auto samples = ClassifierSamples(source);
+		target.row_count += source.row_count;
+		for (auto &sample : samples) {
+			if (target.sample_count >= bind_data.sample_size) {
+				break;
+			}
+			auto before = target.row_count;
+			ClassifierAppendSample(target, aggregate_input.allocator, sample.data(), sample.size(),
+			                       bind_data.sample_size);
+			target.row_count = before;
+		}
+	}
+
+	template <class T, class STATE>
+	static void Finalize(STATE &state, T &target, AggregateFinalizeData &finalize_data) {
+		if (state.row_count == 0) {
+			finalize_data.ReturnNull();
+			return;
+		}
+		auto &bind_data = finalize_data.input.bind_data->Cast<ClassifierBuildBindData>();
+		try {
+			auto artifact = BuildClassifierArtifact(bind_data, state);
+			target = finalize_data.ReturnString(string_t(artifact));
+		} catch (std::exception &) {
+			if (bind_data.label_options.fail_on_error) {
+				throw;
+			}
+			finalize_data.ReturnNull();
+		}
+	}
+
+	static bool IgnoreNull() {
+		return true;
+	}
+};
 
 bool ParseAiBooleanResult(const std::string &input, bool &value) {
 	auto normalized = LowerAscii(TrimAscii(input));
@@ -4887,6 +6042,1275 @@ void AiSecretsFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 	output.SetCardinality(count);
 }
 
+unique_ptr<FunctionData> AiModelsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
+                                      vector<string> &names) {
+	AddTableColumns(return_types, names,
+	                {{"name", LogicalType::VARCHAR},
+	                 {"provider", LogicalType::VARCHAR},
+	                 {"model", LogicalType::VARCHAR},
+	                 {"location", LogicalType::VARCHAR},
+	                 {"credential", LogicalType::VARCHAR},
+	                 {"model_type", LogicalType::VARCHAR},
+	                 {"capabilities", LogicalType::VARCHAR},
+	                 {"options", LogicalType::VARCHAR},
+	                 {"max_batch_inputs", LogicalType::BIGINT},
+	                 {"max_batch_tokens", LogicalType::BIGINT},
+	                 {"max_request_bytes", LogicalType::BIGINT},
+	                 {"context_tokens", LogicalType::BIGINT},
+	                 {"embedding_dimensions", LogicalType::BIGINT},
+	                 {"native_batch_jobs", LogicalType::BOOLEAN},
+	                 {"input_token_price_per_million", LogicalType::DOUBLE},
+	                 {"output_token_price_per_million", LogicalType::DOUBLE},
+	                 {"storage", LogicalType::VARCHAR},
+	                 {"persistent", LogicalType::BOOLEAN},
+	                 {"validation_status", LogicalType::VARCHAR}});
+	return nullptr;
+}
+
+unique_ptr<GlobalTableFunctionState> AiModelsInit(ClientContext &context, TableFunctionInitInput &) {
+	auto result = make_uniq<AiModelsScanData>();
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	result->models = SecretManager::Get(context).AllSecrets(transaction);
+	return std::move(result);
+}
+
+void AiModelsFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.global_state->Cast<AiModelsScanData>();
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto &secret_manager = SecretManager::Get(context);
+	idx_t count = 0;
+	while (data.offset < data.models.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &entry = data.models[data.offset++];
+		if (!entry.secret || entry.secret->GetType() != "duckdb_ai_model") {
+			continue;
+		}
+		auto secret = dynamic_cast<const KeyValueSecret *>(entry.secret.get());
+		if (!secret) {
+			continue;
+		}
+		std::string provider;
+		std::string model;
+		std::string location;
+		std::string credential;
+		std::string model_type;
+		std::string capabilities;
+		std::string options;
+		TryReadSecretString(*secret, "provider", provider);
+		TryReadSecretString(*secret, "model", model);
+		TryReadSecretString(*secret, "location", location);
+		TryReadSecretString(*secret, "credential", credential);
+		TryReadSecretString(*secret, "model_type", model_type);
+		TryReadSecretString(*secret, "capabilities", capabilities);
+		TryReadSecretString(*secret, "options", options);
+		std::string validation_status = "valid";
+		duckdb_ai::ProviderCapabilities runtime_capabilities;
+		bool has_runtime_capabilities = false;
+		duckdb_ai::CompletionOptions inspected_options;
+		try {
+			inspected_options.provider = provider;
+			inspected_options.model = model;
+			inspected_options.base_url = location;
+			inspected_options.model_options = options;
+			duckdb_ai::ApplyModelProfileOptions(inspected_options);
+			runtime_capabilities = duckdb_ai::GetProviderCapabilities(inspected_options);
+			has_runtime_capabilities = true;
+			if (!credential.empty()) {
+				auto credential_entry = secret_manager.GetSecretByName(transaction, credential);
+				if (!credential_entry || !credential_entry->secret ||
+				    credential_entry->secret->GetType() != "duckdb_ai") {
+					validation_status = "missing_credential";
+				}
+			}
+		} catch (std::exception &ex) {
+			validation_status = "invalid: " + std::string(ex.what());
+		}
+		double input_price = -1;
+		double output_price = -1;
+		if (inspected_options.has_input_token_price_per_million) {
+			input_price = inspected_options.input_token_price_per_million;
+		}
+		if (inspected_options.has_output_token_price_per_million) {
+			output_price = inspected_options.output_token_price_per_million;
+		}
+		if (input_price < 0 || output_price < 0) {
+			auto operation =
+			    model_type == "embedding" || LowerAscii(capabilities).find("embedding") != std::string::npos
+			        ? std::string("embedding")
+			        : std::string("completion");
+			for (auto &price : duckdb_ai::ModelPrices()) {
+				if (duckdb_ai::NormalizeProviderName(price.provider) == duckdb_ai::NormalizeProviderName(provider) &&
+				    LowerAscii(price.model) == LowerAscii(model) && price.operation == operation) {
+					if (input_price < 0) {
+						input_price = price.input_token_price_per_million;
+					}
+					if (output_price < 0) {
+						output_price = price.output_token_price_per_million;
+					}
+					break;
+				}
+			}
+		}
+		auto name = entry.secret->GetName();
+		auto prefix = ExternalModelSecretName("");
+		if (StartsWith(name, prefix)) {
+			name = name.substr(prefix.size());
+		}
+		idx_t col = 0;
+		output.SetValue(col++, count, Value(name));
+		output.SetValue(col++, count, Value(provider));
+		output.SetValue(col++, count, Value(model));
+		output.SetValue(col++, count, location.empty() ? Value() : Value(location));
+		output.SetValue(col++, count, credential.empty() ? Value() : Value(credential));
+		output.SetValue(col++, count, model_type.empty() ? Value() : Value(model_type));
+		output.SetValue(col++, count, capabilities.empty() ? Value() : Value(capabilities));
+		output.SetValue(col++, count, options.empty() ? Value() : Value(options));
+		output.SetValue(col++, count,
+		                has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_batch_inputs) : Value());
+		output.SetValue(col++, count,
+		                has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_batch_tokens) : Value());
+		output.SetValue(col++, count,
+		                has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_request_bytes) : Value());
+		output.SetValue(col++, count,
+		                has_runtime_capabilities && runtime_capabilities.context_tokens >= 0
+		                    ? Value::BIGINT(runtime_capabilities.context_tokens)
+		                    : Value());
+		output.SetValue(col++, count,
+		                has_runtime_capabilities && runtime_capabilities.embedding_dimensions >= 0
+		                    ? Value::BIGINT(runtime_capabilities.embedding_dimensions)
+		                    : Value());
+		output.SetValue(col++, count,
+		                has_runtime_capabilities ? Value::BOOLEAN(runtime_capabilities.native_batch_jobs) : Value());
+		output.SetValue(col++, count, input_price >= 0 ? Value::DOUBLE(input_price) : Value());
+		output.SetValue(col++, count, output_price >= 0 ? Value::DOUBLE(output_price) : Value());
+		output.SetValue(col++, count, Value(entry.storage_mode));
+		output.SetValue(col++, count, Value::BOOLEAN(entry.persist_type == SecretPersistType::PERSISTENT));
+		output.SetValue(col++, count, Value(validation_status));
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
+std::string ExternalModelInputString(const Value &input) {
+	if (input.IsNull()) {
+		return "";
+	}
+	auto value = input;
+	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
+}
+
+unique_ptr<FunctionData> ExternalModelBind(ClientContext &, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.size() != 9) {
+		throw BinderException("CREATE EXTERNAL MODEL internal plan expected nine arguments");
+	}
+	auto bind_data = make_uniq<ExternalModelBindData>();
+	bind_data->name = ExternalModelInputString(input.inputs[0]);
+	bind_data->provider = duckdb_ai::NormalizeProviderName(ExternalModelInputString(input.inputs[1]));
+	bind_data->model = ExternalModelInputString(input.inputs[2]);
+	bind_data->location = ExternalModelInputString(input.inputs[3]);
+	bind_data->credential = ExternalModelInputString(input.inputs[4]);
+	bind_data->model_type = LowerAscii(ExternalModelInputString(input.inputs[5]));
+	bind_data->capabilities = ExternalModelInputString(input.inputs[6]);
+	bind_data->options = ExternalModelInputString(input.inputs[7]);
+	auto replace_value = input.inputs[8].DefaultCastAs(LogicalType::BOOLEAN);
+	bind_data->replace = BooleanValue::Get(replace_value);
+	if (bind_data->name.empty() || bind_data->provider.empty() || bind_data->model.empty()) {
+		throw BinderException("CREATE EXTERNAL MODEL requires a name, provider, and model");
+	}
+	if (!bind_data->options.empty()) {
+		std::string error;
+		if (!duckdb_ai::ValidateJsonDocument(bind_data->options, error)) {
+			throw BinderException("CREATE EXTERNAL MODEL options must be valid JSON: %s", error);
+		}
+	}
+	AddTableColumns(return_types, names, {{"model_name", LogicalType::VARCHAR}, {"created", LogicalType::BOOLEAN}});
+	return std::move(bind_data);
+}
+
+void ExternalModelFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &state = data_p.global_state->Cast<AiClearUsageScanData>();
+	if (state.emitted) {
+		return;
+	}
+	auto &bind_data = data_p.bind_data->Cast<ExternalModelBindData>();
+	CreateSecretInput input;
+	input.type = "duckdb_ai_model";
+	input.provider = "config";
+	input.name = ExternalModelSecretName(bind_data.name);
+	input.on_conflict = bind_data.replace ? OnCreateConflict::REPLACE_ON_CONFLICT : OnCreateConflict::ERROR_ON_CONFLICT;
+	input.persist_type = SecretPersistType::DEFAULT;
+	input.options["ai_provider"] = Value(bind_data.provider);
+	input.options["model"] = Value(bind_data.model);
+	if (!bind_data.location.empty()) {
+		input.options["location"] = Value(bind_data.location);
+	}
+	if (!bind_data.credential.empty()) {
+		input.options["credential"] = Value(bind_data.credential);
+	}
+	if (!bind_data.model_type.empty()) {
+		input.options["model_type"] = Value(bind_data.model_type);
+	}
+	if (!bind_data.capabilities.empty()) {
+		input.options["capabilities"] = Value(bind_data.capabilities);
+	}
+	if (!bind_data.options.empty()) {
+		input.options["options"] = Value(bind_data.options);
+	}
+	SecretManager::Get(context).CreateSecret(context, input);
+	output.SetValue(0, 0, Value(bind_data.name));
+	output.SetValue(1, 0, Value::BOOLEAN(true));
+	output.SetCardinality(1);
+	state.emitted = true;
+}
+
+TableFunction ExternalModelTableFunction() {
+	auto init = [](ClientContext &, TableFunctionInitInput &) -> unique_ptr<GlobalTableFunctionState> {
+		return make_uniq<AiClearUsageScanData>();
+	};
+	return TableFunction("duckdb_ai_create_external_model",
+	                     {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                      LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                      LogicalType::BOOLEAN},
+	                     ExternalModelFunction, ExternalModelBind, init);
+}
+
+struct ExternalModelDefinition {
+	std::string name;
+	std::string provider;
+	std::string model;
+	std::string location;
+	std::string credential;
+	std::string model_type;
+	std::string capabilities;
+	std::string options;
+};
+
+ExternalModelDefinition GetExternalModel(ClientContext &context, const std::string &name) {
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto entry = SecretManager::Get(context).GetSecretByName(transaction, ExternalModelSecretName(name));
+	if (!entry || !entry->secret || entry->secret->GetType() != "duckdb_ai_model") {
+		throw InvalidInputException("External model \"%s\" was not found", name);
+	}
+	auto secret = dynamic_cast<const KeyValueSecret *>(entry->secret.get());
+	if (!secret) {
+		throw InternalException("External model \"%s\" has an invalid catalog representation", name);
+	}
+	ExternalModelDefinition result;
+	result.name = name;
+	TryReadSecretString(*secret, "provider", result.provider);
+	TryReadSecretString(*secret, "model", result.model);
+	TryReadSecretString(*secret, "location", result.location);
+	TryReadSecretString(*secret, "credential", result.credential);
+	TryReadSecretString(*secret, "model_type", result.model_type);
+	TryReadSecretString(*secret, "capabilities", result.capabilities);
+	TryReadSecretString(*secret, "options", result.options);
+	return result;
+}
+
+unique_ptr<FunctionData> ControlPlaneBind(ClientContext &context, TableFunctionBindInput &input,
+                                          vector<LogicalType> &return_types, vector<string> &names,
+                                          ControlPlaneOperation operation) {
+	if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
+		throw BinderException("AI control-plane functions require one non-NULL profile or operation id");
+	}
+	auto bind_data = make_uniq<ControlPlaneBindData>(operation);
+	bind_data->argument = ExternalModelInputString(input.inputs[0]);
+	ApplySettings(context, bind_data->options);
+	duckdb_ai::AttachProviderRuntimeState(bind_data->options, context);
+	if (operation == ControlPlaneOperation::PROVISION) {
+		for (auto &parameter : input.named_parameters) {
+			auto name = LowerAscii(parameter.first);
+			auto value = parameter.second;
+			if (name == "dry_run") {
+				value = value.DefaultCastAs(LogicalType::BOOLEAN);
+				bind_data->dry_run = BooleanValue::Get(value);
+			} else if (name == "max_hourly_cost_usd") {
+				value = value.DefaultCastAs(LogicalType::DOUBLE);
+				bind_data->max_hourly_cost_usd = DoubleValue::Get(value);
+				bind_data->has_max_hourly_cost = true;
+			} else {
+				throw BinderException("Unsupported ai_provision_endpoint option \"%s\"", name);
+			}
+		}
+		if (!bind_data->dry_run && (!bind_data->has_max_hourly_cost || !std::isfinite(bind_data->max_hourly_cost_usd) ||
+		                            bind_data->max_hourly_cost_usd <= 0)) {
+			throw BinderException("ai_provision_endpoint requires max_hourly_cost_usd > 0 when dry_run is false");
+		}
+	}
+	AddTableColumns(return_types, names,
+	                {{"operation_id", LogicalType::VARCHAR},
+	                 {"status", LogicalType::VARCHAR},
+	                 {"endpoint_url", LogicalType::VARCHAR},
+	                 {"estimated_hourly_cost_usd", LogicalType::DOUBLE},
+	                 {"action_required", LogicalType::VARCHAR},
+	                 {"response", LogicalType::VARCHAR}});
+	return std::move(bind_data);
+}
+
+unique_ptr<FunctionData> ProvisionEndpointBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<string> &names) {
+	return ControlPlaneBind(context, input, return_types, names, ControlPlaneOperation::PROVISION);
+}
+
+unique_ptr<FunctionData> EndpointStatusBind(ClientContext &context, TableFunctionBindInput &input,
+                                            vector<LogicalType> &return_types, vector<string> &names) {
+	return ControlPlaneBind(context, input, return_types, names, ControlPlaneOperation::STATUS);
+}
+
+unique_ptr<FunctionData> DeprovisionEndpointBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<string> &names) {
+	return ControlPlaneBind(context, input, return_types, names, ControlPlaneOperation::DEPROVISION);
+}
+
+using SqlYyjsonDoc = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>;
+
+SqlYyjsonDoc ParseSqlJson(const std::string &input) {
+	duckdb_yyjson::yyjson_read_err error;
+	auto doc = duckdb_yyjson::yyjson_read_opts(const_cast<char *>(input.data()), input.size(),
+	                                           duckdb_yyjson::YYJSON_READ_NOFLAG, nullptr, &error);
+	return SqlYyjsonDoc(doc, duckdb_yyjson::yyjson_doc_free);
+}
+
+std::string SqlJsonString(duckdb_yyjson::yyjson_val *root, const char *name) {
+	if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+		return "";
+	}
+	auto value = duckdb_yyjson::yyjson_obj_get(root, name);
+	if (!value || !duckdb_yyjson::yyjson_is_str(value)) {
+		return "";
+	}
+	return std::string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value));
+}
+
+bool SqlJsonDouble(duckdb_yyjson::yyjson_val *root, const char *name, double &result) {
+	if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+		return false;
+	}
+	auto value = duckdb_yyjson::yyjson_obj_get(root, name);
+	if (!value || !duckdb_yyjson::yyjson_is_num(value)) {
+		return false;
+	}
+	result = duckdb_yyjson::yyjson_get_num(value);
+	return std::isfinite(result);
+}
+
+void ControlPlaneFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &state = data_p.global_state->Cast<AiClearUsageScanData>();
+	if (state.emitted) {
+		return;
+	}
+	auto &bind_data = data_p.bind_data->Cast<ControlPlaneBindData>();
+	std::string response;
+	std::string operation_id;
+	std::string status;
+	std::string endpoint_url;
+	std::string action_required;
+	double estimated_cost = 0;
+	bool has_estimated_cost = false;
+	if (bind_data.operation == ControlPlaneOperation::PROVISION && bind_data.dry_run) {
+		auto model = GetExternalModel(context, bind_data.argument);
+		status = "planned";
+		endpoint_url = model.location;
+		action_required = "rerun with dry_run := false and an explicit max_hourly_cost_usd ceiling";
+		response = "{\"profile\":\"" + JsonEscapeSqlText(model.name) + "\",\"provider\":\"" +
+		           JsonEscapeSqlText(model.provider) + "\",\"model\":\"" + JsonEscapeSqlText(model.model) +
+		           "\",\"dry_run\":true}";
+	} else {
+		std::string path;
+		std::string payload;
+		if (bind_data.operation == ControlPlaneOperation::PROVISION) {
+			auto model = GetExternalModel(context, bind_data.argument);
+			path = "/v1/endpoints/provision";
+			payload = "{\"profile\":\"" + JsonEscapeSqlText(model.name) + "\",\"provider\":\"" +
+			          JsonEscapeSqlText(model.provider) + "\",\"model\":\"" + JsonEscapeSqlText(model.model) +
+			          "\",\"location\":\"" + JsonEscapeSqlText(model.location) + "\",\"credential\":\"" +
+			          JsonEscapeSqlText(model.credential) +
+			          "\",\"max_hourly_cost_usd\":" + std::to_string(bind_data.max_hourly_cost_usd) + "}";
+		} else if (bind_data.operation == ControlPlaneOperation::STATUS) {
+			path = "/v1/endpoints/status";
+			payload = "{\"operation_id\":\"" + JsonEscapeSqlText(bind_data.argument) + "\"}";
+		} else {
+			auto model = GetExternalModel(context, bind_data.argument);
+			path = "/v1/endpoints/deprovision";
+			payload = "{\"profile\":\"" + JsonEscapeSqlText(model.name) + "\"}";
+		}
+		response = duckdb_ai::ControlPlaneRequest(path, payload, bind_data.options);
+		auto doc = ParseSqlJson(response);
+		auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+		operation_id = SqlJsonString(root, "operation_id");
+		status = SqlJsonString(root, "status");
+		endpoint_url = SqlJsonString(root, "endpoint_url");
+		action_required = SqlJsonString(root, "action_required");
+		has_estimated_cost = SqlJsonDouble(root, "estimated_hourly_cost_usd", estimated_cost);
+	}
+	idx_t col = 0;
+	output.SetValue(col++, 0, operation_id.empty() ? Value() : Value(operation_id));
+	output.SetValue(col++, 0, status.empty() ? Value() : Value(status));
+	output.SetValue(col++, 0, endpoint_url.empty() ? Value() : Value(endpoint_url));
+	output.SetValue(col++, 0, has_estimated_cost ? Value::DOUBLE(estimated_cost) : Value());
+	output.SetValue(col++, 0, action_required.empty() ? Value() : Value(action_required));
+	output.SetValue(col++, 0, Value(response));
+	output.SetCardinality(1);
+	state.emitted = true;
+}
+
+std::string Base64Encode(const std::string &input) {
+	static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string output;
+	output.reserve(((input.size() + 2) / 3) * 4);
+	for (idx_t i = 0; i < input.size(); i += 3) {
+		auto a = static_cast<unsigned char>(input[i]);
+		auto b = i + 1 < input.size() ? static_cast<unsigned char>(input[i + 1]) : 0;
+		auto c = i + 2 < input.size() ? static_cast<unsigned char>(input[i + 2]) : 0;
+		auto packed = (static_cast<uint32_t>(a) << 16) | (static_cast<uint32_t>(b) << 8) | c;
+		output.push_back(alphabet[(packed >> 18) & 0x3f]);
+		output.push_back(alphabet[(packed >> 12) & 0x3f]);
+		output.push_back(i + 1 < input.size() ? alphabet[(packed >> 6) & 0x3f] : '=');
+		output.push_back(i + 2 < input.size() ? alphabet[packed & 0x3f] : '=');
+	}
+	return output;
+}
+
+std::string SqlJsonValueText(duckdb_yyjson::yyjson_val *root, const char *name) {
+	if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+		return "";
+	}
+	auto value = duckdb_yyjson::yyjson_obj_get(root, name);
+	if (!value || duckdb_yyjson::yyjson_is_null(value)) {
+		return "";
+	}
+	if (duckdb_yyjson::yyjson_is_str(value)) {
+		return std::string(duckdb_yyjson::yyjson_get_str(value), duckdb_yyjson::yyjson_get_len(value));
+	}
+	auto serialized = duckdb_yyjson::yyjson_val_write(value, duckdb_yyjson::YYJSON_WRITE_NOFLAG, nullptr);
+	if (!serialized) {
+		return "";
+	}
+	std::string result(serialized);
+	std::free(serialized);
+	return result;
+}
+
+int64_t SqlJsonInteger(duckdb_yyjson::yyjson_val *root, const char *name) {
+	if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+		return -1;
+	}
+	auto value = duckdb_yyjson::yyjson_obj_get(root, name);
+	if (!value || !duckdb_yyjson::yyjson_is_int(value)) {
+		return -1;
+	}
+	if (duckdb_yyjson::yyjson_is_uint(value)) {
+		auto unsigned_value = duckdb_yyjson::yyjson_get_uint(value);
+		if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+			return -1;
+		}
+		return static_cast<int64_t>(unsigned_value);
+	}
+	return duckdb_yyjson::yyjson_get_sint(value);
+}
+
+unique_ptr<FunctionData> DocumentParseBind(ClientContext &context, TableFunctionBindInput &input,
+                                           vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.size() != 3 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
+		throw BinderException("ai_parse_document requires non-NULL content, mime_type, and parser_profile arguments");
+	}
+	auto bind_data = make_uniq<DocumentParseBindData>();
+	auto content = input.inputs[0].DefaultCastAs(LogicalType::BLOB);
+	bind_data->content = StringValue::Get(content);
+	bind_data->mime_type = ExternalModelInputString(input.inputs[1]);
+	bind_data->parser_profile = ExternalModelInputString(input.inputs[2]);
+	ApplySettings(context, bind_data->options);
+	StampProviderFunction(bind_data->options, "ai_parse_document");
+	duckdb_ai::AttachProviderRuntimeState(bind_data->options, context);
+	for (auto &parameter : input.named_parameters) {
+		auto name = LowerAscii(parameter.first);
+		if (name == "pages") {
+			auto value = parameter.second;
+			bind_data->pages = value.IsNull() ? "" : StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
+		} else if (!ApplyCompletionValueOption(bind_data->options, "ai_parse_document", name, parameter.second, true,
+		                                       false)) {
+			throw BinderException("Unsupported ai_parse_document option \"%s\"", name);
+		}
+	}
+	AddTableColumns(return_types, names,
+	                {{"document_id", LogicalType::VARCHAR},
+	                 {"page", LogicalType::BIGINT},
+	                 {"element_index", LogicalType::BIGINT},
+	                 {"element_type", LogicalType::VARCHAR},
+	                 {"text", LogicalType::VARCHAR},
+	                 {"markdown", LogicalType::VARCHAR},
+	                 {"bbox", LogicalType::VARCHAR},
+	                 {"confidence", LogicalType::DOUBLE},
+	                 {"metadata", LogicalType::VARCHAR},
+	                 {"error", LogicalType::VARCHAR}});
+	return std::move(bind_data);
+}
+
+unique_ptr<GlobalTableFunctionState> DocumentParseInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<DocumentParseScanData>();
+}
+
+void LoadDocumentElements(const DocumentParseBindData &bind_data, DocumentParseScanData &state) {
+	if (state.loaded) {
+		return;
+	}
+	state.loaded = true;
+	try {
+		auto payload = "{\"content_base64\":\"" + Base64Encode(bind_data.content) + "\",\"mime_type\":\"" +
+		               JsonEscapeSqlText(bind_data.mime_type) + "\",\"parser_profile\":\"" +
+		               JsonEscapeSqlText(bind_data.parser_profile) + "\",\"pages\":\"" +
+		               JsonEscapeSqlText(bind_data.pages) + "\"}";
+		auto response = duckdb_ai::ControlPlaneRequest("/v1/documents/parse", payload, bind_data.options);
+		auto doc = ParseSqlJson(response);
+		auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+		auto document_id = SqlJsonString(root, "document_id");
+		auto elements =
+		    root && duckdb_yyjson::yyjson_is_obj(root) ? duckdb_yyjson::yyjson_obj_get(root, "elements") : nullptr;
+		if (!elements || !duckdb_yyjson::yyjson_is_arr(elements)) {
+			throw IOException("AI document parser response must contain an elements array");
+		}
+		if (elements && duckdb_yyjson::yyjson_is_arr(elements)) {
+			duckdb_yyjson::yyjson_val *element;
+			size_t index;
+			size_t max;
+			yyjson_arr_foreach(elements, index, max, element) {
+				DocumentElement result;
+				result.document_id = document_id;
+				if (!duckdb_yyjson::yyjson_is_obj(element)) {
+					result.error = "AI document parser element must be an object";
+					state.elements.push_back(std::move(result));
+					continue;
+				}
+				result.page = SqlJsonInteger(element, "page");
+				result.element_index = SqlJsonInteger(element, "element_index");
+				result.element_type = SqlJsonString(element, "element_type");
+				result.text = SqlJsonString(element, "text");
+				result.markdown = SqlJsonString(element, "markdown");
+				result.bbox = SqlJsonValueText(element, "bbox");
+				result.metadata = SqlJsonValueText(element, "metadata");
+				result.error = SqlJsonString(element, "error");
+				result.has_confidence = SqlJsonDouble(element, "confidence", result.confidence);
+				state.elements.push_back(std::move(result));
+			}
+		}
+		if (state.elements.empty()) {
+			auto error = SqlJsonString(root, "error");
+			DocumentElement result;
+			result.document_id = document_id;
+			result.error = error.empty() ? "AI document parser returned no elements" : error;
+			state.elements.push_back(std::move(result));
+		}
+	} catch (std::exception &ex) {
+		if (bind_data.options.fail_on_error) {
+			throw;
+		}
+		DocumentElement result;
+		result.error = ex.what();
+		state.elements.push_back(std::move(result));
+	}
+}
+
+void DocumentParseFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->Cast<DocumentParseBindData>();
+	auto &data = data_p.global_state->Cast<DocumentParseScanData>();
+	LoadDocumentElements(bind_data, data);
+	idx_t count = 0;
+	while (data.offset < data.elements.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &element = data.elements[data.offset++];
+		idx_t col = 0;
+		output.SetValue(col++, count, element.document_id.empty() ? Value() : Value(element.document_id));
+		output.SetValue(col++, count, element.page < 0 ? Value() : Value::BIGINT(element.page));
+		output.SetValue(col++, count, element.element_index < 0 ? Value() : Value::BIGINT(element.element_index));
+		output.SetValue(col++, count, element.element_type.empty() ? Value() : Value(element.element_type));
+		output.SetValue(col++, count, element.text.empty() ? Value() : Value(element.text));
+		output.SetValue(col++, count, element.markdown.empty() ? Value() : Value(element.markdown));
+		output.SetValue(col++, count, element.bbox.empty() ? Value() : Value(element.bbox));
+		output.SetValue(col++, count, element.has_confidence ? Value::DOUBLE(element.confidence) : Value());
+		output.SetValue(col++, count, element.metadata.empty() ? Value() : Value(element.metadata));
+		output.SetValue(col++, count, element.error.empty() ? Value() : Value(element.error));
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
+struct ParsedClassifierArtifact {
+	bool usable = false;
+	double accuracy = 0;
+	double confidence_margin = 0.05;
+	std::vector<std::string> labels;
+	std::vector<std::vector<double>> centroids;
+	duckdb_ai::CompletionOptions embedding_options;
+};
+
+struct OptimizedClassifierRow {
+	idx_t row = 0;
+	std::string input;
+	ParsedClassifierArtifact artifact;
+	std::vector<double> embedding;
+	std::string local_error;
+	double best_score = 0;
+	double score_margin = 0;
+	idx_t best_label = DConstants::INVALID_INDEX;
+};
+
+bool RequiredJsonBoolean(duckdb_yyjson::yyjson_val *root, const char *name) {
+	auto value = root && duckdb_yyjson::yyjson_is_obj(root) ? duckdb_yyjson::yyjson_obj_get(root, name) : nullptr;
+	if (!value || !duckdb_yyjson::yyjson_is_bool(value)) {
+		throw InvalidInputException("classifier artifact field \"%s\" must be a boolean", name);
+	}
+	return duckdb_yyjson::yyjson_get_bool(value);
+}
+
+double RequiredJsonNumber(duckdb_yyjson::yyjson_val *root, const char *name) {
+	double result;
+	if (!SqlJsonDouble(root, name, result)) {
+		throw InvalidInputException("classifier artifact field \"%s\" must be a finite number", name);
+	}
+	return result;
+}
+
+ParsedClassifierArtifact ParseClassifierArtifact(ClientContext &context, const std::string &input) {
+	auto doc = ParseSqlJson(input);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+	if (!root || !duckdb_yyjson::yyjson_is_obj(root) || SqlJsonInteger(root, "version") != 1 ||
+	    SqlJsonString(root, "optimization") != "minimize_cost") {
+		throw InvalidInputException("invalid ai_build_classifier artifact");
+	}
+	ParsedClassifierArtifact result;
+	result.usable = RequiredJsonBoolean(root, "usable");
+	result.accuracy = RequiredJsonNumber(root, "accuracy");
+	result.confidence_margin = RequiredJsonNumber(root, "confidence_margin");
+	if (result.confidence_margin < 0 || result.confidence_margin > 1) {
+		throw InvalidInputException("classifier artifact confidence_margin must be between 0 and 1");
+	}
+	auto labels = duckdb_yyjson::yyjson_obj_get(root, "labels");
+	if (!labels || !duckdb_yyjson::yyjson_is_arr(labels)) {
+		throw InvalidInputException("classifier artifact labels must be an array");
+	}
+	duckdb_yyjson::yyjson_val *entry;
+	size_t index;
+	size_t max;
+	yyjson_arr_foreach(labels, index, max, entry) {
+		if (!duckdb_yyjson::yyjson_is_str(entry)) {
+			throw InvalidInputException("classifier artifact labels must contain only strings");
+		}
+		result.labels.emplace_back(duckdb_yyjson::yyjson_get_str(entry), duckdb_yyjson::yyjson_get_len(entry));
+	}
+	auto centroids = duckdb_yyjson::yyjson_obj_get(root, "centroids");
+	if (!centroids || !duckdb_yyjson::yyjson_is_arr(centroids)) {
+		throw InvalidInputException("classifier artifact centroids must be an array");
+	}
+	yyjson_arr_foreach(centroids, index, max, entry) {
+		if (!duckdb_yyjson::yyjson_is_arr(entry)) {
+			throw InvalidInputException("classifier artifact centroids must be numeric arrays");
+		}
+		std::vector<double> centroid;
+		duckdb_yyjson::yyjson_val *coordinate;
+		size_t coordinate_index;
+		size_t coordinate_max;
+		yyjson_arr_foreach(entry, coordinate_index, coordinate_max, coordinate) {
+			if (!duckdb_yyjson::yyjson_is_num(coordinate)) {
+				throw InvalidInputException("classifier artifact centroids must contain only numbers");
+			}
+			auto value = duckdb_yyjson::yyjson_get_num(coordinate);
+			if (!std::isfinite(value)) {
+				throw InvalidInputException("classifier artifact centroid values must be finite");
+			}
+			centroid.push_back(value);
+		}
+		result.centroids.push_back(std::move(centroid));
+	}
+	if (result.labels.size() < 2 || result.labels.size() != result.centroids.size() || result.centroids[0].empty()) {
+		throw InvalidInputException("classifier artifact must contain matching labels and non-empty centroids");
+	}
+	for (auto &centroid : result.centroids) {
+		if (centroid.size() != result.centroids[0].size()) {
+			throw InvalidInputException("classifier artifact centroid dimensions are inconsistent");
+		}
+	}
+	auto embedding = duckdb_yyjson::yyjson_obj_get(root, "embedding");
+	if (!embedding || !duckdb_yyjson::yyjson_is_obj(embedding)) {
+		throw InvalidInputException("classifier artifact embedding configuration is missing");
+	}
+	ApplySettings(context, result.embedding_options, AiModelSettingKind::EMBEDDING);
+	result.embedding_options.provider = SqlJsonString(embedding, "provider");
+	result.embedding_options.model = SqlJsonString(embedding, "model");
+	result.embedding_options.secret_name = SqlJsonString(embedding, "profile");
+	result.embedding_options.base_url = SqlJsonString(embedding, "base_url");
+	result.embedding_options.model_options = SqlJsonString(embedding, "options");
+	if (result.embedding_options.provider.empty() || result.embedding_options.model.empty()) {
+		throw InvalidInputException("classifier artifact embedding provider and model are required");
+	}
+	if (result.accuracy < 0 || result.accuracy > 1) {
+		throw InvalidInputException("classifier artifact accuracy must be between 0 and 1");
+	}
+	StampProviderFunction(result.embedding_options, "ai_classify_optimized_embed");
+	duckdb_ai::AttachProviderRuntimeState(result.embedding_options, context);
+	return result;
+}
+
+LogicalType AiOptimizedClassifierReturnType() {
+	child_list_t<LogicalType> children;
+	children.emplace_back("value", LogicalType::VARCHAR);
+	children.emplace_back("used_fallback", LogicalType::BOOLEAN);
+	children.emplace_back("confidence", LogicalType::DOUBLE);
+	children.emplace_back("error", LogicalType::VARCHAR);
+	children.emplace_back("metadata", LogicalType::VARCHAR);
+	return LogicalType::STRUCT(std::move(children));
+}
+
+Value AiOptimizedClassifierResultValue(const LogicalType &result_type, const std::string &value, bool used_fallback,
+                                       double confidence, bool has_confidence, const std::string &error,
+                                       const std::string &metadata) {
+	vector<Value> children;
+	children.push_back(value.empty() ? Value(LogicalType::VARCHAR) : Value(value));
+	children.push_back(Value::BOOLEAN(used_fallback));
+	children.push_back(has_confidence ? Value::DOUBLE(confidence) : Value(LogicalType::DOUBLE));
+	children.push_back(error.empty() ? Value(LogicalType::VARCHAR) : Value(error));
+	children.push_back(metadata.empty() ? Value(LogicalType::VARCHAR) : Value(metadata));
+	return Value::STRUCT(result_type, std::move(children));
+}
+
+unique_ptr<FunctionData> AiOptimizedClassifierBind(ClientContext &context, ScalarFunction &bound_function,
+                                                   vector<unique_ptr<Expression>> &arguments) {
+	if (arguments.size() < 2) {
+		throw BinderException("ai_classify_optimized requires input and classifier artifact arguments");
+	}
+	auto bind_data = make_uniq<OptimizedClassifierBindData>();
+	ApplySettings(context, bind_data->fallback_options, AiModelSettingKind::TASK);
+	StampProviderFunction(bind_data->fallback_options, "ai_classify_optimized_fallback");
+	duckdb_ai::AttachProviderRuntimeState(bind_data->fallback_options, context);
+	for (idx_t i = 2; i < arguments.size(); i++) {
+		auto alias = LowerAscii(arguments[i]->GetAlias());
+		if (alias.empty()) {
+			throw BinderException("ai_classify_optimized options must use named arguments");
+		}
+		if (alias == "fallback_profile") {
+			bind_data->fallback_options.secret_name = EvaluateConstantString(context, *arguments[i], alias);
+			bound_function.arguments.emplace_back(LogicalType::VARCHAR);
+			continue;
+		}
+		LogicalType option_type;
+		if (!TryGetOptionType(alias, option_type)) {
+			throw BinderException("Unsupported ai_classify_optimized option \"%s\"", alias);
+		}
+		ApplyNamedOption(context, bind_data->fallback_options, *arguments[i], alias);
+		bound_function.arguments.emplace_back(option_type);
+	}
+	bind_data->fallback_options.on_error = "capture";
+	bind_data->fallback_options.fail_on_error = false;
+	ApplyAiProviderSecret(context, bind_data->fallback_options);
+	bound_function.SetReturnType(AiOptimizedClassifierReturnType());
+	return std::move(bind_data);
+}
+
+std::string OptimizedClassifierMetadata(const OptimizedClassifierRow &row, const std::string &path,
+                                        const std::string &reason, const std::string &provider = "",
+                                        const std::string &model = "") {
+	std::ostringstream output;
+	output << std::setprecision(17) << "{\"path\":\"" << JsonEscapeSqlText(path)
+	       << "\",\"artifact_accuracy\":" << row.artifact.accuracy;
+	if (!reason.empty()) {
+		output << ",\"reason\":\"" << JsonEscapeSqlText(reason) << '"';
+	}
+	if (row.best_label != DConstants::INVALID_INDEX) {
+		output << ",\"cosine_score\":" << row.best_score << ",\"centroid_margin\":" << row.score_margin;
+	}
+	if (!provider.empty()) {
+		output << ",\"provider\":\"" << JsonEscapeSqlText(provider) << '"';
+	}
+	if (!model.empty()) {
+		output << ",\"model\":\"" << JsonEscapeSqlText(model) << '"';
+	}
+	output << '}';
+	return output.str();
+}
+
+void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
+	auto &bind_data = func_expr.bind_info->Cast<OptimizedClassifierBindData>();
+	auto result_type = AiOptimizedClassifierReturnType();
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &result_validity = FlatVector::Validity(result);
+	StringVectorReader input_reader(args, 0);
+	StringVectorReader artifact_reader(args, 1);
+	std::vector<OptimizedClassifierRow> rows;
+	std::vector<SecretResolutionCacheEntry> embedding_secret_cache;
+	for (idx_t row_index = 0; row_index < args.size(); row_index++) {
+		std::string input;
+		std::string artifact;
+		if (!input_reader.Read(row_index, input) || !artifact_reader.Read(row_index, artifact)) {
+			result_validity.SetInvalid(row_index);
+			continue;
+		}
+		try {
+			OptimizedClassifierRow row;
+			row.row = row_index;
+			row.input = std::move(input);
+			row.artifact = ParseClassifierArtifact(state.GetContext(), artifact);
+			row.artifact.embedding_options.query_id = bind_data.fallback_options.query_id + ":embed";
+			if (!row.artifact.usable) {
+				row.local_error = "artifact quality threshold was not met";
+			} else {
+				ApplyAiProviderSecretCached(state.GetContext(), row.artifact.embedding_options, embedding_secret_cache);
+			}
+			rows.push_back(std::move(row));
+		} catch (std::exception &ex) {
+			auto metadata = "{\"path\":\"error\",\"reason\":\"invalid classifier artifact\"}";
+			result.SetValue(row_index,
+			                AiOptimizedClassifierResultValue(result_type, "", false, 0, false, ex.what(), metadata));
+		}
+	}
+
+	std::vector<bool> grouped(rows.size(), false);
+	for (idx_t group_start = 0; group_start < rows.size(); group_start++) {
+		if (grouped[group_start] || !rows[group_start].local_error.empty()) {
+			continue;
+		}
+		std::vector<idx_t> group_rows;
+		std::vector<std::string> unique_inputs;
+		std::unordered_map<std::string, idx_t> input_indexes;
+		for (idx_t row = group_start; row < rows.size(); row++) {
+			if (grouped[row] || !rows[row].local_error.empty() ||
+			    !CompletionOptionsEqual(rows[group_start].artifact.embedding_options,
+			                            rows[row].artifact.embedding_options)) {
+				continue;
+			}
+			grouped[row] = true;
+			group_rows.push_back(row);
+			if (input_indexes.find(rows[row].input) == input_indexes.end()) {
+				input_indexes[rows[row].input] = unique_inputs.size();
+				unique_inputs.push_back(rows[row].input);
+			}
+		}
+		try {
+			auto embeddings = duckdb_ai::EmbedMany(unique_inputs, rows[group_start].artifact.embedding_options);
+			if (embeddings.size() != unique_inputs.size()) {
+				throw InvalidInputException("embedding provider returned the wrong number of classifier embeddings");
+			}
+			for (auto row : group_rows) {
+				rows[row].embedding = embeddings[input_indexes[rows[row].input]].values;
+			}
+		} catch (std::exception &ex) {
+			for (auto row : group_rows) {
+				rows[row].local_error = std::string("local embedding failed: ") + ex.what();
+			}
+		}
+	}
+
+	std::vector<ProviderStringJob> fallback_jobs;
+	std::unordered_map<idx_t, idx_t> fallback_row_indexes;
+	std::vector<SecretResolutionCacheEntry> fallback_secret_cache;
+	for (idx_t row_index = 0; row_index < rows.size(); row_index++) {
+		auto &row = rows[row_index];
+		if (row.local_error.empty()) {
+			try {
+				double best = -std::numeric_limits<double>::infinity();
+				double second = -std::numeric_limits<double>::infinity();
+				for (idx_t label = 0; label < row.artifact.centroids.size(); label++) {
+					auto score = CosineSimilarity(row.embedding, row.artifact.centroids[label]);
+					if (score > best) {
+						second = best;
+						best = score;
+						row.best_label = label;
+					} else if (score > second) {
+						second = score;
+					}
+				}
+				row.best_score = best;
+				row.score_margin = best - second;
+				if (row.score_margin >= row.artifact.confidence_margin) {
+					auto metadata = OptimizedClassifierMetadata(row, "local", "");
+					result.SetValue(row.row,
+					                AiOptimizedClassifierResultValue(result_type, row.artifact.labels[row.best_label],
+					                                                 false, row.best_score, true, "", metadata));
+					continue;
+				}
+				row.local_error = "centroid margin below confidence threshold";
+			} catch (std::exception &ex) {
+				row.local_error = std::string("local classification failed: ") + ex.what();
+			}
+		}
+		try {
+			auto options = bind_data.fallback_options;
+			ApplyAiProviderSecretCached(state.GetContext(), options, fallback_secret_cache);
+			ProviderStringJob job;
+			job.row = row.row;
+			job.input = row.input;
+			job.parameter = JoinClassifierLabels(row.artifact.labels);
+			job.options = std::move(options);
+			job.fail_on_error = false;
+			fallback_row_indexes[job.row] = row_index;
+			fallback_jobs.push_back(std::move(job));
+		} catch (std::exception &ex) {
+			auto metadata = OptimizedClassifierMetadata(row, "fallback", row.local_error);
+			result.SetValue(row.row,
+			                AiOptimizedClassifierResultValue(result_type, "", true, 0, false, ex.what(), metadata));
+		}
+	}
+
+	RunProviderJobs(fallback_jobs, [&](ProviderStringJob &job) {
+		AppendSystemPrompt(job.options, BuildTaskSystemPrompt(AiTaskKind::CLASSIFY, job.parameter));
+		job.output =
+		    duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter), job.options).text;
+	});
+	for (auto &job : fallback_jobs) {
+		auto &row = rows[fallback_row_indexes[job.row]];
+		auto config = duckdb_ai::ResolveProvider(job.options);
+		auto metadata = OptimizedClassifierMetadata(row, "fallback", row.local_error, config.provider, config.model);
+		if (job.exception) {
+			result.SetValue(job.row, AiOptimizedClassifierResultValue(result_type, "", true, 0, false,
+			                                                          job.error_message, metadata));
+			continue;
+		}
+		auto label = ClassifierLabelIndex(row.artifact.labels, job.output);
+		if (label == DConstants::INVALID_INDEX) {
+			result.SetValue(job.row, AiOptimizedClassifierResultValue(
+			                             result_type, "", true, 0, false,
+			                             "fallback classifier returned a label outside the artifact", metadata));
+			continue;
+		}
+		result.SetValue(job.row, AiOptimizedClassifierResultValue(result_type, row.artifact.labels[label], true, 0,
+		                                                          false, "", metadata));
+	}
+}
+
+uint64_t StableTextHash(const std::string &input) {
+	uint64_t hash = 1469598103934665603ULL;
+	for (auto c : input) {
+		hash ^= static_cast<unsigned char>(c);
+		hash *= 1099511628211ULL;
+	}
+	return hash;
+}
+
+vector<idx_t> Utf8ByteOffsets(const std::string &input) {
+	vector<idx_t> offsets;
+	for (idx_t offset = 0; offset < input.size();) {
+		offsets.push_back(offset);
+		auto lead = static_cast<unsigned char>(input[offset]);
+		idx_t width = 1;
+		if ((lead & 0xe0) == 0xc0) {
+			width = 2;
+		} else if ((lead & 0xf0) == 0xe0) {
+			width = 3;
+		} else if ((lead & 0xf8) == 0xf0) {
+			width = 4;
+		}
+		offset = MinValue<idx_t>(input.size(), offset + width);
+	}
+	offsets.push_back(input.size());
+	return offsets;
+}
+
+bool IsChunkWhitespace(char value) {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n';
+}
+
+idx_t FindRecursiveChunkEnd(const std::string &input, const vector<idx_t> &offsets, idx_t start, idx_t target) {
+	auto minimum = start + MaxValue<idx_t>(1, (target - start) / 2);
+	auto find_boundary = [&](uint8_t kind) {
+		auto lower_bound = kind == 0 ? start : minimum;
+		for (idx_t candidate = target; candidate > lower_bound; candidate--) {
+			auto byte = offsets[candidate];
+			if (kind == 0 && byte > 0 && input[byte - 1] == '\f') {
+				return candidate;
+			}
+			if (kind == 0 && byte >= 2 && input[byte - 1] == '\n' && input[byte - 2] == '\n') {
+				return candidate;
+			}
+			if (kind == 1 && byte > 0 && (input[byte - 1] == '.' || input[byte - 1] == '!' || input[byte - 1] == '?') &&
+			    (byte == input.size() || IsChunkWhitespace(input[byte]))) {
+				return candidate;
+			}
+			if (kind == 2 && byte > 0 && input[byte - 1] == '\n') {
+				return candidate;
+			}
+			if (kind == 3 && byte > 0 && IsChunkWhitespace(input[byte - 1])) {
+				return candidate;
+			}
+		}
+		return idx_t(0);
+	};
+	for (uint8_t kind = 0; kind < 4; kind++) {
+		auto boundary = find_boundary(kind);
+		if (boundary > start) {
+			return boundary;
+		}
+	}
+	return target;
+}
+
+std::string MarkdownHeadingAt(const std::string &input, idx_t byte_offset) {
+	std::string heading;
+	for (idx_t line_start = 0; line_start <= byte_offset && line_start < input.size();) {
+		auto newline = input.find('\n', line_start);
+		auto page_break = input.find('\f', line_start);
+		auto line_end = MinValue<idx_t>(newline == std::string::npos ? input.size() : newline,
+		                                page_break == std::string::npos ? input.size() : page_break);
+		if (line_end == std::string::npos) {
+			line_end = input.size();
+		}
+		auto marker_end = line_start;
+		while (marker_end < line_end && input[marker_end] == '#' && marker_end - line_start < 6) {
+			marker_end++;
+		}
+		if (marker_end > line_start && marker_end < line_end && input[marker_end] == ' ') {
+			heading = TrimAscii(input.substr(marker_end + 1, line_end - marker_end - 1));
+		}
+		if (line_end >= byte_offset || line_end == input.size()) {
+			break;
+		}
+		line_start = line_end + 1;
+	}
+	return heading;
+}
+
+vector<AiTextChunk> BuildTextChunks(const std::string &input, std::string source_id, idx_t chunk_size,
+                                    double overlap_percent, const std::string &strategy) {
+	vector<AiTextChunk> chunks;
+	if (input.empty()) {
+		return chunks;
+	}
+	if (source_id.empty()) {
+		source_id = StringUtil::Format("source_%016llx", static_cast<unsigned long long>(StableTextHash(input)));
+	}
+	auto offsets = Utf8ByteOffsets(input);
+	auto codepoints = offsets.size() - 1;
+	auto overlap = static_cast<idx_t>(std::floor(static_cast<double>(chunk_size) * overlap_percent / 100.0));
+	auto settings_hash = StableTextHash(source_id + "|" + input + "|" + strategy + "|" + std::to_string(chunk_size) +
+	                                    "|" + std::to_string(overlap_percent));
+	for (idx_t start = 0, chunk_index = 0; start < codepoints; chunk_index++) {
+		auto end = MinValue<idx_t>(codepoints, start + chunk_size);
+		if (strategy == "recursive" && end < codepoints) {
+			end = FindRecursiveChunkEnd(input, offsets, start, end);
+		}
+		if (end <= start) {
+			end = MinValue<idx_t>(codepoints, start + chunk_size);
+		}
+		auto byte_start = offsets[start];
+		auto byte_end = offsets[end];
+		AiTextChunk chunk;
+		chunk.source_id = source_id;
+		chunk.chunk_id =
+		    StringUtil::Format("%s:%016llx:%llu", source_id, static_cast<unsigned long long>(settings_hash),
+		                       static_cast<unsigned long long>(chunk_index));
+		chunk.chunk_index = chunk_index;
+		chunk.start_offset = start;
+		chunk.end_offset = end;
+		chunk.text = input.substr(byte_start, byte_end - byte_start);
+		chunk.heading = MarkdownHeadingAt(input, byte_start);
+		chunk.page = 1 + NumericCast<idx_t>(std::count(input.begin(), input.begin() + byte_start, '\f'));
+		chunks.push_back(std::move(chunk));
+		if (end == codepoints) {
+			break;
+		}
+		auto next_start = end > overlap ? end - overlap : end;
+		start = next_start > start ? next_start : end;
+	}
+	return chunks;
+}
+
+std::string OptionalNamedString(const named_parameter_map_t &parameters, const std::string &name) {
+	auto entry = parameters.find(name);
+	if (entry == parameters.end() || entry->second.IsNull()) {
+		return "";
+	}
+	auto value = entry->second;
+	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
+}
+
+unique_ptr<FunctionData> AiChunkBindInternal(ClientContext &context, TableFunctionBindInput &input,
+                                             vector<LogicalType> &return_types, vector<string> &names,
+                                             bool prep_search) {
+	if (input.inputs.size() != 1) {
+		throw BinderException("%s requires one VARCHAR input", prep_search ? "ai_prep_search" : "ai_generate_chunks");
+	}
+	auto bind_data = make_uniq<AiChunkBindData>();
+	bind_data->prep_search = prep_search;
+	auto input_value = input.inputs[0];
+	if (!input_value.IsNull()) {
+		bind_data->input = StringValue::Get(input_value.DefaultCastAs(LogicalType::VARCHAR));
+	}
+	if (prep_search) {
+		ApplySettings(context, bind_data->options, AiModelSettingKind::TASK);
+		StampProviderFunction(bind_data->options, "ai_prep_search");
+		duckdb_ai::AttachProviderRuntimeState(bind_data->options, context);
+	}
+	for (auto &parameter : input.named_parameters) {
+		auto name = LowerAscii(parameter.first);
+		auto value = parameter.second;
+		if (name == "chunk_size") {
+			if (value.IsNull()) {
+				throw BinderException("chunk_size must not be NULL");
+			}
+			value = value.DefaultCastAs(LogicalType::BIGINT);
+			auto chunk_size = BigIntValue::Get(value);
+			if (chunk_size <= 0 || chunk_size > 10000000) {
+				throw BinderException("chunk_size must be between 1 and 10000000");
+			}
+			bind_data->chunk_size = NumericCast<idx_t>(chunk_size);
+		} else if (name == "overlap_percent") {
+			value = value.DefaultCastAs(LogicalType::DOUBLE);
+			bind_data->overlap_percent = DoubleValue::Get(value);
+			if (!std::isfinite(bind_data->overlap_percent) || bind_data->overlap_percent < 0 ||
+			    bind_data->overlap_percent > 50) {
+				throw BinderException("overlap_percent must be between 0 and 50");
+			}
+		} else if (name == "strategy") {
+			bind_data->strategy = LowerAscii(OptionalNamedString(input.named_parameters, parameter.first));
+			if (bind_data->strategy != "fixed" && bind_data->strategy != "recursive") {
+				throw BinderException("strategy must be fixed or recursive");
+			}
+		} else if (name == "source_id") {
+			bind_data->source_id = OptionalNamedString(input.named_parameters, parameter.first);
+		} else if (prep_search && name == "title") {
+			bind_data->title = OptionalNamedString(input.named_parameters, parameter.first);
+		} else if (prep_search && name == "metadata") {
+			bind_data->metadata = OptionalNamedString(input.named_parameters, parameter.first);
+			std::string error;
+			if (!bind_data->metadata.empty() && !duckdb_ai::ValidateJsonDocument(bind_data->metadata, error)) {
+				throw BinderException("ai_prep_search metadata must be valid JSON: %s", error);
+			}
+		} else if (prep_search && name == "enrich") {
+			value = value.DefaultCastAs(LogicalType::BOOLEAN);
+			bind_data->enrich = BooleanValue::Get(value);
+		} else if (!prep_search ||
+		           !ApplyCompletionValueOption(bind_data->options, "ai_prep_search", name, value, true, false)) {
+			throw BinderException("Unsupported %s option \"%s\"", prep_search ? "ai_prep_search" : "ai_generate_chunks",
+			                      name);
+		}
+	}
+	if (bind_data->enrich) {
+		ApplyAiProviderSecret(context, bind_data->options);
+	}
+	bind_data->chunks = BuildTextChunks(bind_data->input, bind_data->source_id, bind_data->chunk_size,
+	                                    bind_data->overlap_percent, bind_data->strategy);
+	if (!bind_data->chunks.empty()) {
+		bind_data->source_id = bind_data->chunks[0].source_id;
+	}
+	if (prep_search) {
+		AddTableColumns(return_types, names,
+		                {{"source_id", LogicalType::VARCHAR},
+		                 {"chunk_id", LogicalType::VARCHAR},
+		                 {"chunk_index", LogicalType::UBIGINT},
+		                 {"chunk_to_retrieve", LogicalType::VARCHAR},
+		                 {"chunk_to_embed", LogicalType::VARCHAR},
+		                 {"heading", LogicalType::VARCHAR},
+		                 {"page", LogicalType::UBIGINT},
+		                 {"start_offset", LogicalType::UBIGINT},
+		                 {"end_offset", LogicalType::UBIGINT},
+		                 {"metadata", LogicalType::JSON()},
+		                 {"error", LogicalType::VARCHAR}});
+	} else {
+		AddTableColumns(return_types, names,
+		                {{"source_id", LogicalType::VARCHAR},
+		                 {"chunk_id", LogicalType::VARCHAR},
+		                 {"chunk_index", LogicalType::UBIGINT},
+		                 {"start_offset", LogicalType::UBIGINT},
+		                 {"end_offset", LogicalType::UBIGINT},
+		                 {"chunk_length", LogicalType::UBIGINT},
+		                 {"estimated_tokens", LogicalType::BIGINT},
+		                 {"chunk", LogicalType::VARCHAR}});
+	}
+	return std::move(bind_data);
+}
+
+unique_ptr<FunctionData> AiGenerateChunksBind(ClientContext &context, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<string> &names) {
+	return AiChunkBindInternal(context, input, return_types, names, false);
+}
+
+unique_ptr<FunctionData> AiPrepSearchBind(ClientContext &context, TableFunctionBindInput &input,
+                                          vector<LogicalType> &return_types, vector<string> &names) {
+	return AiChunkBindInternal(context, input, return_types, names, true);
+}
+
+unique_ptr<GlobalTableFunctionState> AiChunkInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<AiChunkScanData>();
+}
+
+void PrepareSearchContext(ClientContext &context, const AiChunkBindData &bind_data, AiChunkScanData &state) {
+	if (state.prepared) {
+		return;
+	}
+	state.prepared = true;
+	if (!bind_data.enrich) {
+		duckdb_ai::RecordLocalUsageEvent(&context, "ai_prep_search", NumericCast<int64_t>(bind_data.input.size()),
+		                                 NumericCast<int64_t>(bind_data.chunks.size()));
+		return;
+	}
+	try {
+		auto options = bind_data.options;
+		AppendSystemPrompt(options,
+		                   "Create a concise document-level retrieval context. Preserve the subject, entities, dates, "
+		                   "and terminology needed to disambiguate individual chunks. Return only the context.");
+		state.document_context = duckdb_ai::Complete(bind_data.input, options).text;
+	} catch (std::exception &ex) {
+		if (bind_data.options.fail_on_error) {
+			throw;
+		}
+		state.enrichment_error = ex.what();
+	}
+}
+
+std::string ChunkEmbeddingText(const AiChunkBindData &bind_data, const AiChunkScanData &state,
+                               const AiTextChunk &chunk) {
+	std::string output;
+	if (!bind_data.title.empty()) {
+		output += "Document: " + bind_data.title + "\n";
+	}
+	if (!state.document_context.empty()) {
+		output += "Document context: " + state.document_context + "\n";
+	}
+	if (!chunk.heading.empty()) {
+		output += "Section: " + chunk.heading + "\n";
+	}
+	if (!output.empty()) {
+		output += "Content:\n";
+	}
+	output += chunk.text;
+	return output;
+}
+
+void AiChunkFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->Cast<AiChunkBindData>();
+	auto &data = data_p.global_state->Cast<AiChunkScanData>();
+	if (bind_data.prep_search) {
+		PrepareSearchContext(context, bind_data, data);
+	} else if (!data.prepared) {
+		duckdb_ai::RecordLocalUsageEvent(&context, "ai_generate_chunks", NumericCast<int64_t>(bind_data.input.size()),
+		                                 NumericCast<int64_t>(bind_data.chunks.size()));
+		data.prepared = true;
+	}
+	idx_t count = 0;
+	while (data.offset < bind_data.chunks.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &chunk = bind_data.chunks[data.offset++];
+		idx_t col = 0;
+		output.SetValue(col++, count, Value(chunk.source_id));
+		output.SetValue(col++, count, Value(chunk.chunk_id));
+		output.SetValue(col++, count, Value::UBIGINT(chunk.chunk_index));
+		if (bind_data.prep_search) {
+			output.SetValue(col++, count, Value(chunk.text));
+			output.SetValue(col++, count, Value(ChunkEmbeddingText(bind_data, data, chunk)));
+			output.SetValue(col++, count, chunk.heading.empty() ? Value() : Value(chunk.heading));
+			output.SetValue(col++, count, Value::UBIGINT(chunk.page));
+			output.SetValue(col++, count, Value::UBIGINT(chunk.start_offset));
+			output.SetValue(col++, count, Value::UBIGINT(chunk.end_offset));
+			output.SetValue(col++, count, bind_data.metadata.empty() ? Value() : Value(bind_data.metadata));
+			output.SetValue(col++, count, data.enrichment_error.empty() ? Value() : Value(data.enrichment_error));
+		} else {
+			output.SetValue(col++, count, Value::UBIGINT(chunk.start_offset));
+			output.SetValue(col++, count, Value::UBIGINT(chunk.end_offset));
+			output.SetValue(col++, count, Value::UBIGINT(chunk.end_offset - chunk.start_offset));
+			output.SetValue(col++, count, Value::BIGINT(duckdb_ai::EstimateTokenCount(chunk.text)));
+			output.SetValue(col++, count, Value(chunk.text));
+		}
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
 unique_ptr<FunctionData> AiUsageBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                      vector<string> &names) {
 	AddTableColumns(return_types, names,
@@ -4895,6 +7319,8 @@ unique_ptr<FunctionData> AiUsageBind(ClientContext &, TableFunctionBindInput &, 
 	                 {"event", LogicalType::VARCHAR},
 	                 {"function_name", LogicalType::VARCHAR},
 	                 {"query_id", LogicalType::VARCHAR},
+	                 {"operation_id", LogicalType::VARCHAR},
+	                 {"parent_operation_id", LogicalType::VARCHAR},
 	                 {"provider", LogicalType::VARCHAR},
 	                 {"protocol", LogicalType::VARCHAR},
 	                 {"model", LogicalType::VARCHAR},
@@ -4936,6 +7362,8 @@ void AiUsageFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 		output.SetValue(col++, count, Value(event.event));
 		output.SetValue(col++, count, event.function_name.empty() ? Value() : Value(event.function_name));
 		output.SetValue(col++, count, event.query_id.empty() ? Value() : Value(event.query_id));
+		output.SetValue(col++, count, event.operation_id.empty() ? Value() : Value(event.operation_id));
+		output.SetValue(col++, count, event.parent_operation_id.empty() ? Value() : Value(event.parent_operation_id));
 		output.SetValue(col++, count, Value(event.provider));
 		output.SetValue(col++, count, Value(event.protocol));
 		output.SetValue(col++, count, Value(event.model));
@@ -4963,6 +7391,97 @@ void AiUsageFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 		} else {
 			output.SetValue(col++, count, Value());
 		}
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
+unique_ptr<FunctionData> AiUsageSummaryBind(ClientContext &, TableFunctionBindInput &,
+                                            vector<LogicalType> &return_types, vector<string> &names) {
+	AddTableColumns(return_types, names,
+	                {{"query_id", LogicalType::VARCHAR},
+	                 {"provider", LogicalType::VARCHAR},
+	                 {"model", LogicalType::VARCHAR},
+	                 {"calls", LogicalType::UBIGINT},
+	                 {"batch_count", LogicalType::UBIGINT},
+	                 {"retries", LogicalType::UBIGINT},
+	                 {"failures", LogicalType::UBIGINT},
+	                 {"cache_hits", LogicalType::UBIGINT},
+	                 {"total_tokens", LogicalType::BIGINT},
+	                 {"elapsed_ms", LogicalType::BIGINT},
+	                 {"estimated_cost_usd", LogicalType::DOUBLE},
+	                 {"retained_events", LogicalType::UBIGINT},
+	                 {"dropped_events", LogicalType::UBIGINT},
+	                 {"queued_log_events", LogicalType::UBIGINT},
+	                 {"dropped_log_events", LogicalType::UBIGINT}});
+	return nullptr;
+}
+
+unique_ptr<GlobalTableFunctionState> AiUsageSummaryInit(ClientContext &context, TableFunctionInitInput &) {
+	auto state = make_uniq<AiUsageSummaryScanData>();
+	state->stats = duckdb_ai::UsageStats(context);
+	auto events = duckdb_ai::UsageEvents(context);
+	std::unordered_map<std::string, idx_t> indexes;
+	for (auto &event : events) {
+		auto query_id = event.query_id.empty() ? std::string("local") : event.query_id;
+		auto entry = indexes.find(query_id);
+		if (entry == indexes.end()) {
+			AiUsageSummaryRow row;
+			row.query_id = query_id;
+			row.provider = event.provider;
+			row.model = event.model;
+			indexes[query_id] = state->rows.size();
+			state->rows.push_back(std::move(row));
+			entry = indexes.find(query_id);
+		}
+		auto &row = state->rows[entry->second];
+		row.calls++;
+		row.retries += NumericCast<uint64_t>(MaxValue<int64_t>(0, event.retries));
+		if (!event.operation_id.empty()) {
+			row.operation_ids.insert(event.operation_id);
+		}
+		row.failures += event.status == "error" ? 1 : 0;
+		row.cache_hits += event.cache_hit ? 1 : 0;
+		row.total_tokens += MaxValue<int64_t>(0, event.total_tokens);
+		row.elapsed_ms += MaxValue<int64_t>(0, event.elapsed_ms);
+		row.estimated_cost_usd += MaxValue<double>(0, event.estimated_cost_usd);
+		if (row.provider != event.provider) {
+			row.provider = "mixed";
+		}
+		if (row.model != event.model) {
+			row.model = "mixed";
+		}
+	}
+	if (state->rows.empty()) {
+		AiUsageSummaryRow row;
+		row.query_id = "local";
+		row.provider = "local";
+		state->rows.push_back(std::move(row));
+	}
+	return std::move(state);
+}
+
+void AiUsageSummaryFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
+	auto &data = data_p.global_state->Cast<AiUsageSummaryScanData>();
+	idx_t count = 0;
+	while (data.offset < data.rows.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &row = data.rows[data.offset++];
+		idx_t col = 0;
+		output.SetValue(col++, count, Value(row.query_id));
+		output.SetValue(col++, count, Value(row.provider));
+		output.SetValue(col++, count, row.model.empty() ? Value() : Value(row.model));
+		output.SetValue(col++, count, Value::UBIGINT(row.calls));
+		output.SetValue(col++, count, Value::UBIGINT(row.operation_ids.size()));
+		output.SetValue(col++, count, Value::UBIGINT(row.retries));
+		output.SetValue(col++, count, Value::UBIGINT(row.failures));
+		output.SetValue(col++, count, Value::UBIGINT(row.cache_hits));
+		output.SetValue(col++, count, Value::BIGINT(row.total_tokens));
+		output.SetValue(col++, count, Value::BIGINT(row.elapsed_ms));
+		output.SetValue(col++, count, Value::DOUBLE(row.estimated_cost_usd));
+		output.SetValue(col++, count, Value::UBIGINT(data.stats.retained_events));
+		output.SetValue(col++, count, Value::UBIGINT(data.stats.dropped_events));
+		output.SetValue(col++, count, Value::UBIGINT(data.stats.queued_log_events));
+		output.SetValue(col++, count, Value::UBIGINT(data.stats.dropped_log_events));
 		count++;
 	}
 	output.SetCardinality(count);
@@ -4996,6 +7515,7 @@ void AiClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, Da
 	}
 	duckdb_ai::ClearResponseCache(context);
 	ClearPromptQueryCache(context);
+	ClearSimilarityCache(context);
 	output.SetValue(0, 0, Value::BOOLEAN(true));
 	output.SetCardinality(1);
 	data.emitted = true;
@@ -5160,6 +7680,22 @@ void RegisterAiProviderSecretType(ExtensionLoader &loader, const std::string &ty
 
 void RegisterAiProviderSecret(ExtensionLoader &loader) {
 	RegisterAiProviderSecretType(loader, "duckdb_ai");
+
+	SecretType model_type;
+	model_type.name = "duckdb_ai_model";
+	model_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
+	model_type.default_provider = "config";
+	model_type.extension = "duckdb_ai";
+	loader.RegisterSecretType(std::move(model_type));
+
+	CreateSecretFunction model_function;
+	model_function.secret_type = "duckdb_ai_model";
+	model_function.provider = "config";
+	model_function.function = CreateAiModelSecretFromConfig;
+	for (auto name : {"ai_provider", "model", "location", "credential", "model_type", "capabilities", "options"}) {
+		model_function.named_parameters[name] = LogicalType::VARCHAR;
+	}
+	loader.RegisterFunction(std::move(model_function));
 }
 
 struct AiFunctionDocumentation {
@@ -5193,6 +7729,8 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
      "SELECT ai_similarity('duck', 'goose');"},
     {"ai_rerank", "Uses a completion model to score candidate relevance to a query from 0 to 1.",
      "SELECT ai_rerank('best analytics database', 'DuckDB is an in-process analytics database');"},
+    {"ai_score", "Uses a completion model to score how well input satisfies criteria from 0 to 1.",
+     "SELECT ai_score('DuckDB runs in process', 'describes an embedded database');"},
     {"ai_summarize", "Summarizes text with a completion model.", "SELECT ai_summarize(review) FROM reviews;"},
     {"ai_sentiment", "Classifies text sentiment as positive, neutral, or negative.",
      "SELECT ai_sentiment(review) FROM reviews;"},
@@ -5206,6 +7744,11 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
      "SELECT ai_classify(review, 'positive, negative, mixed') FROM reviews;"},
     {"ai_classify_labels", "Chooses zero or more labels from a comma-separated VARCHAR or VARCHAR[] label list.",
      "SELECT ai_classify_labels(review, ['shipping', 'pricing', 'quality']) FROM reviews;"},
+    {"ai_classify_result", "Classifies into zero or more labels and returns STRUCT(value, error, metadata).",
+     "SELECT ai_classify_result(review, ['shipping', 'pricing', 'quality']) FROM reviews;"},
+    {"ai_classify_optimized",
+     "Uses a persisted centroid classifier artifact and falls back to an LLM when local confidence is insufficient.",
+     "SELECT ai_classify_optimized(review, classifier) FROM reviews;"},
     {"ai_extract", "Extracts requested information from text.",
      "SELECT ai_extract('Anna is 31', 'the age of the person');"},
     {"ai_filter", "Evaluates a natural-language predicate against text and returns BOOLEAN.",
@@ -5214,6 +7757,9 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
      "SELECT ai_agg(review, 'List the top complaints') FROM reviews;"},
     {"ai_summarize_agg", "Summarizes grouped text values with one completion call.",
      "SELECT ai_summarize_agg(review) FROM reviews;"},
+    {"ai_build_classifier",
+     "Builds an experimental persisted classifier artifact using sampled LLM labels and batched embeddings.",
+     "SELECT ai_build_classifier(review, ['positive', 'negative'], optimization := 'minimize_cost') FROM reviews;"},
     {"ai_sql",
      "Generates one read-only DuckDB SELECT statement from a natural-language question.\n"
      "With fix_attempts := N it verifies the SQL binds against the catalog and self-corrects using the bind error.",
@@ -5243,15 +7789,31 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
     {"ai_count_tokens", "Returns a local approximate token count for text.", "SELECT ai_count_tokens('hello world');"},
     {"ai_recommended_batch_size", "Returns a conservative row batch size for rate-limited AI jobs.",
      "SELECT ai_recommended_batch_size(200, 100, 100000);"},
+    {"ai_generate_chunks", "Splits text into deterministic fixed or recursive Unicode-aware chunks.",
+     "SELECT * FROM ai_generate_chunks('First paragraph. Second paragraph.');"},
+    {"ai_prep_search", "Creates retrieval and context-enriched embedding chunks from text or Markdown.",
+     "SELECT * FROM ai_prep_search('# Guide\nDuckDB runs in process.', title := 'Guide');"},
     {"ai_provider_base_url", "Returns the default base URL for a supported provider.",
      "SELECT ai_provider_base_url('openai');"},
     {"ai_provider_protocol", "Returns the internal protocol used for a supported provider.",
      "SELECT ai_provider_protocol('openai');"},
     {"ai_usage", "Returns recent per-database AI usage events.", "SELECT * FROM ai_usage();"},
+    {"ai_usage_summary", "Returns query-level AI usage totals and bounded-buffer drop counters.",
+     "SELECT * FROM ai_usage_summary();"},
     {"ai_clear_usage", "Clears the per-database usage event buffer.", "SELECT * FROM ai_clear_usage();"},
     {"ai_clear_cache", "Clears per-database in-memory response and generated-SQL caches.",
      "SELECT * FROM ai_clear_cache();"},
     {"ai_secrets", "Lists configured duckdb_ai secrets with credentials redacted.", "SELECT * FROM ai_secrets();"},
+    {"ai_models", "Lists registered external model profiles without credential material.",
+     "SELECT * FROM ai_models();"},
+    {"ai_provision_endpoint", "Plans or explicitly submits guarded endpoint provisioning through the control plane.",
+     "SELECT * FROM ai_provision_endpoint('support_model');"},
+    {"ai_endpoint_status", "Returns the current state of an asynchronous endpoint operation.",
+     "SELECT * FROM ai_endpoint_status('operation-id');"},
+    {"ai_deprovision_endpoint", "Explicitly submits endpoint deprovisioning through the control plane.",
+     "SELECT * FROM ai_deprovision_endpoint('support_model');"},
+    {"ai_parse_document", "Parses a BLOB through a normalized remote document-parser profile.",
+     "SELECT * FROM ai_parse_document(read_blob('document.pdf').content, 'application/pdf', 'documents');"},
     {"ai_model_prices", "Returns the built-in provider/model pricing catalog.", "SELECT * FROM ai_model_prices();"},
 };
 
@@ -5413,6 +7975,31 @@ void RegisterAiAggregateFunction(ExtensionLoader &loader, const std::string &nam
 	RegisterDocumentedFunction(loader, std::move(functions));
 }
 
+void RegisterClassifierBuildFunction(ExtensionLoader &loader) {
+	AggregateFunctionSet functions("ai_build_classifier");
+	for (idx_t argument_count = 2; argument_count <= 32; argument_count++) {
+		vector<LogicalType> arguments;
+		arguments.emplace_back(LogicalType::VARCHAR);
+		for (idx_t i = 1; i < argument_count; i++) {
+			arguments.emplace_back(LogicalType::ANY);
+		}
+		auto function = AggregateFunction(
+		    "ai_build_classifier", std::move(arguments), LogicalType::VARCHAR,
+		    AggregateFunction::StateSize<ClassifierBuildState>,
+		    AggregateFunction::StateInitialize<ClassifierBuildState, ClassifierBuildOperation>,
+		    AggregateFunction::UnaryScatterUpdate<ClassifierBuildState, string_t, ClassifierBuildOperation>,
+		    AggregateFunction::StateCombine<ClassifierBuildState, ClassifierBuildOperation>,
+		    AggregateFunction::StateFinalize<ClassifierBuildState, string_t, ClassifierBuildOperation>,
+		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
+		    AggregateFunction::UnaryUpdate<ClassifierBuildState, string_t, ClassifierBuildOperation>,
+		    ClassifierBuildBind);
+		function.SetFallible();
+		function.SetVolatile();
+		functions.AddFunction(std::move(function));
+	}
+	RegisterDocumentedFunction(loader, std::move(functions));
+}
+
 void AddCompletionNamedParameters(TableFunction &function, bool include_response_options,
                                   bool include_log_payload_options) {
 	static const char *completion_options[] = {"model",
@@ -5562,12 +8149,228 @@ void RegisterPromptQueryFunction(ExtensionLoader &loader, const std::string &nam
 	RegisterDocumentedFunction(loader, std::move(ai_query_data));
 }
 
+struct ExternalModelParseData : public ParserExtensionParseData {
+	std::string name;
+	case_insensitive_map_t<std::string> options;
+	bool replace = false;
+
+	unique_ptr<ParserExtensionParseData> Copy() const override {
+		auto result = make_uniq<ExternalModelParseData>();
+		result->name = name;
+		result->options = options;
+		result->replace = replace;
+		return std::move(result);
+	}
+
+	string ToString() const override {
+		return "CREATE EXTERNAL MODEL " + name;
+	}
+};
+
+class ExternalModelSqlScanner {
+public:
+	explicit ExternalModelSqlScanner(const std::string &query_p) : query(query_p) {
+	}
+
+	void SkipWhitespace() {
+		while (position < query.size() && std::isspace(static_cast<unsigned char>(query[position]))) {
+			position++;
+		}
+	}
+
+	bool ConsumeKeyword(const std::string &keyword) {
+		SkipWhitespace();
+		if (position + keyword.size() > query.size() ||
+		    !StringUtil::CIEquals(query.substr(position, keyword.size()), keyword)) {
+			return false;
+		}
+		auto end = position + keyword.size();
+		if (end < query.size() && (std::isalnum(static_cast<unsigned char>(query[end])) || query[end] == '_')) {
+			return false;
+		}
+		position = end;
+		return true;
+	}
+
+	bool Consume(char expected) {
+		SkipWhitespace();
+		if (position >= query.size() || query[position] != expected) {
+			return false;
+		}
+		position++;
+		return true;
+	}
+
+	std::string Identifier() {
+		SkipWhitespace();
+		if (position >= query.size()) {
+			throw ParserException("Expected an external model identifier");
+		}
+		if (query[position] == '"') {
+			position++;
+			std::string value;
+			while (position < query.size()) {
+				if (query[position] == '"') {
+					if (position + 1 < query.size() && query[position + 1] == '"') {
+						value.push_back('"');
+						position += 2;
+						continue;
+					}
+					position++;
+					return value;
+				}
+				value.push_back(query[position++]);
+			}
+			throw ParserException("Unterminated quoted external model identifier");
+		}
+		auto start = position;
+		while (position < query.size() &&
+		       (std::isalnum(static_cast<unsigned char>(query[position])) || query[position] == '_')) {
+			position++;
+		}
+		if (start == position) {
+			throw ParserException("Expected an external model identifier");
+		}
+		return query.substr(start, position - start);
+	}
+
+	std::string ValueText() {
+		SkipWhitespace();
+		if (position >= query.size()) {
+			throw ParserException("Expected an external model option value");
+		}
+		if (query[position] == '\'') {
+			position++;
+			std::string value;
+			while (position < query.size()) {
+				if (query[position] == '\'') {
+					if (position + 1 < query.size() && query[position + 1] == '\'') {
+						value.push_back('\'');
+						position += 2;
+						continue;
+					}
+					position++;
+					return value;
+				}
+				value.push_back(query[position++]);
+			}
+			throw ParserException("Unterminated external model option string");
+		}
+		auto start = position;
+		while (position < query.size() && query[position] != ',' && query[position] != ')') {
+			position++;
+		}
+		auto value = query.substr(start, position - start);
+		StringUtil::Trim(value);
+		if (value.empty()) {
+			throw ParserException("Expected an external model option value");
+		}
+		return value;
+	}
+
+	bool Finished() {
+		SkipWhitespace();
+		if (position < query.size() && query[position] == ';') {
+			position++;
+			SkipWhitespace();
+		}
+		return position == query.size();
+	}
+
+private:
+	const std::string &query;
+	idx_t position = 0;
+};
+
+class ExternalModelParserExtension : public ParserExtension {
+public:
+	ExternalModelParserExtension() {
+		parse_function = Parse;
+		plan_function = Plan;
+	}
+
+	static ParserExtensionParseResult Parse(ParserExtensionInfo *, const string &query) {
+		try {
+			ExternalModelSqlScanner scanner(query);
+			if (!scanner.ConsumeKeyword("create")) {
+				return ParserExtensionParseResult();
+			}
+			auto data = make_uniq<ExternalModelParseData>();
+			if (scanner.ConsumeKeyword("or")) {
+				if (!scanner.ConsumeKeyword("replace")) {
+					return ParserExtensionParseResult();
+				}
+				data->replace = true;
+			}
+			if (!scanner.ConsumeKeyword("external") || !scanner.ConsumeKeyword("model")) {
+				return ParserExtensionParseResult();
+			}
+			data->name = scanner.Identifier();
+			if (!scanner.ConsumeKeyword("with") || !scanner.Consume('(')) {
+				return ParserExtensionParseResult("CREATE EXTERNAL MODEL requires WITH (...)");
+			}
+			while (true) {
+				auto key = LowerAscii(scanner.Identifier());
+				if (!scanner.Consume('=')) {
+					return ParserExtensionParseResult("Expected '=' after external model option " + key);
+				}
+				if (key == "base_url" || key == "endpoint") {
+					key = "location";
+				}
+				static const std::set<std::string> supported = {"provider",   "model",        "location", "credential",
+				                                                "model_type", "capabilities", "options"};
+				if (supported.find(key) == supported.end()) {
+					return ParserExtensionParseResult("Unsupported external model option: " + key);
+				}
+				if (data->options.find(key) != data->options.end()) {
+					return ParserExtensionParseResult("Duplicate external model option: " + key);
+				}
+				data->options[key] = scanner.ValueText();
+				if (scanner.Consume(')')) {
+					break;
+				}
+				if (!scanner.Consume(',')) {
+					return ParserExtensionParseResult("Expected ',' or ')' in external model options");
+				}
+			}
+			if (!scanner.Finished()) {
+				return ParserExtensionParseResult("Unexpected text after CREATE EXTERNAL MODEL");
+			}
+			if (data->options.find("provider") == data->options.end() ||
+			    data->options.find("model") == data->options.end()) {
+				return ParserExtensionParseResult("CREATE EXTERNAL MODEL requires provider and model options");
+			}
+			return ParserExtensionParseResult(std::move(data));
+		} catch (std::exception &ex) {
+			return ParserExtensionParseResult(ex.what());
+		}
+	}
+
+	static ParserExtensionPlanResult Plan(ParserExtensionInfo *, ClientContext &,
+	                                      unique_ptr<ParserExtensionParseData> parse_data) {
+		auto &data = static_cast<ExternalModelParseData &>(*parse_data);
+		auto get = [&](const std::string &key) {
+			auto entry = data.options.find(key);
+			return entry == data.options.end() ? std::string() : entry->second;
+		};
+		ParserExtensionPlanResult result;
+		result.function = ExternalModelTableFunction();
+		result.parameters = {Value(data.name),           Value(get("provider")),   Value(get("model")),
+		                     Value(get("location")),     Value(get("credential")), Value(get("model_type")),
+		                     Value(get("capabilities")), Value(get("options")),    Value::BOOLEAN(data.replace)};
+		result.return_type = StatementReturnType::QUERY_RESULT;
+		return result;
+	}
+};
+
 } // namespace
 
 static void LoadInternal(ExtensionLoader &loader) {
 	duckdb_ai::InitializeProviderRuntime();
 	RegisterSettings(loader);
 	RegisterAiProviderSecret(loader);
+	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	ParserExtension::Register(config, ExternalModelParserExtension());
 
 	RegisterCompletionFunction(loader, "ai_complete", AiCompleteBind);
 	RegisterTryCompletionFunction(loader);
@@ -5609,6 +8412,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ai_rerank.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	RegisterDocumentedFunction(loader, std::move(ai_rerank));
 
+	auto ai_score = ScalarFunction("ai_score", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::DOUBLE,
+	                               AiRerankFunction, AiRerankBind);
+	ai_score.varargs = LogicalType::ANY;
+	ai_score.SetFallible();
+	ai_score.SetVolatile();
+	ai_score.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	RegisterDocumentedFunction(loader, std::move(ai_score));
+
 	RegisterTaskFunction(loader, "ai_summarize", {LogicalType::VARCHAR}, AiSummarizeBind);
 	RegisterTaskFunction(loader, "ai_sentiment", {LogicalType::VARCHAR}, AiSentimentBind);
 	RegisterTaskFunction(loader, "ai_fix_grammar", {LogicalType::VARCHAR}, AiFixGrammarBind);
@@ -5616,11 +8427,55 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterTaskFunction(loader, "ai_translate", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AiTranslateBind);
 	RegisterClassifyFunction(loader);
 	RegisterClassifyLabelsFunction(loader);
+	auto ai_classify_result =
+	    ScalarFunction("ai_classify_result", {LogicalType::VARCHAR, LogicalType::ANY}, AiClassifyResultReturnType(),
+	                   AiClassifyResultFunction, AiClassifyResultBind);
+	ai_classify_result.varargs = LogicalType::ANY;
+	ai_classify_result.SetFallible();
+	ai_classify_result.SetVolatile();
+	ai_classify_result.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	RegisterDocumentedFunction(loader, std::move(ai_classify_result));
+	auto ai_classify_optimized =
+	    ScalarFunction("ai_classify_optimized", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                   AiOptimizedClassifierReturnType(), AiOptimizedClassifierFunction, AiOptimizedClassifierBind);
+	ai_classify_optimized.varargs = LogicalType::ANY;
+	ai_classify_optimized.SetFallible();
+	ai_classify_optimized.SetVolatile();
+	ai_classify_optimized.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	RegisterDocumentedFunction(loader, std::move(ai_classify_optimized));
 	RegisterTaskFunction(loader, "ai_extract", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AiExtractBind);
 	RegisterAiFilterFunction(loader);
 
 	RegisterAiAggregateFunction(loader, "ai_agg", AiAggBind, 2, 10);
 	RegisterAiAggregateFunction(loader, "ai_summarize_agg", AiSummarizeAggBind, 1, 9);
+	RegisterClassifierBuildFunction(loader);
+
+	auto ai_generate_chunks =
+	    TableFunction("ai_generate_chunks", {LogicalType::VARCHAR}, AiChunkFunction, AiGenerateChunksBind, AiChunkInit);
+	ai_generate_chunks.named_parameters["chunk_size"] = LogicalType::BIGINT;
+	ai_generate_chunks.named_parameters["overlap_percent"] = LogicalType::DOUBLE;
+	ai_generate_chunks.named_parameters["strategy"] = LogicalType::VARCHAR;
+	ai_generate_chunks.named_parameters["source_id"] = LogicalType::VARCHAR;
+	RegisterDocumentedFunction(loader, std::move(ai_generate_chunks));
+
+	auto ai_prep_search =
+	    TableFunction("ai_prep_search", {LogicalType::VARCHAR}, AiChunkFunction, AiPrepSearchBind, AiChunkInit);
+	ai_prep_search.named_parameters["chunk_size"] = LogicalType::BIGINT;
+	ai_prep_search.named_parameters["overlap_percent"] = LogicalType::DOUBLE;
+	ai_prep_search.named_parameters["strategy"] = LogicalType::VARCHAR;
+	ai_prep_search.named_parameters["source_id"] = LogicalType::VARCHAR;
+	ai_prep_search.named_parameters["title"] = LogicalType::VARCHAR;
+	ai_prep_search.named_parameters["metadata"] = LogicalType::VARCHAR;
+	ai_prep_search.named_parameters["enrich"] = LogicalType::BOOLEAN;
+	AddCompletionNamedParameters(ai_prep_search, false, false);
+	RegisterDocumentedFunction(loader, std::move(ai_prep_search));
+
+	auto ai_parse_document =
+	    TableFunction("ai_parse_document", {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                  DocumentParseFunction, DocumentParseBind, DocumentParseInit);
+	ai_parse_document.named_parameters["pages"] = LogicalType::VARCHAR;
+	AddCompletionNamedParameters(ai_parse_document, false, false);
+	RegisterDocumentedFunction(loader, std::move(ai_parse_document));
 
 	RegisterPromptSqlFunction(loader, "ai_sql");
 
@@ -5667,11 +8522,23 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	RegisterDocumentedFunction(loader, TableFunction("ai_usage", {}, AiUsageFunction, AiUsageBind, AiUsageInit));
 	RegisterDocumentedFunction(
+	    loader, TableFunction("ai_usage_summary", {}, AiUsageSummaryFunction, AiUsageSummaryBind, AiUsageSummaryInit));
+	RegisterDocumentedFunction(
 	    loader, TableFunction("ai_clear_usage", {}, AiClearUsageFunction, AiClearUsageBind, AiClearUsageInit));
 	RegisterDocumentedFunction(
 	    loader, TableFunction("ai_clear_cache", {}, AiClearCacheFunction, AiClearUsageBind, AiClearUsageInit));
 	RegisterDocumentedFunction(loader,
 	                           TableFunction("ai_secrets", {}, AiSecretsFunction, AiSecretsBind, AiSecretsInit));
+	RegisterDocumentedFunction(loader, TableFunction("ai_models", {}, AiModelsFunction, AiModelsBind, AiModelsInit));
+	auto ai_provision_endpoint = TableFunction("ai_provision_endpoint", {LogicalType::VARCHAR}, ControlPlaneFunction,
+	                                           ProvisionEndpointBind, AiClearUsageInit);
+	ai_provision_endpoint.named_parameters["dry_run"] = LogicalType::BOOLEAN;
+	ai_provision_endpoint.named_parameters["max_hourly_cost_usd"] = LogicalType::DOUBLE;
+	RegisterDocumentedFunction(loader, std::move(ai_provision_endpoint));
+	RegisterDocumentedFunction(loader, TableFunction("ai_endpoint_status", {LogicalType::VARCHAR}, ControlPlaneFunction,
+	                                                 EndpointStatusBind, AiClearUsageInit));
+	RegisterDocumentedFunction(loader, TableFunction("ai_deprovision_endpoint", {LogicalType::VARCHAR},
+	                                                 ControlPlaneFunction, DeprovisionEndpointBind, AiClearUsageInit));
 	RegisterDocumentedFunction(
 	    loader, TableFunction("ai_model_prices", {}, AiModelPricesFunction, AiModelPricesBind, AiModelPricesInit));
 }
