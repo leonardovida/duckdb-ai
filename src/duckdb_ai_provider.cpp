@@ -1,11 +1,14 @@
 #include "duckdb_ai_provider.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "re2/re2.h"
 #include "yyjson.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -24,7 +27,6 @@
 #include <memory>
 #include <mutex>
 #include <random>
-#include <regex>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
@@ -91,13 +93,15 @@ void StopUsageLogWorker(ProviderRuntimeState &state);
 
 const size_t MAX_USAGE_EVENTS = 1024;
 const size_t MAX_USAGE_LOG_QUEUE = 4096;
-//! Maximum inputs per batched embedding request. Keeps request payloads bounded and stays well
-//! below provider per-request input limits (OpenAI allows up to 2048 inputs).
-const size_t MAX_EMBED_BATCH_INPUTS = 512;
+//! Bound untrusted provider and telemetry responses before appending them to an
+//! in-memory string. This still accommodates large batched embedding responses.
+constexpr size_t DEFAULT_MAX_HTTP_RESPONSE_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr size_t MAX_HTTP_RESPONSE_BYTES_LIMIT = 1024ULL * 1024ULL * 1024ULL;
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr int64_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr int64_t DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE = 512;
 std::once_flag curl_global_init_once;
+std::atomic<uint64_t> next_operation_id {1};
 const size_t DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 1024;
 
 struct ProviderRuntimeState : public ObjectCacheEntry {
@@ -118,6 +122,7 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	std::mutex usage_mutex;
 	std::vector<UsageEvent> usage_events;
 	uint64_t next_usage_event_id = 1;
+	uint64_t dropped_usage_events = 0;
 
 	std::mutex provider_control_mutex;
 	std::condition_variable provider_control_cv;
@@ -139,6 +144,7 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	std::thread usage_log_worker;
 	bool usage_log_worker_started = false;
 	bool usage_log_shutdown = false;
+	uint64_t dropped_usage_log_events = 0;
 };
 
 ProviderRuntimeState fallback_runtime_state;
@@ -158,6 +164,27 @@ std::string LowerAscii(std::string input) {
 	std::transform(input.begin(), input.end(), input.begin(),
 	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	return input;
+}
+
+CompletionOptions RequestOperationOptions(const CompletionOptions &options) {
+	auto result = options;
+	if (result.operation_id.empty()) {
+		if (result.parent_operation_id.empty()) {
+			result.parent_operation_id = result.query_id;
+		}
+		auto prefix = result.query_id.empty() ? std::string("ai") : result.query_id;
+		result.operation_id = prefix + ":op:" + std::to_string(next_operation_id.fetch_add(1));
+	}
+	return result;
+}
+
+CompletionOptions ChildOperationOptions(const CompletionOptions &options) {
+	auto result = options;
+	if (result.parent_operation_id.empty()) {
+		result.parent_operation_id = result.operation_id.empty() ? result.query_id : result.operation_id;
+	}
+	result.operation_id.clear();
+	return RequestOperationOptions(result);
 }
 
 std::string NormalizeProviderNameInternal(const std::string &provider_input) {
@@ -372,13 +399,23 @@ std::string UrlHost(const std::string &url) {
 	if (scheme_end == std::string::npos) {
 		throw InvalidInputException("AI provider URL must include a scheme: %s", url);
 	}
+	auto scheme = LowerAscii(url.substr(0, scheme_end));
+	if (scheme != "http" && scheme != "https") {
+		throw InvalidInputException("AI provider URL scheme must be http or https");
+	}
+	for (auto c : url) {
+		auto value = static_cast<unsigned char>(c);
+		if (value <= 0x20 || value == 0x7f || c == '\\') {
+			throw InvalidInputException("AI provider URL contains prohibited characters");
+		}
+	}
 	auto host_start = scheme_end + 3;
-	auto path_start = url.find('/', host_start);
+	auto path_start = url.find_first_of("/?#", host_start);
 	auto authority =
 	    url.substr(host_start, path_start == std::string::npos ? std::string::npos : path_start - host_start);
 	auto at_pos = authority.rfind('@');
 	if (at_pos != std::string::npos) {
-		authority = authority.substr(at_pos + 1);
+		throw InvalidInputException("AI provider URL must not include credentials");
 	}
 	if (authority.empty()) {
 		throw InvalidInputException("AI provider URL must include a host: %s", url);
@@ -388,9 +425,16 @@ std::string UrlHost(const std::string &url) {
 		if (bracket_end == std::string::npos) {
 			throw InvalidInputException("AI provider URL has an invalid IPv6 host: %s", url);
 		}
+		auto remainder = authority.substr(bracket_end + 1);
+		if (!remainder.empty() && remainder.front() != ':') {
+			throw InvalidInputException("AI provider URL has an invalid IPv6 authority: %s", url);
+		}
 		return LowerAscii(authority.substr(1, bracket_end - 1));
 	}
-	auto colon_pos = authority.find(':');
+	auto colon_pos = authority.rfind(':');
+	if (colon_pos != std::string::npos && authority.find(':') != colon_pos) {
+		throw InvalidInputException("AI provider URL must bracket IPv6 hosts: %s", url);
+	}
 	auto host = colon_pos == std::string::npos ? authority : authority.substr(0, colon_pos);
 	if (host.empty()) {
 		throw InvalidInputException("AI provider URL must include a host: %s", url);
@@ -462,11 +506,11 @@ std::string AllowedHosts(const CompletionOptions &options) {
 }
 
 void EnforceAllowedHost(const std::string &url, const CompletionOptions &options) {
+	auto host = UrlHost(url);
 	auto allowed_hosts = SplitCommaList(AllowedHosts(options));
 	if (allowed_hosts.empty()) {
 		return;
 	}
-	auto host = UrlHost(url);
 	for (auto &allowed_host : allowed_hosts) {
 		if (HostMatchesAllowedPattern(host, allowed_host)) {
 			return;
@@ -568,7 +612,8 @@ bool StartsWith(const std::string &value, const std::string &prefix) {
 }
 
 bool HasHttpScheme(const std::string &value) {
-	return StartsWith(value, "https://") || StartsWith(value, "http://");
+	auto lower_value = LowerAscii(value);
+	return StartsWith(lower_value, "https://") || StartsWith(lower_value, "http://");
 }
 
 std::string AzureOpenAIBaseUrl(std::string value) {
@@ -1218,6 +1263,15 @@ bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int
 	return true;
 }
 
+bool YyjsonDirectDouble(duckdb_yyjson::yyjson_val *object, const char *key, double &result) {
+	auto value = YyjsonObjectGet(object, key);
+	if (!value || !duckdb_yyjson::yyjson_is_num(value)) {
+		return false;
+	}
+	result = duckdb_yyjson::yyjson_get_num(value);
+	return true;
+}
+
 int64_t YyjsonIntegerOrMissing(duckdb_yyjson::yyjson_val *object, const char *key) {
 	int64_t result = -1;
 	YyjsonDirectInteger(object, key, result);
@@ -1477,7 +1531,9 @@ bool SchemaNonNegativeIntegerField(const JsonValue &schema, const std::string &f
 	if (!SchemaNumberField(schema, field, number_value)) {
 		return false;
 	}
-	if (number_value < 0 || std::floor(number_value) != number_value) {
+	if (!std::isfinite(number_value) || number_value < 0 ||
+	    number_value > static_cast<double>(std::numeric_limits<int64_t>::max()) ||
+	    std::floor(number_value) != number_value) {
 		return false;
 	}
 	value = static_cast<int64_t>(number_value);
@@ -1676,10 +1732,10 @@ void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaPr
 
 bool RegexMatches(const std::string &value, const std::string &pattern, const std::string &path, std::string &error) {
 	static std::mutex regex_cache_mutex;
-	static std::unordered_map<std::string, std::shared_ptr<std::regex>> regex_cache;
+	static std::unordered_map<std::string, std::shared_ptr<duckdb_re2::RE2>> regex_cache;
 	constexpr size_t max_regex_cache_entries = 256;
 	try {
-		std::shared_ptr<std::regex> regex;
+		std::shared_ptr<duckdb_re2::RE2> regex;
 		{
 			std::lock_guard<std::mutex> lock(regex_cache_mutex);
 			auto entry = regex_cache.find(pattern);
@@ -1687,14 +1743,18 @@ bool RegexMatches(const std::string &value, const std::string &pattern, const st
 				if (regex_cache.size() >= max_regex_cache_entries) {
 					regex_cache.clear();
 				}
-				regex = std::make_shared<std::regex>(pattern);
+				regex = std::make_shared<duckdb_re2::RE2>(pattern);
+				if (!regex->ok()) {
+					error = path + " schema pattern is invalid: " + regex->error();
+					return false;
+				}
 				regex_cache.emplace(pattern, regex);
 			} else {
 				regex = entry->second;
 			}
 		}
-		return std::regex_search(value, *regex);
-	} catch (std::regex_error &ex) {
+		return duckdb_re2::RE2::PartialMatch(duckdb_re2::StringPiece(value.data(), value.size()), *regex);
+	} catch (std::exception &ex) {
 		error = path + " schema pattern is invalid: " + ex.what();
 		return false;
 	}
@@ -2044,10 +2104,56 @@ int64_t FindJsonIntegerValue(const std::string &body, const std::string &key) {
 	return -1;
 }
 
+size_t MaxHttpResponseBytes() {
+	auto configured = GetEnv("DUCKDB_AI_MAX_RESPONSE_BYTES");
+	if (configured.empty()) {
+		return DEFAULT_MAX_HTTP_RESPONSE_BYTES;
+	}
+	try {
+		size_t parsed = 0;
+		auto value = std::stoull(configured, &parsed);
+		if (parsed != configured.size() || value == 0 || value > MAX_HTTP_RESPONSE_BYTES_LIMIT) {
+			throw InvalidInputException("DUCKDB_AI_MAX_RESPONSE_BYTES must be between 1 and %llu",
+			                            static_cast<unsigned long long>(MAX_HTTP_RESPONSE_BYTES_LIMIT));
+		}
+		return static_cast<size_t>(value);
+	} catch (InvalidInputException &) {
+		throw;
+	} catch (...) {
+		throw InvalidInputException("DUCKDB_AI_MAX_RESPONSE_BYTES must be an integer between 1 and %llu",
+		                            static_cast<unsigned long long>(MAX_HTTP_RESPONSE_BYTES_LIMIT));
+	}
+}
+
+struct ResponseWriteState {
+	explicit ResponseWriteState(size_t max_bytes_p) : max_bytes(max_bytes_p) {
+	}
+
+	std::string body;
+	size_t max_bytes;
+	bool limit_exceeded = false;
+};
+
 size_t WriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
-	auto response = reinterpret_cast<std::string *>(userdata);
-	response->append(ptr, size * nmemb);
-	return size * nmemb;
+	auto response = reinterpret_cast<ResponseWriteState *>(userdata);
+	if (size != 0 && nmemb > std::numeric_limits<size_t>::max() / size) {
+		response->limit_exceeded = true;
+		return 0;
+	}
+	auto incoming_bytes = size * nmemb;
+	if (incoming_bytes > response->max_bytes || response->body.size() > response->max_bytes - incoming_bytes) {
+		response->limit_exceeded = true;
+		return 0;
+	}
+	response->body.append(ptr, incoming_bytes);
+	return incoming_bytes;
+}
+
+void ValidateHttpHeader(const std::string &header) {
+	if (header.find('\r') != std::string::npos || header.find('\n') != std::string::npos ||
+	    header.find('\0') != std::string::npos) {
+		throw InvalidInputException("AI HTTP header value contains prohibited control characters");
+	}
 }
 
 bool ClientInterrupted(ClientContext *context) {
@@ -2421,22 +2527,34 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 	int64_t total_elapsed_ms = 0;
 	for (long attempt = 0; attempt <= retry_count; attempt++) {
 		auto curl = ThreadLocalCurlHandle();
-		std::string response_body;
+		ResponseWriteState response(MaxHttpResponseBytes());
 		CurlHeaderCapture header_capture;
 		CurlProgressState progress_state {client_context};
 		struct curl_slist *header_list = nullptr;
 		for (auto &header : headers) {
-			header_list = curl_slist_append(header_list, header.c_str());
+			ValidateHttpHeader(header);
+		}
+		for (auto &header : headers) {
+			auto appended_headers = curl_slist_append(header_list, header.c_str());
+			if (!appended_headers) {
+				curl_slist_free_all(header_list);
+				throw OutOfMemoryException("Could not allocate AI provider request headers");
+			}
+			header_list = appended_headers;
 		}
 
 		curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 		curl_easy_setopt(curl, CURLOPT_POST, 1L);
 		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(payload.size()));
+		if (payload.size() > static_cast<size_t>(std::numeric_limits<curl_off_t>::max())) {
+			curl_slist_free_all(header_list);
+			throw InvalidInputException("AI provider request payload is too large");
+		}
+		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(payload.size()));
 		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
 		curl_easy_setopt(curl, CURLOPT_SHARE, SharedCurlHandle());
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 		curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
 		curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_capture);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
@@ -2459,6 +2577,10 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		curl_slist_free_all(header_list);
 
 		total_elapsed_ms += std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+		if (response.limit_exceeded) {
+			throw InvalidInputException("AI HTTP response exceeded DUCKDB_AI_MAX_RESPONSE_BYTES (%llu bytes)",
+			                            static_cast<unsigned long long>(response.max_bytes));
+		}
 		if (attempt < retry_count && (result != CURLE_OK || IsRetryableHttpStatus(status))) {
 			if (result == CURLE_ABORTED_BY_CALLBACK && ClientInterrupted(client_context)) {
 				throw InterruptException();
@@ -2473,11 +2595,12 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 			throw IOException("AI provider request failed: %s", curl_easy_strerror(result));
 		}
 		if (throw_http_errors && (status < 200 || status >= 300)) {
-			throw IOException("AI provider returned HTTP %ld: %s", status, response_body);
+			throw IOException("AI provider returned HTTP %ld: %s", status, response.body);
 		}
-		auto response = HttpResponse(response_body, status, total_elapsed_ms, header_capture.retry_after_ms);
-		response.retries = attempt;
-		return response;
+		auto http_response =
+		    HttpResponse(std::move(response.body), status, total_elapsed_ms, header_capture.retry_after_ms);
+		http_response.retries = attempt;
+		return http_response;
 	}
 	throw InternalException("AI provider retry loop exited unexpectedly");
 }
@@ -2521,6 +2644,7 @@ void EnqueueUsageLog(ProviderRuntimeState &state, UsageLogJob job) {
 		StartUsageLogWorkerLocked(state);
 		if (state.usage_log_queue.size() >= MAX_USAGE_LOG_QUEUE) {
 			state.usage_log_queue.pop_front();
+			state.dropped_usage_log_events++;
 		}
 		state.usage_log_queue.push_back(std::move(job));
 	}
@@ -2568,6 +2692,8 @@ HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload
 			}
 			return response;
 		} catch (InterruptException &) {
+			throw;
+		} catch (InvalidInputException &) {
 			throw;
 		} catch (std::exception &) {
 			if (attempt >= retry_count) {
@@ -3885,8 +4011,9 @@ void PushUsageEvent(ProviderRuntimeState &state, UsageEvent event) {
 	event.event_id = state.next_usage_event_id++;
 	state.usage_events.push_back(std::move(event));
 	if (state.usage_events.size() > MAX_USAGE_EVENTS) {
-		state.usage_events.erase(state.usage_events.begin(),
-		                         state.usage_events.begin() + (state.usage_events.size() - MAX_USAGE_EVENTS));
+		auto dropped = state.usage_events.size() - MAX_USAGE_EVENTS;
+		state.usage_events.erase(state.usage_events.begin(), state.usage_events.begin() + dropped);
+		state.dropped_usage_events += dropped;
 	}
 }
 
@@ -3897,6 +4024,8 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 	event.event = "ai_completion";
 	event.function_name = options.function_name;
 	event.query_id = options.query_id;
+	event.operation_id = options.operation_id;
+	event.parent_operation_id = options.parent_operation_id;
 	event.provider = config.provider;
 	event.protocol = config.protocol;
 	event.model = config.model;
@@ -3926,6 +4055,8 @@ void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &pro
 	event.event = "ai_completion";
 	event.function_name = options.function_name;
 	event.query_id = options.query_id;
+	event.operation_id = options.operation_id;
+	event.parent_operation_id = options.parent_operation_id;
 	event.provider = config.provider;
 	event.protocol = config.protocol;
 	event.model = config.model;
@@ -3949,19 +4080,21 @@ void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &pro
 }
 
 void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input, const EmbeddingResult &result,
-                               const CompletionOptions &options) {
+                               const CompletionOptions &options, int64_t dimensions = -1) {
 	UsageEvent event;
 	event.created_at = CurrentTimestamp();
 	event.event = "ai_embedding";
 	event.function_name = options.function_name;
 	event.query_id = options.query_id;
+	event.operation_id = options.operation_id;
+	event.parent_operation_id = options.parent_operation_id;
 	event.provider = config.provider;
 	event.protocol = config.protocol;
 	event.model = config.model;
 	event.prompt_chars = static_cast<int64_t>(input.size());
 	event.response_chars = 0;
 	event.input_chars = static_cast<int64_t>(input.size());
-	event.dimensions = static_cast<int64_t>(result.values.size());
+	event.dimensions = dimensions >= 0 ? dimensions : static_cast<int64_t>(result.values.size());
 	event.prompt_tokens = result.prompt_tokens;
 	event.completion_tokens = -1;
 	event.total_tokens = result.total_tokens;
@@ -3985,6 +4118,8 @@ void RecordFailedEmbeddingUsageEvent(const ProviderConfig &config, const std::st
 	event.event = "ai_embedding";
 	event.function_name = options.function_name;
 	event.query_id = options.query_id;
+	event.operation_id = options.operation_id;
+	event.parent_operation_id = options.parent_operation_id;
 	event.provider = config.provider;
 	event.protocol = config.protocol;
 	event.model = config.model;
@@ -4298,6 +4433,33 @@ std::string SerializeEmbeddingCacheBody(const ProviderConfig &config, const Embe
 	return body;
 }
 
+void ValidateEmbeddingInputLimits(const std::string &input, const ProviderCapabilities &capabilities) {
+	auto input_tokens = EstimateTokenCount(input);
+	if (input_tokens > capabilities.max_batch_tokens) {
+		throw InvalidInputException(
+		    "AI embedding input has %lld estimated tokens; external model request limit is %lld",
+		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.max_batch_tokens));
+	}
+	if (capabilities.context_tokens > 0 && input_tokens > capabilities.context_tokens) {
+		throw InvalidInputException(
+		    "AI embedding input has %lld estimated tokens; external model context limit is %lld",
+		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.context_tokens));
+	}
+	if (NumericCast<int64_t>(input.size()) + 64 > capabilities.max_request_bytes) {
+		throw InvalidInputException("AI embedding input exceeds external model max_request_bytes");
+	}
+}
+
+std::string EmbeddingDimensionError(const EmbeddingResult &result, const ProviderCapabilities &capabilities) {
+	if (capabilities.embedding_dimensions <= 0 ||
+	    NumericCast<int64_t>(result.values.size()) == capabilities.embedding_dimensions) {
+		return "";
+	}
+	return StringUtil::Format("AI embedding provider returned %llu dimensions; external model expects %lld",
+	                          static_cast<unsigned long long>(result.values.size()),
+	                          static_cast<long long>(capabilities.embedding_dimensions));
+}
+
 //! Fetch a provider response, going through the response cache and in-flight request coalescing
 //! when caching is enabled. Sets cache_key_out whenever the response cache is consulted so
 //! callers can evict entries that later fail response parsing.
@@ -4373,6 +4535,18 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		}
 		throw;
 	}
+	auto capabilities = GetProviderCapabilities(options);
+	if (capabilities.embedding_dimensions > 0) {
+		for (auto &result : results) {
+			auto error = EmbeddingDimensionError(result, capabilities);
+			if (!error.empty()) {
+				for (auto &input : inputs) {
+					RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+				}
+				throw InvalidInputException("%s", error);
+			}
+		}
+	}
 	for (idx_t i = 0; i < results.size(); i++) {
 		RecordEmbeddingUsageEvent(config, inputs[i], results[i], options);
 		MaybePostEmbeddingLog(config, inputs[i], results[i], options);
@@ -4409,6 +4583,97 @@ std::string ProviderProtocol(const std::string &provider) {
 	return ProviderDefaults(provider).protocol;
 }
 
+ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options) {
+	auto config = ResolveProviderConfig(options, false);
+	ProviderCapabilities capabilities;
+	capabilities.provider = config.provider;
+	capabilities.protocol = config.protocol;
+	// These are deliberately conservative transport limits. Provider account tiers and
+	// model-specific limits can be lower, in which case EmbedMany recursively splits a
+	// rejected payload instead of failing the whole vector.
+	capabilities.max_batch_inputs = 512;
+	capabilities.max_batch_tokens = 100000;
+	capabilities.max_request_bytes = 8 * 1024 * 1024;
+	capabilities.context_tokens = -1;
+	capabilities.embedding_dimensions = -1;
+	capabilities.native_batch_jobs = false;
+	if (config.protocol == "ollama_embed") {
+		capabilities.max_batch_inputs = 128;
+		capabilities.max_batch_tokens = 32768;
+		capabilities.max_request_bytes = 4 * 1024 * 1024;
+	}
+	if (!options.model_options.empty()) {
+		std::string error;
+		auto document = ReadYyjsonDocument(options.model_options, error);
+		auto root = document ? duckdb_yyjson::yyjson_doc_get_root(document.get()) : nullptr;
+		if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+			throw InvalidInputException("External model options must be a JSON object: %s", error);
+		}
+		auto apply_limit = [&](const char *name, int64_t &target, int64_t maximum) {
+			int64_t value;
+			if (!YyjsonDirectInteger(root, name, value)) {
+				return false;
+			}
+			if (value <= 0 || value > maximum) {
+				throw InvalidInputException("External model option \"%s\" must be between 1 and %lld", name,
+				                            static_cast<long long>(maximum));
+			}
+			target = value;
+			return true;
+		};
+		if (!apply_limit("max_batch_inputs", capabilities.max_batch_inputs, 1000000)) {
+			apply_limit("max_inputs", capabilities.max_batch_inputs, 1000000);
+		}
+		apply_limit("max_batch_tokens", capabilities.max_batch_tokens, 1000000000);
+		apply_limit("max_request_bytes", capabilities.max_request_bytes,
+		            static_cast<int64_t>(MAX_HTTP_RESPONSE_BYTES_LIMIT));
+		if (!apply_limit("context_size", capabilities.context_tokens, 1000000000)) {
+			apply_limit("max_input_tokens", capabilities.context_tokens, 1000000000);
+		}
+		apply_limit("embedding_dimensions", capabilities.embedding_dimensions, 1000000);
+		auto native_batch = YyjsonObjectGet(root, "native_batch_support");
+		if (!native_batch) {
+			native_batch = YyjsonObjectGet(root, "native_batch_jobs");
+		}
+		if (native_batch) {
+			if (!duckdb_yyjson::yyjson_is_bool(native_batch)) {
+				throw InvalidInputException("External model native_batch_support must be a boolean");
+			}
+			capabilities.native_batch_jobs = duckdb_yyjson::yyjson_get_bool(native_batch);
+		}
+	}
+	return capabilities;
+}
+
+void ApplyModelProfileOptions(CompletionOptions &options) {
+	if (options.model_options.empty()) {
+		return;
+	}
+	std::string error;
+	auto document = ReadYyjsonDocument(options.model_options, error);
+	auto root = document ? duckdb_yyjson::yyjson_doc_get_root(document.get()) : nullptr;
+	if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+		throw InvalidInputException("External model options must be a JSON object: %s", error);
+	}
+	auto apply_price = [&](const char *name, bool &has_value, double &target) {
+		double value;
+		if (!YyjsonDirectDouble(root, name, value)) {
+			return;
+		}
+		if (!std::isfinite(value) || value < 0) {
+			throw InvalidInputException("External model option \"%s\" must be a finite non-negative number", name);
+		}
+		if (!has_value) {
+			has_value = true;
+			target = value;
+		}
+	};
+	apply_price("input_token_price_per_million", options.has_input_token_price_per_million,
+	            options.input_token_price_per_million);
+	apply_price("output_token_price_per_million", options.has_output_token_price_per_million,
+	            options.output_token_price_per_million);
+}
+
 int64_t EstimateTokenCount(const std::string &input) {
 	if (input.empty()) {
 		return 0;
@@ -4439,25 +4704,26 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	if (prompt.empty()) {
 		throw InvalidInputException("ai_complete prompt must not be empty");
 	}
-	auto config = ResolveProvider(options);
+	auto request_options = RequestOperationOptions(options);
+	auto config = ResolveProvider(request_options);
 	auto endpoint = RequestEndpoint(config);
-	auto payload = RequestPayload(config, prompt, options);
-	EnforceAllowedHost(endpoint, options);
+	auto payload = RequestPayload(config, prompt, request_options);
+	EnforceAllowedHost(endpoint, request_options);
 	HttpResponse response;
 	std::string cache_key;
 	try {
-		response = FetchProviderResponse("completion", config, endpoint, payload, options,
-		                                 EstimatedCompletionTokens(prompt, options), cache_key);
+		response = FetchProviderResponse("completion", config, endpoint, payload, request_options,
+		                                 EstimatedCompletionTokens(prompt, request_options), cache_key);
 	} catch (InterruptException &) {
 		// Query cancellation is not a provider failure; keep it out of usage error events.
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, prompt, options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, prompt, request_options, 0, ex.what(), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
 		auto error = ProviderErrorDetail(config, response);
-		RecordFailedUsageEvent(config, prompt, options, response.status, error, response.retries);
+		RecordFailedUsageEvent(config, prompt, request_options, response.status, error, response.retries);
 		throw IOException("%s", error);
 	}
 	CompletionResult result;
@@ -4467,13 +4733,13 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		if (!cache_key.empty()) {
 			// Do not keep responses that cannot be parsed (for example truncated output); a
 			// poisoned entry would fail every later cache hit until ai_clear_cache().
-			RemoveCachedResponse(RuntimeState(options), cache_key);
+			RemoveCachedResponse(RuntimeState(request_options), cache_key);
 		}
-		RecordFailedUsageEvent(config, prompt, options, response.status, ex.what(), response.retries);
+		RecordFailedUsageEvent(config, prompt, request_options, response.status, ex.what(), response.retries);
 		throw;
 	}
-	RecordUsageEvent(config, prompt, result, options);
-	MaybePostUsageLog(config, prompt, result, options);
+	RecordUsageEvent(config, prompt, result, request_options);
+	MaybePostUsageLog(config, prompt, result, request_options);
 	return result;
 }
 
@@ -4481,28 +4747,29 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	if (text.empty()) {
 		throw InvalidInputException("ai_redact text must not be empty");
 	}
-	auto config = ResolveProvider(options);
+	auto request_options = RequestOperationOptions(options);
+	auto config = ResolveProvider(request_options);
 	if (config.protocol != "privacy_filter") {
 		throw InvalidInputException("AI provider \"%s\" does not support dedicated Privacy Filter redaction.",
 		                            config.provider);
 	}
 	auto endpoint = RequestEndpoint(config);
-	auto payload = RequestPayload(config, text, options);
-	EnforceAllowedHost(endpoint, options);
+	auto payload = RequestPayload(config, text, request_options);
+	EnforceAllowedHost(endpoint, request_options);
 	HttpResponse response;
 	std::string cache_key;
 	try {
-		response =
-		    FetchProviderResponse("redaction", config, endpoint, payload, options, EstimateTokenCount(text), cache_key);
+		response = FetchProviderResponse("redaction", config, endpoint, payload, request_options,
+		                                 EstimateTokenCount(text), cache_key);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, text, options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, text, request_options, 0, ex.what(), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
 		auto error = ProviderErrorDetail(config, response);
-		RecordFailedUsageEvent(config, text, options, response.status, error, response.retries);
+		RecordFailedUsageEvent(config, text, request_options, response.status, error, response.retries);
 		throw IOException("%s", error);
 	}
 	CompletionResult result;
@@ -4510,13 +4777,13 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 		result = ParseCompletionResult(config, response);
 	} catch (std::exception &ex) {
 		if (!cache_key.empty()) {
-			RemoveCachedResponse(RuntimeState(options), cache_key);
+			RemoveCachedResponse(RuntimeState(request_options), cache_key);
 		}
-		RecordFailedUsageEvent(config, text, options, response.status, ex.what(), response.retries);
+		RecordFailedUsageEvent(config, text, request_options, response.status, ex.what(), response.retries);
 		throw;
 	}
-	RecordUsageEvent(config, text, result, options);
-	MaybePostUsageLog(config, text, result, options);
+	RecordUsageEvent(config, text, result, request_options);
+	MaybePostUsageLog(config, text, result, request_options);
 	return result;
 }
 
@@ -4543,24 +4810,32 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	if (input.empty()) {
 		throw InvalidInputException("ai_embed input must not be empty");
 	}
-	auto config = ResolveEmbeddingProviderConfig(options, true);
+	auto request_options = RequestOperationOptions(options);
+	auto config = ResolveEmbeddingProviderConfig(request_options, true);
+	auto capabilities = GetProviderCapabilities(request_options);
+	try {
+		ValidateEmbeddingInputLimits(input, capabilities);
+	} catch (std::exception &ex) {
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, ex.what(), 0);
+		throw;
+	}
 	auto endpoint = EmbeddingEndpoint(config);
 	auto payload = EmbeddingPayload(config, input);
-	EnforceAllowedHost(endpoint, options);
+	EnforceAllowedHost(endpoint, request_options);
 	HttpResponse response;
 	std::string cache_key;
 	try {
-		response = FetchProviderResponse("embedding", config, endpoint, payload, options, EstimateTokenCount(input),
-		                                 cache_key);
+		response = FetchProviderResponse("embedding", config, endpoint, payload, request_options,
+		                                 EstimateTokenCount(input), cache_key);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, ex.what(), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
 		auto error = ProviderErrorDetail(config, response);
-		RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, error, response.retries);
 		throw IOException("%s", error);
 	}
 	EmbeddingResult result;
@@ -4568,13 +4843,22 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 		result = ParseEmbeddingResult(config, response);
 	} catch (std::exception &ex) {
 		if (!cache_key.empty()) {
-			RemoveCachedResponse(RuntimeState(options), cache_key);
+			RemoveCachedResponse(RuntimeState(request_options), cache_key);
 		}
-		RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, ex.what(), response.retries);
 		throw;
 	}
-	RecordEmbeddingUsageEvent(config, input, result, options);
-	MaybePostEmbeddingLog(config, input, result, options);
+	auto dimension_error = EmbeddingDimensionError(result, capabilities);
+	if (!dimension_error.empty()) {
+		if (!cache_key.empty()) {
+			RemoveCachedResponse(RuntimeState(request_options), cache_key);
+		}
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, dimension_error,
+		                                response.retries);
+		throw InvalidInputException("%s", dimension_error);
+	}
+	RecordEmbeddingUsageEvent(config, input, result, request_options);
+	MaybePostEmbeddingLog(config, input, result, request_options);
 	return result;
 }
 
@@ -4593,6 +4877,15 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 	auto config = ResolveEmbeddingProviderConfig(options, true);
 	auto endpoint = EmbeddingEndpoint(config);
 	EnforceAllowedHost(endpoint, options);
+	auto capabilities = GetProviderCapabilities(options);
+	for (auto &input : inputs) {
+		try {
+			ValidateEmbeddingInputLimits(input, capabilities);
+		} catch (std::exception &ex) {
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+			throw;
+		}
+	}
 
 	std::vector<EmbeddingResult> results(inputs.size());
 	std::vector<idx_t> miss_rows;
@@ -4608,12 +4901,22 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 			if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
 				try {
 					results[i] = ParseEmbeddingResult(config, cached_response);
-				} catch (...) {
+				} catch (std::exception &ex) {
 					RemoveCachedResponse(runtime_state, cache_key);
+					RecordFailedEmbeddingUsageEvent(config, inputs[i], options, cached_response.status, ex.what(),
+					                                cached_response.retries);
 					throw;
 				}
-				RecordEmbeddingUsageEvent(config, inputs[i], results[i], options);
-				MaybePostEmbeddingLog(config, inputs[i], results[i], options);
+				auto dimension_error = EmbeddingDimensionError(results[i], capabilities);
+				if (!dimension_error.empty()) {
+					RemoveCachedResponse(runtime_state, cache_key);
+					RecordFailedEmbeddingUsageEvent(config, inputs[i], options, cached_response.status, dimension_error,
+					                                cached_response.retries);
+					throw InvalidInputException("%s", dimension_error);
+				}
+				auto cache_options = ChildOperationOptions(options);
+				RecordEmbeddingUsageEvent(config, inputs[i], results[i], cache_options);
+				MaybePostEmbeddingLog(config, inputs[i], results[i], cache_options);
 				continue;
 			}
 			miss_rows.push_back(i);
@@ -4624,15 +4927,67 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 		}
 	}
 
-	for (idx_t batch_start = 0; batch_start < miss_rows.size(); batch_start += MAX_EMBED_BATCH_INPUTS) {
-		auto batch_end = std::min<idx_t>(batch_start + MAX_EMBED_BATCH_INPUTS, miss_rows.size());
+	std::vector<std::pair<idx_t, idx_t>> batches;
+	idx_t batch_start = 0;
+	while (batch_start < miss_rows.size()) {
+		auto batch_end = batch_start;
+		int64_t batch_tokens = 0;
+		int64_t batch_bytes = 64;
+		while (batch_end < miss_rows.size()) {
+			auto &input = inputs[miss_rows[batch_end]];
+			auto input_tokens = EstimateTokenCount(input);
+			auto input_bytes = NumericCast<int64_t>(input.size()) + 16;
+			auto input_count = NumericCast<int64_t>(batch_end - batch_start + 1);
+			if (batch_end > batch_start && (input_count > capabilities.max_batch_inputs ||
+			                                batch_tokens + input_tokens > capabilities.max_batch_tokens ||
+			                                batch_bytes + input_bytes > capabilities.max_request_bytes)) {
+				break;
+			}
+			batch_tokens += input_tokens;
+			batch_bytes += input_bytes;
+			batch_end++;
+		}
+		batches.emplace_back(batch_start, batch_end);
+		batch_start = batch_end;
+	}
+
+	std::function<std::vector<EmbeddingResult>(const std::vector<std::string> &)> execute_batch;
+	execute_batch = [&](const std::vector<std::string> &batch_inputs) -> std::vector<EmbeddingResult> {
+		auto batch_options = ChildOperationOptions(options);
+		if (batch_inputs.size() == 1) {
+			return {Embed(batch_inputs[0], batch_options)};
+		}
+		try {
+			return EmbedBatchRequest(config, endpoint, batch_inputs, batch_options);
+		} catch (IOException &ex) {
+			auto message = LowerAscii(ex.what());
+			auto payload_too_large = message.find("413") != std::string::npos ||
+			                         message.find("payload too large") != std::string::npos ||
+			                         message.find("request too large") != std::string::npos ||
+			                         message.find("maximum context") != std::string::npos;
+			if (!payload_too_large || batch_inputs.size() <= 1) {
+				throw;
+			}
+			auto split = batch_inputs.size() / 2;
+			std::vector<std::string> left(batch_inputs.begin(), batch_inputs.begin() + split);
+			std::vector<std::string> right(batch_inputs.begin() + split, batch_inputs.end());
+			auto left_results = execute_batch(left);
+			auto right_results = execute_batch(right);
+			left_results.insert(left_results.end(), std::make_move_iterator(right_results.begin()),
+			                    std::make_move_iterator(right_results.end()));
+			return left_results;
+		}
+	};
+
+	for (auto &batch : batches) {
+		batch_start = batch.first;
+		auto batch_end = batch.second;
 		std::vector<std::string> batch_inputs;
 		batch_inputs.reserve(batch_end - batch_start);
 		for (idx_t i = batch_start; i < batch_end; i++) {
 			batch_inputs.push_back(inputs[miss_rows[i]]);
 		}
-		auto batch_results = batch_inputs.size() == 1 ? std::vector<EmbeddingResult> {Embed(batch_inputs[0], options)}
-		                                              : EmbedBatchRequest(config, endpoint, batch_inputs, options);
+		auto batch_results = execute_batch(batch_inputs);
 		for (idx_t i = 0; i < batch_results.size(); i++) {
 			auto input_row = miss_rows[batch_start + i];
 			if (cache_enabled && batch_inputs.size() > 1) {
@@ -4646,6 +5001,50 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 		}
 	}
 	return results;
+}
+
+void RecordEmbeddingCacheHit(const std::string &input, int64_t dimensions, const CompletionOptions &options) {
+	auto config = ResolveEmbeddingProviderConfig(options, false);
+	EmbeddingResult result;
+	result.http_status = 200;
+	result.prompt_tokens = 0;
+	result.total_tokens = 0;
+	result.elapsed_ms = 0;
+	result.retries = 0;
+	result.cache_hit = true;
+	auto cache_options = options;
+	cache_options.operation_id.clear();
+	if (cache_options.parent_operation_id.empty()) {
+		cache_options.parent_operation_id = cache_options.query_id;
+	}
+	RecordEmbeddingUsageEvent(config, input, result, cache_options, MaxValue<int64_t>(0, dimensions));
+}
+
+std::string ControlPlaneRequest(const std::string &path, const std::string &payload, const CompletionOptions &options) {
+	auto base_url = TrimTrailingSlash(GetEnv("DUCKDB_AI_CONTROL_PLANE_URL"));
+	if (base_url.empty()) {
+		throw InvalidInputException("DUCKDB_AI_CONTROL_PLANE_URL is required for this operation");
+	}
+	if (path.empty() || path.front() != '/') {
+		throw InvalidInputException("AI control-plane request path must start with /");
+	}
+	auto endpoint = base_url + path;
+	EnforceAllowedHost(endpoint, options);
+	std::vector<std::string> headers {"Content-Type: application/json"};
+	auto token = GetEnv("DUCKDB_AI_CONTROL_PLANE_TOKEN");
+	if (!token.empty()) {
+		headers.push_back("Authorization: Bearer " + token);
+	}
+	auto response = HttpPost(endpoint, payload, headers, TimeoutSeconds(options), false, RetryCount(options),
+	                         RetryBackoffMs(options), options.client_context);
+	if (response.status < 200 || response.status >= 300) {
+		throw IOException("AI control plane returned HTTP %ld: %s", response.status, RedactValue(response.body, token));
+	}
+	std::string error;
+	if (!ValidateJsonDocumentInternal(response.body, error)) {
+		throw IOException("AI control plane returned invalid JSON: %s", error);
+	}
+	return response.body;
 }
 
 void InitializeProviderRuntime() {
@@ -4672,15 +5071,34 @@ std::vector<UsageEvent> UsageEvents(ClientContext &context) {
 	return state.usage_events;
 }
 
+UsageBufferStats UsageStats() {
+	std::unique_lock<std::mutex> usage_lock(fallback_runtime_state.usage_mutex, std::defer_lock);
+	std::unique_lock<std::mutex> log_lock(fallback_runtime_state.usage_log_mutex, std::defer_lock);
+	std::lock(usage_lock, log_lock);
+	return {fallback_runtime_state.usage_events.size(), fallback_runtime_state.dropped_usage_events,
+	        fallback_runtime_state.usage_log_queue.size(), fallback_runtime_state.dropped_usage_log_events};
+}
+
+UsageBufferStats UsageStats(ClientContext &context) {
+	auto &state = RuntimeState(context);
+	std::unique_lock<std::mutex> usage_lock(state.usage_mutex, std::defer_lock);
+	std::unique_lock<std::mutex> log_lock(state.usage_log_mutex, std::defer_lock);
+	std::lock(usage_lock, log_lock);
+	return {state.usage_events.size(), state.dropped_usage_events, state.usage_log_queue.size(),
+	        state.dropped_usage_log_events};
+}
+
 void ClearUsageEvents() {
 	std::lock_guard<std::mutex> lock(fallback_runtime_state.usage_mutex);
 	fallback_runtime_state.usage_events.clear();
+	fallback_runtime_state.dropped_usage_events = 0;
 }
 
 void ClearUsageEvents(ClientContext &context) {
 	auto &state = RuntimeState(context);
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
 	state.usage_events.clear();
+	state.dropped_usage_events = 0;
 }
 
 void ClearResponseCache() {
@@ -4707,6 +5125,8 @@ void RecordLocalUsageEvent(ClientContext *context, const std::string &event_name
 	event.event = event_name;
 	event.function_name = event_name;
 	event.query_id = "";
+	event.operation_id = "local:op:" + std::to_string(next_operation_id.fetch_add(1));
+	event.parent_operation_id = "";
 	event.provider = "local";
 	event.protocol = "duckdb";
 	event.model = "";

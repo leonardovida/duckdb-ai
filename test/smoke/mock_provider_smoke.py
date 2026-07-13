@@ -16,6 +16,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
     ollama_requests = []
     claude_requests = []
     log_requests = []
+    control_plane_requests = []
+    control_plane_authorization_headers = []
     authorization_headers = []
     openrouter_referer_headers = []
     openrouter_title_headers = []
@@ -32,6 +34,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         cls.ollama_requests.clear()
         cls.claude_requests.clear()
         cls.log_requests.clear()
+        cls.control_plane_requests.clear()
+        cls.control_plane_authorization_headers.clear()
         cls.authorization_headers.clear()
         cls.openrouter_referer_headers.clear()
         cls.openrouter_title_headers.clear()
@@ -88,6 +92,10 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = "mock retry completion"
             elif prompt == "cache dogpile":
                 content = "mock dogpile completion"
+            elif prompt == "oversized response":
+                content = "x" * 2048
+            elif "EMPTY_INTERMEDIATE" in prompt and "larger SQL aggregate" in prompt:
+                content = ""
             elif "return invalid schema JSON" in prompt:
                 content = '{"summary":123}'
             elif "return constrained schema JSON" in prompt:
@@ -108,6 +116,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = '{"tags":["duck","duck"]}'
             elif "return oneOf violation JSON" in prompt:
                 content = '{"a":1,"b":2}'
+            elif "Score how well the input satisfies the supplied criteria" in full_prompt:
+                content = '{"score":0.91}'
             elif request.get("response_format") or "Return only valid JSON" in full_prompt:
                 content = '{"summary":"mock structured"}'
             elif "Explain the DuckDB SQL query" in full_prompt:
@@ -122,6 +132,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = "```sql\nSELECT 42\n```"
             elif "Return only a JSON array of chosen labels" in full_prompt:
                 content = '["billing, overdue","performance"]'
+            elif "class_a" in full_prompt and "class_b" in full_prompt:
+                content = "class_a" if "alpha" in prompt else "class_b"
             elif "Score candidate relevance to the search query" in full_prompt:
                 content = "0.82"
             payload = {
@@ -141,8 +153,22 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             self.embedding_requests.append(request)
             inputs = request.get("input")
             input_count = len(inputs) if isinstance(inputs, list) else 1
+            if isinstance(inputs, list) and len(inputs) > 2 and any("split batch" in value for value in inputs):
+                self._send_json({"error": {"message": "payload too large"}}, status=413)
+                return
+
+            def embedding(value):
+                if "alpha" in value:
+                    return [1.0, 0.0, 0.0]
+                if "beta" in value:
+                    return [0.0, 1.0, 0.0]
+                if "ambiguous" in value:
+                    return [1.0, 1.0, 0.0]
+                return [0.25, -0.5, 1.25]
+
+            input_values = inputs if isinstance(inputs, list) else [inputs]
             payload = {
-                "data": [{"embedding": [0.25, -0.5, 1.25]} for _ in range(input_count)],
+                "data": [{"embedding": embedding(value)} for value in input_values],
                 "usage": {
                     "prompt_tokens": 2 * input_count,
                     "total_tokens": 2 * input_count,
@@ -185,6 +211,56 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         if self.path == "/log":
             self.log_requests.append(json.loads(body))
             self._send_json({"ok": True})
+            return
+
+        if self.path.startswith("/v1/endpoints/"):
+            request = json.loads(body)
+            self.control_plane_requests.append((self.path, request))
+            self.control_plane_authorization_headers.append(self.headers.get("authorization"))
+            if self.path == "/v1/endpoints/provision":
+                self._send_json(
+                    {
+                        "operation_id": "provision-op",
+                        "status": "submitted",
+                        "estimated_hourly_cost_usd": 1.25,
+                    }
+                )
+            elif self.path == "/v1/endpoints/status":
+                self._send_json(
+                    {
+                        "operation_id": request["operation_id"],
+                        "status": "ready",
+                        "endpoint_url": "https://endpoint.example/v1",
+                    }
+                )
+            else:
+                self._send_json({"operation_id": "deprovision-op", "status": "submitted"})
+            return
+
+        if self.path == "/v1/documents/parse":
+            request = json.loads(body)
+            self.control_plane_requests.append((self.path, request))
+            self.control_plane_authorization_headers.append(self.headers.get("authorization"))
+            if request.get("parser_profile") == "malformed":
+                self._send_json({"document_id": "document-malformed", "unexpected": []})
+                return
+            self._send_json(
+                {
+                    "document_id": "document-1",
+                    "elements": [
+                        {
+                            "page": 1,
+                            "element_index": 0,
+                            "element_type": "paragraph",
+                            "text": "DuckDB document",
+                            "markdown": "DuckDB document",
+                            "bbox": [0, 0, 10, 10],
+                            "confidence": 0.99,
+                            "metadata": {"language": "en"},
+                        }
+                    ],
+                }
+            )
             return
 
         self.send_response(404)
@@ -680,6 +756,91 @@ def run_duckdb_invalid_env_log_sample_rate(duckdb_path: Path) -> str:
     return result.stdout
 
 
+def run_duckdb_invalid_url_scheme(duckdb_path: Path) -> str:
+    sql = """
+        SELECT ai_complete(
+            'invalid scheme',
+            provider := 'openai',
+            model := 'mock-model',
+            base_url := 'ftp://127.0.0.1'
+        );
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"duckdb invalid URL scheme unexpectedly succeeded\n{result.stdout}")
+    return result.stdout
+
+
+def run_duckdb_invalid_header(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT ai_complete(
+            'invalid header',
+            provider := 'openrouter',
+            model := 'openai/gpt-4o-mini',
+            base_url := '{base_url}'
+        );
+    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENROUTER_API_KEY": "openrouter-test-key",
+            "OPENROUTER_X_TITLE": "safe title\r\nX-Injected: true",
+        }
+    )
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"duckdb invalid HTTP header unexpectedly succeeded\n{result.stdout}")
+    return result.stdout
+
+
+def run_duckdb_oversized_response(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT ai_complete(
+            'oversized response',
+            provider := 'openai',
+            model := 'mock-model',
+            base_url := '{base_url}'
+        );
+    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENAI_API_KEY": "test-key",
+            "DUCKDB_AI_MAX_RESPONSE_BYTES": "1024",
+        }
+    )
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"duckdb oversized HTTP response unexpectedly succeeded\n{result.stdout}")
+    return result.stdout
+
+
 def run_duckdb_openrouter_headers(duckdb_path: Path, base_url: str) -> str:
     sql = f"""
         SELECT ai_complete(
@@ -836,6 +997,33 @@ def assert_invalid_env_log_sample_rate(output: str):
         )
 
 
+def assert_invalid_url_scheme(output: str):
+    if "AI provider URL scheme must be http or https" not in output:
+        raise AssertionError(f"invalid URL scheme error missing expected message\n{output}")
+    if MockProviderHandler.completion_requests:
+        raise AssertionError(
+            f"invalid URL scheme should fail before provider request: {MockProviderHandler.completion_requests}"
+        )
+
+
+def assert_invalid_header(output: str):
+    if "AI HTTP header value contains prohibited control characters" not in output:
+        raise AssertionError(f"invalid HTTP header error missing expected message\n{output}")
+    if MockProviderHandler.completion_requests:
+        raise AssertionError(
+            f"invalid HTTP header should fail before provider request: {MockProviderHandler.completion_requests}"
+        )
+
+
+def assert_oversized_response(output: str):
+    if "AI HTTP response exceeded DUCKDB_AI_MAX_RESPONSE_BYTES (1024 bytes)" not in output:
+        raise AssertionError(f"oversized HTTP response error missing expected message\n{output}")
+    if len(MockProviderHandler.completion_requests) != 1:
+        raise AssertionError(
+            f"oversized response should make one provider request: {MockProviderHandler.completion_requests}"
+        )
+
+
 def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
     sql = """
         SELECT ai_provider_base_url('aws_bedrock') AS bedrock_url;
@@ -973,8 +1161,8 @@ def assert_smoke_result(output: str):
 
     if len(MockProviderHandler.completion_requests) != 34:
         raise AssertionError(f"expected 34 completion requests, got {len(MockProviderHandler.completion_requests)}")
-    if len(MockProviderHandler.authorization_headers) != 44:
-        raise AssertionError(f"expected 44 auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if len(MockProviderHandler.authorization_headers) != 40:
+        raise AssertionError(f"expected 40 auth headers, got {len(MockProviderHandler.authorization_headers)}")
     for header in MockProviderHandler.authorization_headers:
         if header != "Bearer test-key":
             raise AssertionError(f"unexpected authorization header: {header}")
@@ -1206,8 +1394,8 @@ def assert_smoke_result(output: str):
     if MockProviderHandler.claude_versions != ["2023-06-01"]:
         raise AssertionError(f"unexpected Claude version headers: {MockProviderHandler.claude_versions}")
 
-    if len(MockProviderHandler.embedding_requests) != 9:
-        raise AssertionError(f"expected 9 embedding requests, got {len(MockProviderHandler.embedding_requests)}")
+    if len(MockProviderHandler.embedding_requests) != 5:
+        raise AssertionError(f"expected 5 embedding requests, got {len(MockProviderHandler.embedding_requests)}")
     embedding_request = MockProviderHandler.embedding_requests[0]
     if embedding_request["model"] != "mock-embedding-default":
         raise AssertionError(f"unexpected embedding model: {embedding_request}")
@@ -1219,17 +1407,16 @@ def assert_smoke_result(output: str):
     batched_embedding_request = MockProviderHandler.embedding_requests[2]
     if batched_embedding_request["input"] != ["embed batch one", "embed batch two", "embed batch three"]:
         raise AssertionError(f"unexpected batched embedding input: {batched_embedding_request}")
-    similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[3:5]]
-    if similarity_inputs != ["same left", "same right"]:
-        raise AssertionError(f"unexpected similarity embedding inputs: {similarity_inputs}")
-    similarity_models = [request["model"] for request in MockProviderHandler.embedding_requests[3:5]]
-    if similarity_models != ["mock-embedding-default", "mock-embedding-default"]:
-        raise AssertionError(f"unexpected similarity embedding models: {similarity_models}")
-    constant_similarity_inputs = [request["input"] for request in MockProviderHandler.embedding_requests[5:]]
+    similarity_request = MockProviderHandler.embedding_requests[3]
+    if similarity_request["input"] != ["same left", "same right"]:
+        raise AssertionError(f"unexpected packed similarity inputs: {similarity_request}")
+    if similarity_request["model"] != "mock-embedding-default":
+        raise AssertionError(f"unexpected similarity embedding model: {similarity_request}")
+    constant_similarity_inputs = MockProviderHandler.embedding_requests[4]["input"]
     if constant_similarity_inputs.count("constant query") != 1:
         raise AssertionError(f"expected one constant-side embedding, got {constant_similarity_inputs}")
     if set(constant_similarity_inputs) != {"constant query", "candidate one", "candidate two", "candidate three"}:
-        raise AssertionError(f"unexpected constant similarity embedding inputs: {constant_similarity_inputs}")
+        raise AssertionError(f"unexpected packed constant similarity inputs: {constant_similarity_inputs}")
 
     log_deadline = time.time() + 5
     while len(MockProviderHandler.log_requests) < 47 and time.time() < log_deadline:
@@ -1363,6 +1550,375 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"expected controlled embedding cache miss and hit, got {controlled_embedding_logs}")
 
 
+def run_duckdb_adaptive_batches(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT * FROM ai_clear_usage();
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_embedding_model = 'mock-embedding';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_timeout_seconds = 5;
+        SELECT sum(ai_embed('split batch ' || i::VARCHAR)[1]) AS split_embedding_sum
+        FROM range(8) t(i);
+        CREATE EXTERNAL MODEL capped_embedding WITH (
+            provider = 'openai',
+            model = 'mock-embedding',
+            location = '{base_url}',
+            model_type = 'embedding',
+            options = '{{"max_batch_inputs":3,"max_batch_tokens":100,"max_request_bytes":4096,"embedding_dimensions":3}}'
+        );
+        SELECT sum(ai_embed('capped input ' || i::VARCHAR, profile := 'capped_embedding')[1]) AS capped_embedding_sum
+        FROM range(8) t(i);
+        CREATE EXTERNAL MODEL tiny_embedding_request WITH (
+            provider = 'openai',
+            model = 'mock-embedding',
+            location = '{base_url}',
+            model_type = 'embedding',
+            options = '{{"max_batch_tokens":1}}'
+        );
+        SELECT ai_embed(
+            'too many tokens for one request',
+            profile := 'tiny_embedding_request',
+            fail_on_error := false
+        ) IS NULL AS token_limit_rejected;
+        CREATE EXTERNAL MODEL cached_embedding_dimensions WITH (
+            provider = 'openai',
+            model = 'mock-embedding',
+            location = '{base_url}',
+            model_type = 'embedding',
+            options = '{{"embedding_dimensions":3}}'
+        );
+        SELECT count(ai_embed('cached dimension ' || i::VARCHAR,
+                              profile := 'cached_embedding_dimensions', cache := true)) AS cached_dimensions_seeded
+        FROM range(2) t(i);
+        CREATE OR REPLACE EXTERNAL MODEL cached_embedding_dimensions WITH (
+            provider = 'openai',
+            model = 'mock-embedding',
+            location = '{base_url}',
+            model_type = 'embedding',
+            options = '{{"embedding_dimensions":4}}'
+        );
+        SELECT count(ai_embed('cached dimension ' || i::VARCHAR,
+                              profile := 'cached_embedding_dimensions', cache := true,
+                              fail_on_error := false)) = 0 AS stale_dimensions_rejected
+        FROM range(2) t(i);
+        SELECT round(sum(ai_similarity(left_text, right_text)), 6) AS deduplicated_similarity_sum
+        FROM (VALUES
+            ('same left', 'same right'),
+            ('same left', 'same right'),
+            ('same left', 'other right'),
+            ('same left', 'other right')
+        ) input(left_text, right_text);
+        SELECT sum(batch_count) AS request_batches, sum(failures) AS failed_input_events
+        FROM ai_usage_summary();
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb adaptive batch smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_adaptive_batches(output: str):
+    for expected in (
+        "split_embedding_sum",
+        "2.0",
+        "token_limit_rejected",
+        "true",
+        "cached_dimensions_seeded",
+        "stale_dimensions_rejected",
+        "deduplicated_similarity_sum",
+        "4.0",
+        "request_batches",
+    ):
+        if expected not in output:
+            raise AssertionError(f"adaptive batch output missing {expected!r}\n{output}")
+    if len(MockProviderHandler.embedding_requests) != 12:
+        raise AssertionError(f"expected 12 adaptive embedding requests, got {MockProviderHandler.embedding_requests}")
+    split_sizes = [len(request["input"]) for request in MockProviderHandler.embedding_requests[:7]]
+    if split_sizes != [8, 4, 2, 2, 4, 2, 2]:
+        raise AssertionError(f"unexpected recursive split request sizes: {split_sizes}")
+    capped_sizes = [len(request["input"]) for request in MockProviderHandler.embedding_requests[7:10]]
+    if capped_sizes != [3, 3, 2]:
+        raise AssertionError(f"external model batch capabilities were not applied: {capped_sizes}")
+    cached_dimension_inputs = MockProviderHandler.embedding_requests[10]["input"]
+    if cached_dimension_inputs != ["cached dimension 0", "cached dimension 1"]:
+        raise AssertionError(f"unexpected cache dimension seed inputs: {cached_dimension_inputs}")
+    deduplicated_inputs = MockProviderHandler.embedding_requests[11]["input"]
+    if deduplicated_inputs != ["same left", "same right", "other right"]:
+        raise AssertionError(f"similarity inputs were not packed and deduplicated: {deduplicated_inputs}")
+
+
+def run_duckdb_hierarchical_aggregate(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT * FROM ai_clear_usage();
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_aggregate_model = 'mock-aggregate';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_timeout_seconds = 5;
+        SELECT ai_agg(value, 'Summarize all values', max_context_chars := 40) AS hierarchical_result
+        FROM (
+            SELECT repeat(chr(65 + (i % 26)::INTEGER), 18) || i::VARCHAR AS value
+            FROM range(20) t(i)
+        );
+        SELECT count(DISTINCT operation_id) AS operations,
+               count(DISTINCT parent_operation_id) AS parents,
+               bool_and(parent_operation_id IS NOT NULL) AS all_children_linked
+        FROM ai_usage()
+        WHERE function_name LIKE 'ai_agg%';
+        SELECT ai_agg(value, 'Summarize all values', max_context_chars := 40,
+                      fail_on_error := false) IS NULL AS empty_intermediate_rejected
+        FROM (
+            SELECT repeat('EMPTY_INTERMEDIATE', 4) || i::VARCHAR AS value
+            FROM range(4) t(i)
+        );
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb hierarchical aggregate smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_hierarchical_aggregate(output: str):
+    for expected in (
+        "hierarchical_result",
+        "mock completion",
+        "operations",
+        "parents",
+        "empty_intermediate_rejected",
+        "true",
+    ):
+        if expected not in output:
+            raise AssertionError(f"hierarchical aggregate output missing {expected!r}\n{output}")
+    if len(MockProviderHandler.completion_requests) < 5:
+        raise AssertionError(
+            f"expected a multi-level aggregate request tree, got {len(MockProviderHandler.completion_requests)} requests"
+        )
+    prompts = [request["messages"][-1]["content"] for request in MockProviderHandler.completion_requests]
+    if sum("mock completion" in prompt for prompt in prompts) < 2:
+        raise AssertionError(f"aggregate did not perform recursive map/reduce: {prompts}")
+
+
+def run_duckdb_optimized_classifier(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_task_model = 'mock-task';
+        SET duckdb_ai_embedding_model = 'mock-embedding';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_timeout_seconds = 5;
+        CREATE TEMP TABLE training AS
+        SELECT CASE WHEN i % 2 = 0 THEN 'alpha example ' ELSE 'beta example ' END || i::VARCHAR AS text
+        FROM range(20) t(i);
+        CREATE TEMP TABLE classifier AS
+        SELECT ai_build_classifier(
+            text,
+            ['class_a', 'class_b'],
+            optimization := 'minimize_cost',
+            sample_size := 20,
+            quality_threshold := 0.75,
+            confidence_margin := 0.05
+        ) AS artifact
+        FROM training;
+        SELECT contains(artifact, '"optimization":"minimize_cost"') AS optimization,
+               contains(artifact, '"usable":true') AS usable,
+               contains(artifact, '"validation_count":') AS validation_count
+        FROM classifier;
+        SELECT result.value AS local_value, result.used_fallback AS local_fallback,
+               contains(result.metadata, '"path":"local"') AS local_metadata
+        FROM (SELECT ai_classify_optimized('alpha new', artifact) AS result FROM classifier);
+        SELECT result.value AS fallback_value, result.used_fallback AS used_fallback,
+               contains(result.metadata, '"path":"fallback"') AS fallback_metadata,
+               result.error IS NULL AS fallback_ok
+        FROM (SELECT ai_classify_optimized('ambiguous example', artifact) AS result FROM classifier);
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb optimized classifier smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_optimized_classifier(output: str):
+    for expected in (
+        "optimization",
+        "usable",
+        "validation_count",
+        "local_value",
+        "class_a",
+        "local_fallback",
+        "fallback_value",
+        "class_b",
+        "used_fallback",
+        "fallback_ok",
+    ):
+        if expected not in output:
+            raise AssertionError(f"optimized classifier output missing {expected!r}\n{output}")
+    if len(MockProviderHandler.completion_requests) != 21:
+        raise AssertionError(
+            f"expected 20 sampled labels and one fallback, got {len(MockProviderHandler.completion_requests)}"
+        )
+    if len(MockProviderHandler.embedding_requests) != 3:
+        raise AssertionError(
+            f"expected three packed/local embedding requests, got {MockProviderHandler.embedding_requests}"
+        )
+    training_inputs = MockProviderHandler.embedding_requests[0]["input"]
+    if not isinstance(training_inputs, list) or len(training_inputs) != 20:
+        raise AssertionError(f"classifier training embeddings were not batched: {training_inputs}")
+
+
+def run_duckdb_new_task_functions(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_task_model = 'mock-task';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_timeout_seconds = 5;
+        SELECT ai_score('DuckDB runs in process', 'describes an embedded database') AS score;
+        SELECT ai_classify(
+            'alpha example', ['class_a', 'class_b'],
+            label_descriptions := '{{"class_a":"alpha text","class_b":"beta text"}}',
+            instructions := 'Prefer explicit terms.',
+            examples := '[{{"input":"alpha","label":"class_a"}}]'
+        ) AS rich_classification;
+        SELECT result.value, result.error IS NULL, contains(result.metadata, '"multi_label":true')
+        FROM (
+            SELECT ai_classify_result(
+                'invoice overdue and slow app', ['billing, overdue', 'performance', 'support']
+            ) AS result
+        );
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb new task function smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_new_task_functions(output: str):
+    for expected in ("score", "0.91", "rich_classification", "class_a", "billing, overdue", "performance"):
+        if expected not in output:
+            raise AssertionError(f"new task function output missing {expected!r}\n{output}")
+    score_format = MockProviderHandler.completion_requests[0].get("response_format", {})
+    score_schema = score_format.get("json_schema", {}).get("schema", {})
+    if score_format.get("type") != "json_schema" or "score" not in score_schema.get("properties", {}):
+        raise AssertionError(f"ai_score did not send its constrained score schema: {score_format}")
+    rich_request = MockProviderHandler.completion_requests[1]
+    system_prompt = rich_request["messages"][0]["content"]
+    for expected in ("Label descriptions", "Prefer explicit terms.", "Examples"):
+        if expected not in system_prompt:
+            raise AssertionError(f"rich classification prompt missing {expected!r}: {system_prompt}")
+
+
+def run_duckdb_control_plane(duckdb_path: Path, base_url: str) -> str:
+    sql = """
+        CREATE EXTERNAL MODEL provisioned_model WITH (
+            provider = 'azure',
+            model = 'gpt-test',
+            location = 'https://safe-metadata.example/v1',
+            capabilities = 'completion,json_schema'
+        );
+        SELECT operation_id, status, estimated_hourly_cost_usd
+        FROM ai_provision_endpoint(
+            'provisioned_model', dry_run := false, max_hourly_cost_usd := 2.0
+        );
+        SELECT operation_id, status, endpoint_url FROM ai_endpoint_status('provision-op');
+        SELECT operation_id, status FROM ai_deprovision_endpoint('provisioned_model');
+        SELECT document_id, page, element_index, element_type, text, markdown,
+               bbox, confidence, metadata, error IS NULL
+        FROM ai_parse_document('abc'::BLOB, 'text/plain', 'documents');
+        SELECT error
+        FROM ai_parse_document('abc'::BLOB, 'text/plain', 'malformed', fail_on_error := false);
+    """
+    env = os.environ.copy()
+    env.update(
+        {
+            "DUCKDB_AI_CONTROL_PLANE_URL": base_url,
+            "DUCKDB_AI_CONTROL_PLANE_TOKEN": "control-token",
+        }
+    )
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb control-plane smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_control_plane(output: str):
+    for expected in (
+        "provision-op",
+        "submitted",
+        "1.25",
+        "ready",
+        "https://endpoint.example/v1",
+        "deprovision-op",
+        "document-1",
+        "paragraph",
+        "DuckDB document",
+        "0.99",
+        "AI document parser response must contain an elements array",
+    ):
+        if expected not in output:
+            raise AssertionError(f"control-plane output missing {expected!r}\n{output}")
+    paths = [path for path, _ in MockProviderHandler.control_plane_requests]
+    if paths != [
+        "/v1/endpoints/provision",
+        "/v1/endpoints/status",
+        "/v1/endpoints/deprovision",
+        "/v1/documents/parse",
+        "/v1/documents/parse",
+    ]:
+        raise AssertionError(f"unexpected control-plane requests: {MockProviderHandler.control_plane_requests}")
+    if MockProviderHandler.control_plane_authorization_headers != ["Bearer control-token"] * 5:
+        raise AssertionError(
+            f"unexpected control-plane authorization: {MockProviderHandler.control_plane_authorization_headers}"
+        )
+    document_request = MockProviderHandler.control_plane_requests[3][1]
+    if document_request.get("content_base64") != "YWJj" or document_request.get("mime_type") != "text/plain":
+        raise AssertionError(f"unexpected normalized document request: {document_request}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1384,6 +1940,21 @@ def main():
         assert_provider_metadata(provider_metadata_output)
         output = run_duckdb(args.duckdb, f"http://127.0.0.1:{port}")
         assert_smoke_result(output)
+        MockProviderHandler.reset()
+        adaptive_batch_output = run_duckdb_adaptive_batches(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_adaptive_batches(adaptive_batch_output)
+        MockProviderHandler.reset()
+        hierarchical_output = run_duckdb_hierarchical_aggregate(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_hierarchical_aggregate(hierarchical_output)
+        MockProviderHandler.reset()
+        optimized_classifier_output = run_duckdb_optimized_classifier(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_optimized_classifier(optimized_classifier_output)
+        MockProviderHandler.reset()
+        new_task_output = run_duckdb_new_task_functions(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_new_task_functions(new_task_output)
+        MockProviderHandler.reset()
+        control_plane_output = run_duckdb_control_plane(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_control_plane(control_plane_output)
         MockProviderHandler.reset()
         self_correction_output = run_duckdb_self_correction(args.duckdb, f"http://127.0.0.1:{port}")
         assert_self_correction_result(self_correction_output)
@@ -1408,6 +1979,15 @@ def main():
         MockProviderHandler.reset()
         invalid_env_log_sample_rate_output = run_duckdb_invalid_env_log_sample_rate(args.duckdb)
         assert_invalid_env_log_sample_rate(invalid_env_log_sample_rate_output)
+        MockProviderHandler.reset()
+        invalid_url_scheme_output = run_duckdb_invalid_url_scheme(args.duckdb)
+        assert_invalid_url_scheme(invalid_url_scheme_output)
+        MockProviderHandler.reset()
+        invalid_header_output = run_duckdb_invalid_header(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_invalid_header(invalid_header_output)
+        MockProviderHandler.reset()
+        oversized_response_output = run_duckdb_oversized_response(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_oversized_response(oversized_response_output)
     finally:
         server.shutdown()
         thread.join(timeout=5)

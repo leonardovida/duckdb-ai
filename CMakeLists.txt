@@ -43,6 +43,8 @@ endif()
 
 target_link_libraries(${EXTENSION_NAME} duckdb_yyjson)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} duckdb_yyjson)
+target_link_libraries(${EXTENSION_NAME} duckdb_re2)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} duckdb_re2)
 
 install(
   TARGETS ${EXTENSION_NAME}
