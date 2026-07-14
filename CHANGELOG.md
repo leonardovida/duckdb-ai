@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.9 - 2026-07-14
+
+### Fixed
+
+- Used brace initialization for the provider executor's worker lock so MSVC
+  does not parse the declaration as a function and fail Windows builds.
+
 ## 0.4.8 - 2026-07-14
 
 ### Fixed
