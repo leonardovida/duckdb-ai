@@ -1740,7 +1740,7 @@ struct ProviderExecutorState : public ObjectCacheEntry {
 				while (true) {
 					std::function<void()> task;
 					{
-						std::unique_lock<std::mutex> lock(mutex);
+						std::unique_lock<std::mutex> lock {mutex};
 						cv.wait(lock, [&]() { return shutdown || !queue.empty(); });
 						if (shutdown && queue.empty()) {
 							return;
