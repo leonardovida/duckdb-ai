@@ -1741,12 +1741,12 @@ struct ProviderExecutorState : public ObjectCacheEntry {
 					std::function<void()> task;
 					{
 						std::unique_lock<std::mutex> lock {mutex};
-						cv.wait(lock, [&]() { return shutdown || !queue.empty(); });
-						if (shutdown && queue.empty()) {
+						cv.wait(lock, [&]() { return shutdown || !this->queue.empty(); });
+						if (shutdown && this->queue.empty()) {
 							return;
 						}
-						task = std::move(queue.front());
-						queue.pop_front();
+						task = std::move(this->queue.front());
+						this->queue.pop_front();
 					}
 					task();
 				}

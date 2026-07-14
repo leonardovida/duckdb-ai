@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.10 - 2026-07-14
+
+### Fixed
+
+- Qualified provider executor queue accesses so MSVC resolves the member
+  instead of DuckDB's `queue` template inside the worker lambda.
+
 ## 0.4.9 - 2026-07-14
 
 ### Fixed
