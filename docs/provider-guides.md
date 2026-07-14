@@ -57,7 +57,7 @@ LIMIT 1;
 | `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4.7-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://api.z.ai/api/paas/v4`. |
 | `deepseek` | OpenAI-compatible chat | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
 | `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
-| `databricks` | OpenAI-compatible chat | `databricks-llama-4-maverick` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
+| `databricks` | OpenAI-compatible chat | `databricks-gpt-oss-120b` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
 | `snowflake` | OpenAI-compatible chat | `claude-sonnet-4-5` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
 | `perplexity` | OpenAI-compatible chat | `sonar` | `PERPLEXITY_API_KEY` | Defaults to `https://api.perplexity.ai`. |
 | `poe` | OpenAI-compatible chat | `GPT-5.4` | `POE_API_KEY` | Defaults to `https://api.poe.com/v1`. |
@@ -1098,7 +1098,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET databricks_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'databricks',
-    MODEL 'databricks-llama-4-maverick'
+    MODEL 'databricks-gpt-oss-120b'
 );
 
 SELECT ai_complete(
@@ -1303,6 +1303,9 @@ answers with its loaded model, so no model configuration is needed either.
 Set `LLAMACPP_BASE_URL` for a non-default host or port, and `LLAMACPP_API_KEY`
 when the server runs with `--api-key`. Embedding calls require starting
 `llama-server` with `--embeddings`.
+
+`response_schema := ...` uses llama.cpp's direct `response_format.schema`
+request shape so `llama-server` can enforce the supplied JSON Schema.
 
 For throughput, start `llama-server` with parallel slots (for example
 `--parallel 4`) and match `max_concurrent_requests` so DuckDB keeps every slot

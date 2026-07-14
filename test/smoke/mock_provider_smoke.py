@@ -350,7 +350,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             API_KEY 'test-key',
             AI_PROVIDER 'databricks',
             BASE_URL '{base_url}',
-            MODEL 'databricks-llama-4-maverick'
+            MODEL 'databricks-gpt-oss-120b'
         );
         CREATE OR REPLACE SECRET smoke_snowflake_ai (
             TYPE duckdb_ai,
@@ -478,7 +478,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             'hello databricks',
             secret := 'smoke_databricks_ai',
             provider := 'databricks',
-            model := 'databricks-llama-4-maverick'
+            model := 'databricks-gpt-oss-120b'
         ) AS databricks_completion;
         SELECT ai_complete(
             'hello snowflake',
@@ -1177,7 +1177,7 @@ def assert_smoke_result(output: str):
         "privacy_filter",
         "databricks",
         "snowflake",
-        "databricks-llama-4-maverick",
+        "databricks-gpt-oss-120b",
         "claude-sonnet-4-5",
         "email [PRIVATE_EMAIL] token [SECRET]",
         "billing, overdue",
@@ -1362,7 +1362,7 @@ def assert_smoke_result(output: str):
     if builtin_price_request["messages"][-1]["content"] != "builtin pricing smoke":
         raise AssertionError(f"unexpected builtin pricing prompt: {builtin_price_request}")
     databricks_request = MockProviderHandler.completion_requests[29]
-    if databricks_request.get("model") != "databricks-llama-4-maverick":
+    if databricks_request.get("model") != "databricks-gpt-oss-120b":
         raise AssertionError(f"unexpected Databricks model: {databricks_request}")
     if databricks_request["messages"][-1]["content"] != "hello databricks":
         raise AssertionError(f"unexpected Databricks prompt: {databricks_request}")
@@ -1547,7 +1547,7 @@ def assert_smoke_result(output: str):
     if builtin_estimated_cost is None or abs(builtin_estimated_cost - 0.00001875) > 0.000000001:
         raise AssertionError(f"unexpected builtin pricing cost: {builtin_price_log}")
     databricks_log = next(
-        (request for request in completion_logs if request.get("model") == "databricks-llama-4-maverick"), None
+        (request for request in completion_logs if request.get("model") == "databricks-gpt-oss-120b"), None
     )
     if databricks_log is None or databricks_log.get("provider") != "databricks":
         raise AssertionError(f"missing Databricks completion log: {completion_logs}")

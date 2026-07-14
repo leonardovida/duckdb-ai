@@ -2813,7 +2813,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "COHERE_API_KEY", true},
 	    {"dashscope", "openai_chat", "qwen-plus", "text-embedding-v4",
 	     "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY", true},
-	    {"databricks", "openai_chat", "databricks-llama-4-maverick", "", "", "DATABRICKS_TOKEN", true},
+	    {"databricks", "openai_chat", "databricks-gpt-oss-120b", "", "", "DATABRICKS_TOKEN", true},
 	    {"deepinfra", "openai_chat", "meta-llama/Meta-Llama-3.1-8B-Instruct", "BAAI/bge-large-en-v1.5",
 	     "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY", true},
 	    {"deepseek", "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
@@ -3571,6 +3571,22 @@ std::string CohereResponseFormatJson(const CompletionOptions &options) {
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
 
+std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
+	ValidateResponseSchema(options);
+	if (!options.response_schema.empty()) {
+		return "\"response_format\":{\"type\":\"json_schema\",\"schema\":" + options.response_schema + "}";
+	}
+	auto format = NormalizeResponseFormat(options);
+	if (format.empty() || format == "text") {
+		return "";
+	}
+	if (format == "json_schema") {
+		throw InvalidInputException(
+		    "AI option \"response_schema\" must be provided when response_format is json_schema");
+	}
+	return "\"response_format\":{\"type\":\"json_object\"}";
+}
+
 std::string OllamaFormatJson(const CompletionOptions &options) {
 	ValidateResponseSchema(options);
 	if (!options.response_schema.empty()) {
@@ -3658,8 +3674,14 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 			payload += ",\"max_tokens\":" + std::to_string(options.max_tokens);
 		}
 	}
-	auto response_format =
-	    config.provider == "cohere" ? CohereResponseFormatJson(options) : OpenAIResponseFormatJson(options);
+	std::string response_format;
+	if (config.provider == "cohere") {
+		response_format = CohereResponseFormatJson(options);
+	} else if (config.provider == "llamacpp") {
+		response_format = LlamaCppResponseFormatJson(options);
+	} else {
+		response_format = OpenAIResponseFormatJson(options);
+	}
 	if (!response_format.empty()) {
 		payload += "," + response_format;
 	}

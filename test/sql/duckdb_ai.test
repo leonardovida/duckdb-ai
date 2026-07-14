@@ -415,6 +415,11 @@ SELECT contains(request, '"response_format":{"type":"json_object","schema":{"typ
 true
 
 query I
+SELECT contains(request, '"response_format":{"type":"json_schema","schema":{"type":"object"') AND NOT contains(request, '"json_schema":') AND NOT contains(request, '"strict":') FROM (SELECT ai_completion_request_json('extract', provider := 'llamacpp', response_schema := '{"type":"object","properties":{"summary":{"type":"string"}}}') AS request);
+----
+true
+
+query I
 SELECT contains(ai_completion_request_json('json please', 'llama3', 'ollama', response_format := 'json_object'), '"format":"json"');
 ----
 true
@@ -427,7 +432,7 @@ SELECT ai_completion_request_json('redact email alice@example.com', provider := 
 query I
 SELECT ai_completion_request_json('hello databricks', provider := 'databricks');
 ----
-{"model":"databricks-llama-4-maverick","messages":[{"role":"user","content":"hello databricks"}],"temperature":0.1}
+{"model":"databricks-gpt-oss-120b","messages":[{"role":"user","content":"hello databricks"}],"temperature":0.1}
 
 query I
 SELECT ai_completion_request_json('hello snowflake', provider := 'snowflake');

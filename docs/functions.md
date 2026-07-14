@@ -1146,7 +1146,7 @@ Supported provider names and aliases are:
 | `cloudflare` | `workers_ai`, `cloudflare_workers_ai`, `cloudflare_ai` | Yes | Yes | `@cf/zai-org/glm-4.7-flash` |
 | `cohere` | `cohere_ai` | Yes | Yes | `command-a-plus-05-2026` |
 | `dashscope` | `qwen`, `alibaba`, `alibaba_model_studio`, `model_studio` | Yes | Yes | `qwen-plus` |
-| `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-llama-4-maverick` |
+| `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-gpt-oss-120b` |
 | `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct` |
 | `deepseek` | none | Yes | No | `deepseek-v4-flash` |
 | `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/llama-v3p1-8b-instruct` |
