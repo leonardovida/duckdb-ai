@@ -7,6 +7,21 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.8 - 2026-07-14
+
+### Fixed
+
+- Updated Amazon Bedrock, Cohere, and MiniMax defaults to current models from
+  their public OpenAI-compatible APIs.
+- Sent MiniMax and Moonshot/Kimi completion limits through the preferred
+  `max_completion_tokens` field while preserving the SQL `max_tokens` option.
+- Emitted Cohere's documented `json_object` plus `schema` request shape for
+  structured completion output.
+
+### Changed
+
+- Updated the Docusaurus documentation packages from 3.10.1 to 3.10.2.
+
 ## 0.4.7 - 2026-07-10
 
 ### Fixed
