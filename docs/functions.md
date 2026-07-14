@@ -368,7 +368,9 @@ Description: Classifies text into exactly one label from `labels`. `labels` can
 be a comma-separated `VARCHAR` or a `VARCHAR[]`; use `VARCHAR[]` when labels may
 contain commas. Use constant `label_descriptions :=`, `instructions :=`, and
 `examples :=` strings to add label semantics, global rules, and few-shot
-examples without changing the return type.
+examples without changing the return type. Configured labels must be non-empty
+and unique. The returned value is validated against the configured set and
+canonicalized to its original spelling.
 
 Example:
 
@@ -392,7 +394,8 @@ Result: `VARCHAR`
 
 Description: Classifies text into zero or more labels from `labels`. `labels`
 can be a comma-separated `VARCHAR` or a `VARCHAR[]`; use `VARCHAR[]` when labels
-may contain commas. The model must return a JSON array of label strings.
+may contain commas. The model must return a JSON array containing only unique
+members of the configured label set.
 
 Example:
 
@@ -409,7 +412,8 @@ Result: `VARCHAR[]`
 
 Description: Multi-label classification with pipeline-safe diagnostics. It
 always captures provider and parsing failures instead of failing the full
-vector, and returns metadata describing the selected provider and model.
+vector, preserves metadata for failed rows, and returns metadata describing the
+selected provider and model when resolution succeeds.
 
 Example:
 
@@ -994,6 +998,8 @@ Embedding profiles can set `max_batch_inputs`, `max_inputs`,
 `embedding_dimensions`, and `native_batch_support` in `options`. Packing uses
 these limits before sending requests and recursively splits provider HTTP 413
 responses. Declared embedding dimensions are validated against provider output.
+Completion profiles enforce declared input-token and request-byte limits before
+issuing an HTTP request. `model_type` must be `completion` or `embedding`.
 Profiles can also set non-negative `input_token_price_per_million` and
 `output_token_price_per_million`; an explicit per-call or session price takes
 precedence.

@@ -216,7 +216,7 @@ std::string ProviderBaseUrl(const std::string &provider);
 //! Return the provider protocol used for request/response shaping.
 std::string ProviderProtocol(const std::string &provider);
 //! Return conservative execution limits for the resolved provider/model.
-ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options);
+ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, bool embedding = false);
 //! Apply safe pricing metadata stored in an external model's JSON options.
 void ApplyModelProfileOptions(CompletionOptions &options);
 //! Return a local approximate token count used by ai_count_tokens() and token-aware pacing.
