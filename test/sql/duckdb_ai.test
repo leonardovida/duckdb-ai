@@ -1038,11 +1038,12 @@ SELECT ai_classify('great', ['positive', 'negative'],
 ----
 true
 
-query II
-SELECT result.value IS NULL, contains(result.error, 'Unsupported AI provider')
+query III
+SELECT result.value IS NULL, contains(result.error, 'Unsupported AI provider'),
+       contains(result.metadata, '"stage":"configuration"')
 FROM (SELECT ai_classify_result('great', ['positive', 'negative'], provider := 'not-a-provider') AS result);
 ----
-true	true
+true	true	true
 
 query I
 SELECT ai_score('DuckDB runs in process', 'describes an embedded database',
@@ -1086,6 +1087,17 @@ FROM (
 ----
 true
 
+query I
+SELECT contains(result.error, 'labels must be non-empty and unique')
+FROM (
+  SELECT ai_classify_optimized(
+    'x',
+    '{"version":1,"optimization":"minimize_cost","usable":true,"accuracy":0.9,"confidence_margin":0.1,"labels":["a","A"],"centroids":[[1,0],[0,1]],"embedding":{"provider":"ollama","model":"embed"}}'
+  ) AS result
+);
+----
+true
+
 # External model profiles store only safe metadata and provisioning defaults to a local dry run.
 statement error
 CREATE EXTERNAL MODEL duplicate_ai_test_model WITH (
@@ -1095,6 +1107,13 @@ CREATE EXTERNAL MODEL duplicate_ai_test_model WITH (
 );
 ----
 Duplicate external model option: provider
+
+statement error
+CREATE EXTERNAL MODEL invalid_model_type WITH (
+  provider = 'openai', model = 'gpt-profile', model_type = 'reranker'
+);
+----
+Binder Error: CREATE EXTERNAL MODEL model_type must be completion or embedding
 
 statement ok
 CREATE EXTERNAL MODEL ai_test_model WITH (
@@ -1137,6 +1156,65 @@ true	true
 statement ok
 RESET duckdb_ai_completion_model;
 
+statement ok
+CREATE EXTERNAL MODEL limited_completion WITH (
+  provider = 'ollama', model = 'mock-completion', model_type = 'completion',
+  options = '{"max_input_tokens":1}'
+);
+
+statement error
+SELECT ai_completion_request_json('this prompt is too long', profile := 'limited_completion');
+----
+Invalid Input Error: AI completion input has
+
+statement ok
+CREATE EXTERNAL MODEL ollama_embedding_model WITH (
+  provider = 'ollama', model = 'mock-embedding', model_type = 'embedding'
+);
+
+query I
+SELECT max_batch_inputs = 128 FROM ai_models() WHERE name = 'ollama_embedding_model';
+----
+true
+
+statement ok
+CREATE EXTERNAL MODEL ollama_non_embedding_capability WITH (
+  provider = 'ollama', model = 'mock-completion', model_type = 'completion',
+  capabilities = 'nonembedding'
+);
+
+query I
+SELECT max_batch_inputs = 512 FROM ai_models() WHERE name = 'ollama_non_embedding_capability';
+----
+true
+
+statement ok
+CREATE EXTERNAL MODEL invalid_location_model WITH (
+  provider = 'openai', model = 'gpt-profile', location = 'not-a-url'
+);
+
+query I
+SELECT contains(validation_status, 'URL must include a scheme')
+FROM ai_models() WHERE name = 'invalid_location_model';
+----
+true
+
+statement ok
+CREATE SECRET mismatched_model_credential (
+  TYPE duckdb_ai, API_KEY 'test-key', AI_PROVIDER 'azure'
+);
+
+statement ok
+CREATE EXTERNAL MODEL mismatched_credential_model WITH (
+  provider = 'openai', model = 'gpt-profile', credential = 'mismatched_model_credential'
+);
+
+query I
+SELECT validation_status = 'credential_provider_mismatch'
+FROM ai_models() WHERE name = 'mismatched_credential_model';
+----
+true
+
 query II
 SELECT status, action_required FROM ai_provision_endpoint('ai_test_model');
 ----
@@ -1146,6 +1224,16 @@ statement error
 SELECT * FROM ai_provision_endpoint('ai_test_model', dry_run := false);
 ----
 Binder Error: ai_provision_endpoint requires max_hourly_cost_usd > 0 when dry_run is false
+
+statement error
+SELECT * FROM ai_provision_endpoint('ai_test_model', max_hourly_cost_usd := -1);
+----
+Binder Error: ai_provision_endpoint max_hourly_cost_usd must be finite and greater than 0
+
+statement error
+SELECT * FROM ai_endpoint_status('');
+----
+Binder Error: AI control-plane profile or operation id must not be empty
 
 query I
 SELECT error IS NOT NULL

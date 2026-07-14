@@ -5,11 +5,12 @@ import os
 import subprocess
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 
 class MockProviderHandler(BaseHTTPRequestHandler):
+    request_lock = threading.Lock()
     completion_requests = []
     embedding_requests = []
     privacy_filter_requests = []
@@ -25,6 +26,10 @@ class MockProviderHandler(BaseHTTPRequestHandler):
     claude_api_keys = []
     claude_versions = []
     retry_completion_attempts = 0
+    active_cap_one_requests = 0
+    max_cap_one_requests = 0
+    active_grow_pool_requests = 0
+    max_grow_pool_requests = 0
 
     @classmethod
     def reset(cls):
@@ -43,6 +48,10 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         cls.claude_api_keys.clear()
         cls.claude_versions.clear()
         cls.retry_completion_attempts = 0
+        cls.active_cap_one_requests = 0
+        cls.max_cap_one_requests = 0
+        cls.active_grow_pool_requests = 0
+        cls.max_grow_pool_requests = 0
 
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
@@ -59,6 +68,19 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             self.completion_requests.append(request)
             prompt = request["messages"][-1]["content"]
             full_prompt = "\n".join(message["content"] for message in request["messages"])
+            concurrency_group = None
+            if prompt.startswith("cap one "):
+                concurrency_group = "cap_one"
+            elif prompt.startswith("grow pool "):
+                concurrency_group = "grow_pool"
+            if concurrency_group:
+                with self.request_lock:
+                    active_name = f"active_{concurrency_group}_requests"
+                    max_name = f"max_{concurrency_group}_requests"
+                    active = getattr(MockProviderHandler, active_name) + 1
+                    setattr(MockProviderHandler, active_name, active)
+                    setattr(MockProviderHandler, max_name, max(getattr(MockProviderHandler, max_name), active))
+                time.sleep(0.05)
             if "force provider error" in prompt:
                 self._send_json(
                     {
@@ -96,6 +118,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = "x" * 2048
             elif "EMPTY_INTERMEDIATE" in prompt and "larger SQL aggregate" in prompt:
                 content = ""
+            elif "NON_CONVERGING" in prompt and "larger SQL aggregate" in prompt:
+                content = ("NON_CONVERGING" + "X" * 40)[:40]
             elif "return invalid schema JSON" in prompt:
                 content = '{"summary":123}'
             elif "return constrained schema JSON" in prompt:
@@ -131,9 +155,11 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             elif "Generate one DuckDB SQL SELECT statement" in full_prompt:
                 content = "```sql\nSELECT 42\n```"
             elif "Return only a JSON array of chosen labels" in full_prompt:
-                content = '["billing, overdue","performance"]'
+                content = '["outside"]' if "return unknown labels" in prompt else '["billing, overdue","performance"]'
             elif "class_a" in full_prompt and "class_b" in full_prompt:
                 content = "class_a" if "alpha" in prompt else "class_b"
+            elif "Classify the following text into exactly one" in full_prompt:
+                content = "outside" if "return unknown label" in prompt else "billing, overdue"
             elif "Score candidate relevance to the search query" in full_prompt:
                 content = "0.82"
             payload = {
@@ -144,6 +170,14 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "total_tokens": 10,
                 },
             }
+            if concurrency_group:
+                with self.request_lock:
+                    active_name = f"active_{concurrency_group}_requests"
+                    setattr(
+                        MockProviderHandler,
+                        active_name,
+                        getattr(MockProviderHandler, active_name) - 1,
+                    )
             self._send_json(payload)
             return
 
@@ -167,11 +201,12 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 return [0.25, -0.5, 1.25]
 
             input_values = inputs if isinstance(inputs, list) else [inputs]
+            usage_tokens = 5 if any("uneven usage" in value for value in input_values) else 2 * input_count
             payload = {
                 "data": [{"embedding": embedding(value)} for value in input_values],
                 "usage": {
-                    "prompt_tokens": 2 * input_count,
-                    "total_tokens": 2 * input_count,
+                    "prompt_tokens": usage_tokens,
+                    "total_tokens": usage_tokens,
                 },
             }
             self._send_json(payload)
@@ -243,6 +278,9 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             self.control_plane_authorization_headers.append(self.headers.get("authorization"))
             if request.get("parser_profile") == "malformed":
                 self._send_json({"document_id": "document-malformed", "unexpected": []})
+                return
+            if request.get("parser_profile") == "error-only":
+                self._send_json({"document_id": "document-error", "error": "remote parser failed"})
                 return
             self._send_json(
                 {
@@ -1422,7 +1460,11 @@ def assert_smoke_result(output: str):
     while len(MockProviderHandler.log_requests) < 47 and time.time() < log_deadline:
         time.sleep(0.05)
     if len(MockProviderHandler.log_requests) != 47:
-        raise AssertionError(f"expected 47 log requests, got {len(MockProviderHandler.log_requests)}")
+        event_counts = {}
+        for request in MockProviderHandler.log_requests:
+            event = "otlp" if "resourceLogs" in request else request.get("event", "unknown")
+            event_counts[event] = event_counts.get(event, 0) + 1
+        raise AssertionError(f"expected 47 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
@@ -1580,6 +1622,24 @@ def run_duckdb_adaptive_batches(duckdb_path: Path, base_url: str) -> str:
             profile := 'tiny_embedding_request',
             fail_on_error := false
         ) IS NULL AS token_limit_rejected;
+        CREATE EXTERNAL MODEL escaped_embedding_request WITH (
+            provider = 'openai',
+            model = 'mock-embedding',
+            location = '{base_url}',
+            model_type = 'embedding',
+            options = '{{"max_request_bytes":200}}'
+        );
+        SELECT ai_embed(repeat('"', 100), profile := 'escaped_embedding_request',
+                        fail_on_error := false) IS NULL AS escaped_byte_limit_rejected;
+        CREATE EXTERNAL MODEL tiny_completion_context WITH (
+            provider = 'openai',
+            model = 'mock-completion',
+            location = '{base_url}',
+            model_type = 'completion',
+            options = '{{"max_input_tokens":1}}'
+        );
+        SELECT ai_complete('too many completion tokens', profile := 'tiny_completion_context',
+                           fail_on_error := false) IS NULL AS completion_context_rejected;
         CREATE EXTERNAL MODEL cached_embedding_dimensions WITH (
             provider = 'openai',
             model = 'mock-embedding',
@@ -1608,7 +1668,7 @@ def run_duckdb_adaptive_batches(duckdb_path: Path, base_url: str) -> str:
             ('same left', 'other right'),
             ('same left', 'other right')
         ) input(left_text, right_text);
-        SELECT sum(batch_count) AS request_batches, sum(failures) AS failed_input_events
+        SELECT sum(batch_count) AS request_batches, sum(failures) = 4 AS only_terminal_failures
         FROM ai_usage_summary();
     """
     env = os.environ.copy()
@@ -1632,12 +1692,15 @@ def assert_adaptive_batches(output: str):
         "split_embedding_sum",
         "2.0",
         "token_limit_rejected",
+        "escaped_byte_limit_rejected",
+        "completion_context_rejected",
         "true",
         "cached_dimensions_seeded",
         "stale_dimensions_rejected",
         "deduplicated_similarity_sum",
         "4.0",
         "request_batches",
+        "only_terminal_failures",
     ):
         if expected not in output:
             raise AssertionError(f"adaptive batch output missing {expected!r}\n{output}")
@@ -1655,6 +1718,82 @@ def assert_adaptive_batches(output: str):
     deduplicated_inputs = MockProviderHandler.embedding_requests[11]["input"]
     if deduplicated_inputs != ["same left", "same right", "other right"]:
         raise AssertionError(f"similarity inputs were not packed and deduplicated: {deduplicated_inputs}")
+    if MockProviderHandler.completion_requests:
+        raise AssertionError(
+            f"completion context preflight unexpectedly called the provider: {MockProviderHandler.completion_requests}"
+        )
+
+
+def run_duckdb_embedding_usage_distribution(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT * FROM ai_clear_usage();
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_embedding_model = 'mock-embedding';
+        SET duckdb_ai_base_url = '{base_url}';
+        SELECT sum(ai_embed('uneven usage ' || i::VARCHAR)[1]) FROM range(3) t(i);
+        SELECT sum(prompt_tokens) = 5 AS exact_prompt_tokens,
+               sum(total_tokens) = 5 AS exact_total_tokens
+        FROM ai_usage() WHERE event = 'ai_embedding';
+    """
+    env = {**os.environ, "OPENAI_API_KEY": "test-key"}
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb embedding usage distribution exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_embedding_usage_distribution(output: str):
+    for expected in ("exact_prompt_tokens", "exact_total_tokens", "true"):
+        if expected not in output:
+            raise AssertionError(f"embedding usage distribution output missing {expected!r}\n{output}")
+    if len(MockProviderHandler.embedding_requests) != 1:
+        raise AssertionError(f"expected one packed uneven-usage request: {MockProviderHandler.embedding_requests}")
+
+
+def run_duckdb_executor_concurrency(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_completion_model = 'mock-completion';
+        SET duckdb_ai_base_url = '{base_url}';
+        SET duckdb_ai_timeout_seconds = 5;
+        SELECT count(ai_complete('grow pool ' || i::VARCHAR, max_concurrent_requests := 8)) AS grown
+        FROM range(8) t(i);
+        SELECT count(ai_complete('cap one ' || i::VARCHAR, max_concurrent_requests := 1)) AS capped
+        FROM range(8) t(i);
+    """
+    env = {**os.environ, "OPENAI_API_KEY": "test-key"}
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb executor concurrency exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_executor_concurrency(output: str):
+    for expected in ("grown", "capped", "8"):
+        if expected not in output:
+            raise AssertionError(f"executor concurrency output missing {expected!r}\n{output}")
+    if MockProviderHandler.max_grow_pool_requests < 2:
+        raise AssertionError("executor did not exercise concurrent provider requests")
+    if MockProviderHandler.max_cap_one_requests != 1:
+        raise AssertionError(
+            f"max_concurrent_requests=1 allowed {MockProviderHandler.max_cap_one_requests} concurrent requests"
+        )
 
 
 def run_duckdb_hierarchical_aggregate(duckdb_path: Path, base_url: str) -> str:
@@ -1678,6 +1817,12 @@ def run_duckdb_hierarchical_aggregate(duckdb_path: Path, base_url: str) -> str:
                       fail_on_error := false) IS NULL AS empty_intermediate_rejected
         FROM (
             SELECT repeat('EMPTY_INTERMEDIATE', 4) || i::VARCHAR AS value
+            FROM range(4) t(i)
+        );
+        SELECT ai_agg(value, 'Summarize all values', max_context_chars := 40,
+                      fail_on_error := false) IS NULL AS non_converging_rejected
+        FROM (
+            SELECT repeat('NON_CONVERGING', 4) || i::VARCHAR AS value
             FROM range(4) t(i)
         );
     """
@@ -1704,6 +1849,7 @@ def assert_hierarchical_aggregate(output: str):
         "operations",
         "parents",
         "empty_intermediate_rejected",
+        "non_converging_rejected",
         "true",
     ):
         if expected not in output:
@@ -1715,6 +1861,9 @@ def assert_hierarchical_aggregate(output: str):
     prompts = [request["messages"][-1]["content"] for request in MockProviderHandler.completion_requests]
     if sum("mock completion" in prompt for prompt in prompts) < 2:
         raise AssertionError(f"aggregate did not perform recursive map/reduce: {prompts}")
+    non_converging_requests = sum("NON_CONVERGING" in prompt for prompt in prompts)
+    if non_converging_requests == 0 or non_converging_requests > 10:
+        raise AssertionError(f"non-converging aggregate was not stopped promptly: {non_converging_requests} requests")
 
 
 def run_duckdb_optimized_classifier(duckdb_path: Path, base_url: str) -> str:
@@ -1812,6 +1961,22 @@ def run_duckdb_new_task_functions(duckdb_path: Path, base_url: str) -> str:
                 'invoice overdue and slow app', ['billing, overdue', 'performance', 'support']
             ) AS result
         );
+        SELECT ai_classify('return unknown label', ['red', 'blue'],
+                           fail_on_error := false) IS NULL AS unknown_single_rejected;
+        SELECT ai_classify_labels('return unknown labels', ['red', 'blue'],
+                                  fail_on_error := false) IS NULL AS unknown_multi_rejected;
+        SELECT ai_classify('alpha example', ['class_a', 'CLASS_A'],
+                           fail_on_error := false) IS NULL AS duplicate_labels_rejected;
+        SELECT contains(result.error, 'outside the allowed label set') AS diagnostic_error,
+               contains(result.metadata, '"status":"error"') AS diagnostic_metadata
+        FROM (
+            SELECT ai_classify_result('return unknown labels', ['red', 'blue']) AS result
+        );
+        SELECT contains(result.error, 'labels must be unique') AS duplicate_diagnostic_error,
+               contains(result.metadata, '"status":"error"') AS duplicate_diagnostic_metadata
+        FROM (
+            SELECT ai_classify_result('invoice overdue', ['billing', 'BILLING']) AS result
+        );
     """
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = "test-key"
@@ -1830,7 +1995,21 @@ def run_duckdb_new_task_functions(duckdb_path: Path, base_url: str) -> str:
 
 
 def assert_new_task_functions(output: str):
-    for expected in ("score", "0.91", "rich_classification", "class_a", "billing, overdue", "performance"):
+    for expected in (
+        "score",
+        "0.91",
+        "rich_classification",
+        "class_a",
+        "billing, overdue",
+        "performance",
+        "unknown_single_rejected",
+        "unknown_multi_rejected",
+        "duplicate_labels_rejected",
+        "diagnostic_error",
+        "diagnostic_metadata",
+        "duplicate_diagnostic_error",
+        "duplicate_diagnostic_metadata",
+    ):
         if expected not in output:
             raise AssertionError(f"new task function output missing {expected!r}\n{output}")
     score_format = MockProviderHandler.completion_requests[0].get("response_format", {})
@@ -1863,6 +2042,8 @@ def run_duckdb_control_plane(duckdb_path: Path, base_url: str) -> str:
         FROM ai_parse_document('abc'::BLOB, 'text/plain', 'documents');
         SELECT error
         FROM ai_parse_document('abc'::BLOB, 'text/plain', 'malformed', fail_on_error := false);
+        SELECT document_id, error
+        FROM ai_parse_document('abc'::BLOB, 'text/plain', 'error-only', fail_on_error := false);
     """
     env = os.environ.copy()
     env.update(
@@ -1898,6 +2079,8 @@ def assert_control_plane(output: str):
         "DuckDB document",
         "0.99",
         "AI document parser response must contain an elements array",
+        "document-error",
+        "remote parser failed",
     ):
         if expected not in output:
             raise AssertionError(f"control-plane output missing {expected!r}\n{output}")
@@ -1908,9 +2091,10 @@ def assert_control_plane(output: str):
         "/v1/endpoints/deprovision",
         "/v1/documents/parse",
         "/v1/documents/parse",
+        "/v1/documents/parse",
     ]:
         raise AssertionError(f"unexpected control-plane requests: {MockProviderHandler.control_plane_requests}")
-    if MockProviderHandler.control_plane_authorization_headers != ["Bearer control-token"] * 5:
+    if MockProviderHandler.control_plane_authorization_headers != ["Bearer control-token"] * 6:
         raise AssertionError(
             f"unexpected control-plane authorization: {MockProviderHandler.control_plane_authorization_headers}"
         )
@@ -1943,6 +2127,21 @@ def main():
         MockProviderHandler.reset()
         adaptive_batch_output = run_duckdb_adaptive_batches(args.duckdb, f"http://127.0.0.1:{port}")
         assert_adaptive_batches(adaptive_batch_output)
+        MockProviderHandler.reset()
+        usage_distribution_output = run_duckdb_embedding_usage_distribution(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_embedding_usage_distribution(usage_distribution_output)
+        MockProviderHandler.reset()
+        threaded_server = ThreadingHTTPServer(("127.0.0.1", 0), MockProviderHandler)
+        threaded_thread = threading.Thread(target=threaded_server.serve_forever, daemon=True)
+        threaded_thread.start()
+        try:
+            concurrency_output = run_duckdb_executor_concurrency(
+                args.duckdb, f"http://127.0.0.1:{threaded_server.server_address[1]}"
+            )
+            assert_executor_concurrency(concurrency_output)
+        finally:
+            threaded_server.shutdown()
+            threaded_thread.join(timeout=5)
         MockProviderHandler.reset()
         hierarchical_output = run_duckdb_hierarchical_aggregate(args.duckdb, f"http://127.0.0.1:{port}")
         assert_hierarchical_aggregate(hierarchical_output)

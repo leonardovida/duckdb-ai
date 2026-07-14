@@ -92,8 +92,11 @@ caches; `ai_clear_cache()` clears it explicitly. Query-cache hits appear in
 
 When a provider rejects a multi-input embedding request with HTTP 413 or a
 recognized payload/context-size error, the extension recursively bisects that
-request. A single input that exceeds an external model's declared context or
-byte limit fails explicitly.
+request. Recoverable splits do not count as terminal failures in usage
+summaries. Input packing measures the encoded JSON payload, so quotes, control
+characters, and other escaped content are included in the byte limit. A single
+input that exceeds an external model's declared context or byte limit fails
+explicitly.
 
 ## Context-safe aggregate reduction
 
@@ -102,7 +105,9 @@ byte limit fails explicitly.
 boundaries, mapped concurrently into compact evidence, packed, and recursively
 reduced until one final request fits. Every child uses the parent query's
 operation tree for usage attribution. Set `overflow_policy := 'error'` to reject
-an oversized group before any provider call.
+an oversized group before any provider call. Hierarchical reduction also stops
+immediately with an explicit error when a provider's intermediate responses do
+not reduce either the chunk count or total byte size.
 
 ## Cancellation and retries
 
@@ -171,7 +176,8 @@ as `0` because no provider HTTP request was made.
 The maximum number of cached entries defaults to `1024`. Set
 `cache_max_entries := ...`, `duckdb_ai_cache_max_entries`, or
 `DUCKDB_AI_CACHE_MAX_ENTRIES` to change the bound. Use `0` to disable
-response-cache storage.
+response-cache storage. Cached response bodies and keys also have a hard 64 MiB
+per-database bound; an individual response larger than that is not cached.
 
 `ai_query_data()` also keeps a small in-memory generated-SQL cache for successful
 binds. `ai_clear_cache()` clears the response, generated-SQL, and similarity

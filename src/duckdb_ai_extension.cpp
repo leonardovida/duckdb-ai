@@ -49,6 +49,7 @@
 #include <initializer_list>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -1770,8 +1771,18 @@ struct ProviderExecutorState : public ObjectCacheEntry {
 
 struct SimilarityOptionCache {
 	duckdb_ai::CompletionOptions options;
+	size_t credential_fingerprint = 0;
 	std::unordered_map<std::string, std::vector<double>> embeddings;
 };
+
+bool SimilarityCacheOptionsEqual(const SimilarityOptionCache &cached, const duckdb_ai::CompletionOptions &options) {
+	if (cached.credential_fingerprint != std::hash<std::string> {}(options.api_key)) {
+		return false;
+	}
+	auto sanitized = options;
+	sanitized.api_key.clear();
+	return CompletionOptionsEqual(cached.options, sanitized);
+}
 
 struct SimilarityQueryCache {
 	std::mutex mutex;
@@ -1915,12 +1926,17 @@ void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
 		idx_t remaining = 0;
 	};
 	auto wait_state = std::make_shared<BatchWaitState>();
-	wait_state->remaining = jobs.size();
+	wait_state->remaining = worker_count;
+	auto next_job = std::make_shared<std::atomic<idx_t>>(0);
 	auto &executor = ProviderExecutor(jobs[0].options);
 	executor.EnsureWorkers(worker_count);
-	for (idx_t job_index = 0; job_index < jobs.size(); job_index++) {
-		executor.Submit([&, job_index, wait_state]() {
-			if (!stop.load()) {
+	for (idx_t worker = 0; worker < worker_count; worker++) {
+		executor.Submit([&, next_job, wait_state]() {
+			while (!stop.load()) {
+				auto job_index = next_job->fetch_add(1);
+				if (job_index >= jobs.size()) {
+					break;
+				}
 				run_one(jobs[job_index]);
 			}
 			{
@@ -2933,7 +2949,7 @@ void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<Provider
 			std::unique_lock<std::mutex> cache_lock(query_cache->mutex);
 			SimilarityOptionCache *option_cache = nullptr;
 			for (auto &candidate : query_cache->option_groups) {
-				if (CompletionOptionsEqual(candidate.options, jobs[group_start].options)) {
+				if (SimilarityCacheOptionsEqual(candidate, jobs[group_start].options)) {
 					option_cache = &candidate;
 					break;
 				}
@@ -2941,6 +2957,8 @@ void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<Provider
 			if (!option_cache) {
 				SimilarityOptionCache candidate;
 				candidate.options = jobs[group_start].options;
+				candidate.credential_fingerprint = std::hash<std::string> {}(candidate.options.api_key);
+				candidate.options.api_key.clear();
 				query_cache->option_groups.push_back(std::move(candidate));
 				option_cache = &query_cache->option_groups.back();
 			}
@@ -3601,6 +3619,10 @@ std::string RunHierarchicalAggregate(const AiAggregateBindData &bind_data, const
 		if (level >= 32) {
 			throw InvalidInputException("AI aggregate hierarchical reduction did not converge after 32 levels");
 		}
+		auto previous_chunk_count = chunks.size();
+		auto previous_bytes =
+		    std::accumulate(chunks.begin(), chunks.end(), idx_t(0),
+		                    [](idx_t total, const std::string &chunk) { return total + chunk.size(); });
 		std::vector<ProviderStringJob> jobs;
 		jobs.reserve(chunks.size());
 		for (idx_t i = 0; i < chunks.size(); i++) {
@@ -3629,10 +3651,17 @@ std::string RunHierarchicalAggregate(const AiAggregateBindData &bind_data, const
 			}
 			partials.push_back(std::move(job.output));
 		}
-		chunks = PackAggregateValues(partials, bind_data.separator, bind_data.max_context_chars);
-		if (chunks.empty()) {
+		auto next_chunks = PackAggregateValues(partials, bind_data.separator, bind_data.max_context_chars);
+		if (next_chunks.empty()) {
 			throw InvalidInputException("AI aggregate hierarchical reduction produced no intermediate results");
 		}
+		auto next_bytes = std::accumulate(next_chunks.begin(), next_chunks.end(), idx_t(0),
+		                                  [](idx_t total, const std::string &chunk) { return total + chunk.size(); });
+		if (next_chunks.size() >= previous_chunk_count && next_bytes >= previous_bytes) {
+			throw InvalidInputException("AI aggregate hierarchical reduction made no progress at level %llu",
+			                            static_cast<unsigned long long>(level));
+		}
+		chunks = std::move(next_chunks);
 	}
 	auto options = bind_data.options;
 	options.parent_operation_id = root_operation_id;
@@ -3781,6 +3810,93 @@ std::string TrimAscii(const std::string &input) {
 		end--;
 	}
 	return input.substr(start, end - start);
+}
+
+std::vector<std::string> ClassificationLabelsFromParameter(const std::string &parameter) {
+	std::vector<std::string> labels;
+	std::string error;
+	if (duckdb_ai::ExtractJsonStringArray("[" + parameter + "]", labels, error) ||
+	    duckdb_ai::ExtractJsonStringArray(parameter, labels, error)) {
+		return labels;
+	}
+	for (idx_t start = 0; start <= parameter.size();) {
+		auto separator = parameter.find(',', start);
+		auto label =
+		    TrimAscii(parameter.substr(start, separator == std::string::npos ? std::string::npos : separator - start));
+		if (!label.empty()) {
+			labels.push_back(std::move(label));
+		}
+		if (separator == std::string::npos) {
+			break;
+		}
+		start = separator + 1;
+	}
+	return labels;
+}
+
+bool ValidateClassificationLabelSet(const std::vector<std::string> &labels, std::string &error) {
+	if (labels.empty()) {
+		error = "classification labels must not be empty";
+		return false;
+	}
+	std::set<std::string> seen;
+	for (auto &label : labels) {
+		auto trimmed = TrimAscii(label);
+		if (trimmed.empty()) {
+			error = "classification labels must not contain empty values";
+			return false;
+		}
+		if (!seen.insert(LowerAscii(trimmed)).second) {
+			error = "classification labels must be unique";
+			return false;
+		}
+	}
+	return true;
+}
+
+bool CanonicalClassificationLabel(const std::string &parameter, const std::string &candidate, std::string &canonical,
+                                  std::string &error) {
+	auto labels = ClassificationLabelsFromParameter(parameter);
+	if (!ValidateClassificationLabelSet(labels, error)) {
+		return false;
+	}
+	auto normalized = TrimAscii(StripMarkdownJsonFence(candidate));
+	std::vector<std::string> parsed_candidate;
+	std::string parse_error;
+	if (duckdb_ai::ExtractJsonStringArray("[" + normalized + "]", parsed_candidate, parse_error) &&
+	    parsed_candidate.size() == 1) {
+		normalized = parsed_candidate[0];
+	}
+	for (auto &label : labels) {
+		if (LowerAscii(label) == LowerAscii(normalized)) {
+			canonical = label;
+			return true;
+		}
+	}
+	error = "model returned a label outside the allowed label set: " + normalized;
+	return false;
+}
+
+bool ValidateMultiClassificationLabels(const std::string &parameter, std::vector<std::string> &outputs,
+                                       std::string &error) {
+	auto labels = ClassificationLabelsFromParameter(parameter);
+	if (!ValidateClassificationLabelSet(labels, error)) {
+		return false;
+	}
+	std::set<std::string> seen;
+	for (auto &output : outputs) {
+		std::string canonical;
+		if (!CanonicalClassificationLabel(parameter, output, canonical, error)) {
+			return false;
+		}
+		auto normalized = LowerAscii(canonical);
+		if (!seen.insert(normalized).second) {
+			error = "model returned a duplicate classification label: " + canonical;
+			return false;
+		}
+		output = std::move(canonical);
+	}
+	return true;
 }
 
 std::string StripMarkdownJsonFence(const std::string &text) {
@@ -4268,6 +4384,14 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		AppendSystemPrompt(job.options, system_prompt);
 		auto prompt = BuildTaskUserPrompt(bind_data.task, job.input, job.parameter);
 		job.output = duckdb_ai::Complete(prompt, job.options).text;
+		if (bind_data.task == AiTaskKind::CLASSIFY) {
+			std::string canonical;
+			std::string error;
+			if (!CanonicalClassificationLabel(job.parameter, job.output, canonical, error)) {
+				throw InvalidInputException("ai_classify %s", error);
+			}
+			job.output = std::move(canonical);
+		}
 	});
 
 	for (auto &job : jobs) {
@@ -4351,6 +4475,9 @@ void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &r
 		if (!duckdb_ai::ExtractJsonStringArray(output, job.output, error)) {
 			throw InvalidInputException("ai_classify_labels expected a JSON array of strings: %s", error);
 		}
+		if (!ValidateMultiClassificationLabels(job.parameter, job.output, error)) {
+			throw InvalidInputException("ai_classify_labels %s", error);
+		}
 	});
 
 	for (auto &job : jobs) {
@@ -4433,7 +4560,7 @@ Value AiClassifyResultValue(const LogicalType &result_type, const std::vector<st
 	} else {
 		children.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
 		children.emplace_back(error);
-		children.emplace_back(LogicalType::VARCHAR);
+		children.push_back(metadata.empty() ? Value(LogicalType::VARCHAR) : Value(metadata));
 	}
 	return Value::STRUCT(result_type, std::move(children));
 }
@@ -4479,7 +4606,9 @@ void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &r
 			job.parameter = std::move(labels);
 			jobs.push_back(std::move(job));
 		} catch (std::exception &ex) {
-			result.SetValue(row, AiClassifyResultValue(result_type, {}, ex.what(), ""));
+			result.SetValue(row,
+			                AiClassifyResultValue(result_type, {}, ex.what(),
+			                                      R"({"stage":"configuration","multi_label":true,"status":"error"})"));
 		}
 	}
 	RunProviderJobs(jobs, [&](ProviderStringListJob &job) {
@@ -4491,15 +4620,25 @@ void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &r
 		if (!duckdb_ai::ExtractJsonStringArray(output, job.output, error)) {
 			throw InvalidInputException("ai_classify_result expected a JSON array of strings: %s", error);
 		}
+		if (!ValidateMultiClassificationLabels(job.parameter, job.output, error)) {
+			throw InvalidInputException("ai_classify_result %s", error);
+		}
 	});
 	for (auto &job : jobs) {
+		std::string metadata;
+		try {
+			auto config = duckdb_ai::ResolveProvider(job.options);
+			metadata = "{\"provider\":\"" + JsonEscapeSqlText(config.provider) + "\",\"model\":\"" +
+			           JsonEscapeSqlText(config.model) + "\",\"multi_label\":true";
+		} catch (...) {
+			metadata = R"({"stage":"configuration","multi_label":true)";
+		}
 		if (job.exception) {
-			result.SetValue(job.row, AiClassifyResultValue(result_type, {}, job.error_message, ""));
+			metadata += ",\"status\":\"error\"}";
+			result.SetValue(job.row, AiClassifyResultValue(result_type, {}, job.error_message, metadata));
 			continue;
 		}
-		auto config = duckdb_ai::ResolveProvider(job.options);
-		auto metadata = "{\"provider\":\"" + JsonEscapeSqlText(config.provider) + "\",\"model\":\"" +
-		                JsonEscapeSqlText(config.model) + "\",\"multi_label\":true}";
+		metadata += ",\"status\":\"ok\"}";
 		result.SetValue(job.row, AiClassifyResultValue(result_type, job.output, "", metadata));
 	}
 }
@@ -6042,6 +6181,22 @@ void AiSecretsFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 	output.SetCardinality(count);
 }
 
+bool ExternalModelHasCapability(const std::string &capabilities, const std::string &expected) {
+	for (idx_t start = 0; start <= capabilities.size();) {
+		auto separator = capabilities.find(',', start);
+		auto capability = TrimAscii(
+		    capabilities.substr(start, separator == std::string::npos ? std::string::npos : separator - start));
+		if (LowerAscii(capability) == expected) {
+			return true;
+		}
+		if (separator == std::string::npos) {
+			break;
+		}
+		start = separator + 1;
+	}
+	return false;
+}
+
 unique_ptr<FunctionData> AiModelsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
                                       vector<string> &names) {
 	AddTableColumns(return_types, names,
@@ -6112,13 +6267,22 @@ void AiModelsFunction(ClientContext &context, TableFunctionInput &data_p, DataCh
 			inspected_options.base_url = location;
 			inspected_options.model_options = options;
 			duckdb_ai::ApplyModelProfileOptions(inspected_options);
-			runtime_capabilities = duckdb_ai::GetProviderCapabilities(inspected_options);
+			auto embedding_model = model_type == "embedding" || ExternalModelHasCapability(capabilities, "embedding");
+			runtime_capabilities = duckdb_ai::GetProviderCapabilities(inspected_options, embedding_model);
 			has_runtime_capabilities = true;
 			if (!credential.empty()) {
 				auto credential_entry = secret_manager.GetSecretByName(transaction, credential);
 				if (!credential_entry || !credential_entry->secret ||
 				    credential_entry->secret->GetType() != "duckdb_ai") {
 					validation_status = "missing_credential";
+				} else if (auto credential_secret =
+				               dynamic_cast<const KeyValueSecret *>(credential_entry->secret.get())) {
+					std::string credential_provider;
+					TryReadSecretString(*credential_secret, "provider", credential_provider);
+					if (!credential_provider.empty() && duckdb_ai::NormalizeProviderName(credential_provider) !=
+					                                        duckdb_ai::NormalizeProviderName(provider)) {
+						validation_status = "credential_provider_mismatch";
+					}
 				}
 			}
 		} catch (std::exception &ex) {
@@ -6133,10 +6297,9 @@ void AiModelsFunction(ClientContext &context, TableFunctionInput &data_p, DataCh
 			output_price = inspected_options.output_token_price_per_million;
 		}
 		if (input_price < 0 || output_price < 0) {
-			auto operation =
-			    model_type == "embedding" || LowerAscii(capabilities).find("embedding") != std::string::npos
-			        ? std::string("embedding")
-			        : std::string("completion");
+			auto operation = model_type == "embedding" || ExternalModelHasCapability(capabilities, "embedding")
+			                     ? std::string("embedding")
+			                     : std::string("completion");
 			for (auto &price : duckdb_ai::ModelPrices()) {
 				if (duckdb_ai::NormalizeProviderName(price.provider) == duckdb_ai::NormalizeProviderName(provider) &&
 				    LowerAscii(price.model) == LowerAscii(model) && price.operation == operation) {
@@ -6216,6 +6379,10 @@ unique_ptr<FunctionData> ExternalModelBind(ClientContext &, TableFunctionBindInp
 	bind_data->replace = BooleanValue::Get(replace_value);
 	if (bind_data->name.empty() || bind_data->provider.empty() || bind_data->model.empty()) {
 		throw BinderException("CREATE EXTERNAL MODEL requires a name, provider, and model");
+	}
+	if (!bind_data->model_type.empty() && bind_data->model_type != "completion" &&
+	    bind_data->model_type != "embedding") {
+		throw BinderException("CREATE EXTERNAL MODEL model_type must be completion or embedding");
 	}
 	if (!bind_data->options.empty()) {
 		std::string error;
@@ -6315,6 +6482,9 @@ unique_ptr<FunctionData> ControlPlaneBind(ClientContext &context, TableFunctionB
 	}
 	auto bind_data = make_uniq<ControlPlaneBindData>(operation);
 	bind_data->argument = ExternalModelInputString(input.inputs[0]);
+	if (bind_data->argument.empty()) {
+		throw BinderException("AI control-plane profile or operation id must not be empty");
+	}
 	ApplySettings(context, bind_data->options);
 	duckdb_ai::AttachProviderRuntimeState(bind_data->options, context);
 	if (operation == ControlPlaneOperation::PROVISION) {
@@ -6332,8 +6502,11 @@ unique_ptr<FunctionData> ControlPlaneBind(ClientContext &context, TableFunctionB
 				throw BinderException("Unsupported ai_provision_endpoint option \"%s\"", name);
 			}
 		}
-		if (!bind_data->dry_run && (!bind_data->has_max_hourly_cost || !std::isfinite(bind_data->max_hourly_cost_usd) ||
-		                            bind_data->max_hourly_cost_usd <= 0)) {
+		if (bind_data->has_max_hourly_cost &&
+		    (!std::isfinite(bind_data->max_hourly_cost_usd) || bind_data->max_hourly_cost_usd <= 0)) {
+			throw BinderException("ai_provision_endpoint max_hourly_cost_usd must be finite and greater than 0");
+		}
+		if (!bind_data->dry_run && !bind_data->has_max_hourly_cost) {
 			throw BinderException("ai_provision_endpoint requires max_hourly_cost_usd > 0 when dry_run is false");
 		}
 	}
@@ -6564,9 +6737,17 @@ void LoadDocumentElements(const DocumentParseBindData &bind_data, DocumentParseS
 		auto doc = ParseSqlJson(response);
 		auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
 		auto document_id = SqlJsonString(root, "document_id");
+		auto root_error = SqlJsonString(root, "error");
 		auto elements =
 		    root && duckdb_yyjson::yyjson_is_obj(root) ? duckdb_yyjson::yyjson_obj_get(root, "elements") : nullptr;
 		if (!elements || !duckdb_yyjson::yyjson_is_arr(elements)) {
+			if (!root_error.empty()) {
+				DocumentElement result;
+				result.document_id = document_id;
+				result.error = root_error;
+				state.elements.push_back(std::move(result));
+				return;
+			}
 			throw IOException("AI document parser response must contain an elements array");
 		}
 		if (elements && duckdb_yyjson::yyjson_is_arr(elements)) {
@@ -6594,10 +6775,9 @@ void LoadDocumentElements(const DocumentParseBindData &bind_data, DocumentParseS
 			}
 		}
 		if (state.elements.empty()) {
-			auto error = SqlJsonString(root, "error");
 			DocumentElement result;
 			result.document_id = document_id;
-			result.error = error.empty() ? "AI document parser returned no elements" : error;
+			result.error = root_error.empty() ? "AI document parser returned no elements" : root_error;
 			state.elements.push_back(std::move(result));
 		}
 	} catch (std::exception &ex) {
@@ -6695,6 +6875,12 @@ ParsedClassifierArtifact ParseClassifierArtifact(ClientContext &context, const s
 			throw InvalidInputException("classifier artifact labels must contain only strings");
 		}
 		result.labels.emplace_back(duckdb_yyjson::yyjson_get_str(entry), duckdb_yyjson::yyjson_get_len(entry));
+	}
+	std::set<std::string> unique_labels;
+	for (auto &label : result.labels) {
+		if (label.empty() || !unique_labels.insert(LowerAscii(label)).second) {
+			throw InvalidInputException("classifier artifact labels must be non-empty and unique");
+		}
 	}
 	auto centroids = duckdb_yyjson::yyjson_obj_get(root, "centroids");
 	if (!centroids || !duckdb_yyjson::yyjson_is_arr(centroids)) {
