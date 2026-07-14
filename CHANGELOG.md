@@ -13,6 +13,10 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 - Used brace initialization for the provider executor's worker lock so MSVC
   does not parse the declaration as a function and fail Windows builds.
+- Replaced Databricks' retired Llama 4 Maverick default with its documented
+  OpenAI GPT OSS 120B replacement endpoint.
+- Emitted llama.cpp's direct JSON Schema response-format shape instead of the
+  nested OpenAI envelope.
 
 ## 0.4.8 - 2026-07-14
 
