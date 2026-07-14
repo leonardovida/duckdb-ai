@@ -173,7 +173,7 @@ SELECT contains(ai_embedding_request_json('duck', provider := 'workers_ai'), '"m
 true	true	true
 
 query I
-SELECT contains(ai_completion_request_json('hello', provider := 'groq'), '"model":"openai/gpt-oss-20b"') AND contains(ai_completion_request_json('hello', provider := 'github'), '"model":"openai/gpt-4o"') AND contains(ai_completion_request_json('hello', provider := 'bedrock'), '"model":"amazon.nova-lite-v1:0"') AND contains(ai_completion_request_json('hello', provider := 'vertex'), '"model":"google/gemini-2.5-flash"');
+SELECT contains(ai_completion_request_json('hello', provider := 'groq'), '"model":"openai/gpt-oss-20b"') AND contains(ai_completion_request_json('hello', provider := 'github'), '"model":"openai/gpt-4o"') AND contains(ai_completion_request_json('hello', provider := 'bedrock'), '"model":"openai.gpt-oss-120b"') AND contains(ai_completion_request_json('hello', provider := 'vertex'), '"model":"google/gemini-2.5-flash"');
 ----
 true
 
@@ -183,7 +183,7 @@ SELECT contains(ai_completion_request_json('hello', provider := 'workers_ai'), '
 true
 
 query I
-SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hy3"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.7-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M3"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
+SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hy3"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.7-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M2.7"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
 ----
 true
 
@@ -352,6 +352,11 @@ SELECT contains(ai_completion_request_json('hello', provider := 'workers_ai', ma
 ----
 true	true
 
+query II
+SELECT contains(ai_completion_request_json('hello', provider := 'minimax', max_tokens := 42), '"max_completion_tokens":42'), contains(ai_completion_request_json('hello', provider := 'kimi', max_tokens := 42), '"max_completion_tokens":42');
+----
+true	true
+
 query I
 SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test', use_builtin_model_prices := true), '"model":"gpt-test"');
 ----
@@ -401,6 +406,11 @@ true
 
 query I
 SELECT contains(request, '"type":"array"') AND contains(request, '"type":"boolean"') FROM (SELECT ai_completion_request_json('extract', provider := 'openai', model := 'gpt-test', response_schema := '{"type":"object","properties":{"items":{"type":"array","items":{"type":"string"}},"ok":{"type":"boolean"}}}') AS request);
+----
+true
+
+query I
+SELECT contains(request, '"response_format":{"type":"json_object","schema":{"type":"object"') AND NOT contains(request, '"json_schema"') FROM (SELECT ai_completion_request_json('extract', provider := 'cohere', model := 'command-test', response_schema := '{"type":"object","properties":{"summary":{"type":"string"}}}') AS request);
 ----
 true
 

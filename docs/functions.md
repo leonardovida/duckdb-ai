@@ -1060,7 +1060,7 @@ not from direct API key arguments.
 | `profile`, `secret`, `secret_name` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | DuckDB secret name or profile. |
 | `temperature` | `DOUBLE` | Completion, SQL assistant, aggregate | Sampling temperature between 0 and 2. |
 | `system_prompt` | `VARCHAR` | Completion, SQL assistant, aggregate | Optional system message for providers that support chat-style payloads. |
-| `max_tokens` | `BIGINT` | Completion, SQL assistant, aggregate | Maximum provider output tokens. Must be greater than 0. OpenAI, Cloudflare, and Snowflake requests emit the current `max_completion_tokens` API field; other compatible providers retain `max_tokens`. |
+| `max_tokens` | `BIGINT` | Completion, SQL assistant, aggregate | Maximum provider output tokens. Must be greater than 0. OpenAI, Cloudflare, MiniMax, Moonshot/Kimi, and Snowflake requests emit the current `max_completion_tokens` API field; other compatible providers retain `max_tokens`. |
 | `base_url` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Provider or gateway base URL override. |
 | `timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP timeout. Must be greater than 0. |
 | `connect_timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP connection timeout from 1 to 31536000 seconds. It must be less than or equal to the total timeout when a provider call runs. |
@@ -1135,10 +1135,10 @@ Supported provider names and aliases are:
 | `openai` | none | Yes | Yes | `gpt-4o-mini` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
-| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `amazon.nova-lite-v1:0` |
+| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b` |
 | `cerebras` | `cerebras_cloud` | Yes | No | `gpt-oss-120b` |
 | `cloudflare` | `workers_ai`, `cloudflare_workers_ai`, `cloudflare_ai` | Yes | Yes | `@cf/zai-org/glm-4.7-flash` |
-| `cohere` | `cohere_ai` | Yes | Yes | `command-a-03-2025` |
+| `cohere` | `cohere_ai` | Yes | Yes | `command-a-plus-05-2026` |
 | `dashscope` | `qwen`, `alibaba`, `alibaba_model_studio`, `model_studio` | Yes | Yes | `qwen-plus` |
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-llama-4-maverick` |
 | `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct` |
@@ -1149,7 +1149,7 @@ Supported provider names and aliases are:
 | `groq` | `groqcloud`, `groq_cloud` | Yes | No | `openai/gpt-oss-20b` |
 | `huggingface` | `hf`, `hugging_face`, `huggingface_hub` | Yes | No | `openai/gpt-oss-120b` |
 | `hunyuan` | `tencent`, `tencent_hunyuan` | Yes | No | `hy3` |
-| `minimax` | `mini_max` | Yes | No | `MiniMax-M3` |
+| `minimax` | `mini_max` | Yes | No | `MiniMax-M2.7` |
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
 | `moonshot` | `kimi`, `moonshot_ai`, `kimi_api` | Yes | No | `kimi-k2.7-code` |
 | `nebius` | `nebius_token_factory`, `token_factory` | Yes | No | `meta-llama/Meta-Llama-3.1-70B-Instruct` |

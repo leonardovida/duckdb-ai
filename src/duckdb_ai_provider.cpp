@@ -2783,11 +2783,11 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"azure", "openai_chat", "gpt-4o", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
 	    {"anthropic", "anthropic_messages", "claude-haiku-4-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
 	     true},
-	    {"bedrock", "openai_chat", "amazon.nova-lite-v1:0", "", "", "AWS_BEDROCK_API_KEY", true},
+	    {"bedrock", "openai_chat", "openai.gpt-oss-120b", "", "", "AWS_BEDROCK_API_KEY", true},
 	    {"cerebras", "openai_chat", "gpt-oss-120b", "", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", true},
 	    {"cloudflare", "openai_chat", "@cf/zai-org/glm-4.7-flash", "@cf/baai/bge-base-en-v1.5", "",
 	     "CLOUDFLARE_API_KEY", true},
-	    {"cohere", "openai_chat", "command-a-03-2025", "embed-v4.0", "https://api.cohere.ai/compatibility/v1",
+	    {"cohere", "openai_chat", "command-a-plus-05-2026", "embed-v4.0", "https://api.cohere.ai/compatibility/v1",
 	     "COHERE_API_KEY", true},
 	    {"dashscope", "openai_chat", "qwen-plus", "text-embedding-v4",
 	     "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY", true},
@@ -2805,7 +2805,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
 	    {"hunyuan", "openai_chat", "hy3", "", "https://tokenhub.tencentmaas.com/v1", "HUNYUAN_API_KEY", true},
 	    {"llamacpp", "openai_chat", "default", "default", "http://localhost:8080/v1", "LLAMACPP_API_KEY", false},
-	    {"minimax", "openai_chat", "MiniMax-M3", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
+	    {"minimax", "openai_chat", "MiniMax-M2.7", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
 	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
 	     "MISTRAL_API_KEY", true},
 	    {"moonshot", "openai_chat", "kimi-k2.7-code", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
@@ -3533,6 +3533,22 @@ std::string OpenAIResponseFormatJson(const CompletionOptions &options) {
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
 
+std::string CohereResponseFormatJson(const CompletionOptions &options) {
+	ValidateResponseSchema(options);
+	if (!options.response_schema.empty()) {
+		return "\"response_format\":{\"type\":\"json_object\",\"schema\":" + options.response_schema + "}";
+	}
+	auto format = NormalizeResponseFormat(options);
+	if (format.empty() || format == "text") {
+		return "";
+	}
+	if (format == "json_schema") {
+		throw InvalidInputException(
+		    "AI option \"response_schema\" must be provided when response_format is json_schema");
+	}
+	return "\"response_format\":{\"type\":\"json_object\"}";
+}
+
 std::string OllamaFormatJson(const CompletionOptions &options) {
 	ValidateResponseSchema(options);
 	if (!options.response_schema.empty()) {
@@ -3613,13 +3629,15 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt) +
 	               ",\"temperature\":" + JsonDouble(temperature);
 	if (options.has_max_tokens) {
-		if (config.provider == "openai" || config.provider == "cloudflare" || config.provider == "snowflake") {
+		if (config.provider == "openai" || config.provider == "cloudflare" || config.provider == "minimax" ||
+		    config.provider == "moonshot" || config.provider == "snowflake") {
 			payload += ",\"max_completion_tokens\":" + std::to_string(options.max_tokens);
 		} else {
 			payload += ",\"max_tokens\":" + std::to_string(options.max_tokens);
 		}
 	}
-	auto response_format = OpenAIResponseFormatJson(options);
+	auto response_format =
+	    config.provider == "cohere" ? CohereResponseFormatJson(options) : OpenAIResponseFormatJson(options);
 	if (!response_format.empty()) {
 		payload += "," + response_format;
 	}
