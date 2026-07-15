@@ -1141,13 +1141,13 @@ Supported provider names and aliases are:
 | `openai` | none | Yes | Yes | `gpt-4o-mini` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
-| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b` |
+| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b-1:0` |
 | `cerebras` | `cerebras_cloud` | Yes | No | `gpt-oss-120b` |
 | `cloudflare` | `workers_ai`, `cloudflare_workers_ai`, `cloudflare_ai` | Yes | Yes | `@cf/zai-org/glm-4.7-flash` |
 | `cohere` | `cohere_ai` | Yes | Yes | `command-a-plus-05-2026` |
 | `dashscope` | `qwen`, `alibaba`, `alibaba_model_studio`, `model_studio` | Yes | Yes | `qwen-plus` |
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-gpt-oss-120b` |
-| `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct` |
+| `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo` |
 | `deepseek` | none | Yes | No | `deepseek-v4-flash` |
 | `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/llama-v3p1-8b-instruct` |
 | `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.5-flash` |
