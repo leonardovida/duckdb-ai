@@ -52,6 +52,16 @@ SELECT provider, model, operation, printf('%.2f', input_token_price_per_million)
 ----
 xai	grok-4.5	completion	2.00	6.00
 
+query IIIII
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'openai' AND model = 'gpt-5.6-luna';
+----
+openai	gpt-5.6-luna	completion	1.00	6.00
+
+query IIIII
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'anthropic' AND model = 'claude-sonnet-5';
+----
+anthropic	claude-sonnet-5	completion	2.00	10.00
+
 query I
 SELECT contains(source_url, 'openrouter.ai') FROM ai_model_prices() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';
 ----
@@ -173,7 +183,12 @@ SELECT contains(ai_embedding_request_json('duck', provider := 'workers_ai'), '"m
 true	true	true
 
 query I
-SELECT contains(ai_completion_request_json('hello', provider := 'groq'), '"model":"openai/gpt-oss-20b"') AND contains(ai_completion_request_json('hello', provider := 'github'), '"model":"openai/gpt-4o"') AND contains(ai_completion_request_json('hello', provider := 'bedrock'), '"model":"openai.gpt-oss-120b"') AND contains(ai_completion_request_json('hello', provider := 'vertex'), '"model":"google/gemini-2.5-flash"');
+SELECT contains(ai_completion_request_json('hello', provider := 'groq'), '"model":"openai/gpt-oss-20b"') AND contains(ai_completion_request_json('hello', provider := 'github'), '"model":"openai/gpt-4o"') AND contains(ai_completion_request_json('hello', provider := 'bedrock'), '"model":"openai.gpt-oss-120b-1:0"') AND contains(ai_completion_request_json('hello', provider := 'vertex'), '"model":"google/gemini-2.5-flash"');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'deepinfra'), '"model":"meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"');
 ----
 true
 

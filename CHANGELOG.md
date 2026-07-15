@@ -7,6 +7,18 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.11 - 2026-07-15
+
+### Fixed
+
+- Corrected Amazon Bedrock's GPT OSS 120B default model id and replaced
+  DeepInfra's retiring Llama 3.1 8B Instruct default with its Turbo successor.
+
+### Changed
+
+- Added built-in cost metadata for OpenAI GPT-5.6 Sol, Terra, and Luna and
+  Anthropic Claude Sonnet 5.
+
 ## 0.4.10 - 2026-07-14
 
 ### Fixed
