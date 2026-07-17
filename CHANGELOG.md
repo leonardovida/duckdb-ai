@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.13 - 2026-07-17
+
+### Fixed
+
+- Replaced Gemini's retired `gemini-embedding-001` default with the supported
+  `gemini-embedding-2` model and refreshed its built-in text-input pricing.
+
 ## 0.4.12 - 2026-07-17
 
 ### Fixed
