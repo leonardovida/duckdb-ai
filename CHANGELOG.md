@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.12 - 2026-07-17
+
+### Fixed
+
+- Applied schema include/exclude filters before collecting table metadata and
+  sample rows, avoiding unnecessary scans of tables omitted from AI prompts.
+
 ## 0.4.11 - 2026-07-15
 
 ### Fixed
