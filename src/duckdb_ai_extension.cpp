@@ -4220,16 +4220,17 @@ std::string BuildPromptSchemaContext(ClientContext &context, const PromptSchemaO
 			info.catalog = table.catalog.GetName();
 			info.schema = table.schema.name;
 			info.table = table.name;
+			auto included = include_specs.empty() || MatchesAnyTableSpec(info, include_specs);
+			auto excluded = MatchesAnyTableSpec(info, exclude_specs);
+			if (!included || excluded) {
+				return;
+			}
 			info.comment = ValueToOptionalString(table.comment);
 			info.sql = TableCreateSql(table);
 			info.estimated_rows = EstimatedRows(context, table);
 			info.columns = ExtractSchemaColumns(table);
 			TryCollectSampleRows(context, table, info, options.sample_rows, allow_actual_samples);
-			auto included = include_specs.empty() || MatchesAnyTableSpec(info, include_specs);
-			auto excluded = MatchesAnyTableSpec(info, exclude_specs);
-			if (included && !excluded) {
-				tables.push_back(std::move(info));
-			}
+			tables.push_back(std::move(info));
 		});
 	}
 
