@@ -7,6 +7,14 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.14 - 2026-07-21
+
+### Fixed
+
+- Discovered portable system CA bundle paths for HTTPS provider requests and
+  honored standard certificate environment overrides, fixing provider access
+  from slim Linux containers.
+
 ## 0.4.13 - 2026-07-17
 
 ### Fixed

@@ -2,7 +2,9 @@
 import argparse
 import json
 import os
+import ssl
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -318,6 +320,42 @@ class MockProviderHandler(BaseHTTPRequestHandler):
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def run_duckdb_tls_trust(duckdb_path: Path, base_url: str, ca_bundle: Path) -> str:
+    sql = f"""
+        SELECT ai_embed(
+            'tls trust smoke',
+            provider := 'openai',
+            model := 'mock-embedding',
+            base_url := '{base_url}'
+        )[1] AS first_embedding_value;
+    """
+    env = os.environ.copy()
+    env.pop("CURL_CA_BUNDLE", None)
+    env.update(
+        {
+            "OPENAI_API_KEY": "test-key",
+            "SSL_CERT_FILE": str(ca_bundle),
+        }
+    )
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb TLS trust smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_tls_trust(output: str):
+    if "first_embedding_value" not in output or "0.25" not in output:
+        raise AssertionError(f"duckdb TLS trust output missing embedding\n{output}")
 
 
 def run_duckdb(duckdb_path: Path, base_url: str) -> str:
@@ -2122,6 +2160,51 @@ def main():
     try:
         provider_metadata_output = run_duckdb_provider_metadata(args.duckdb)
         assert_provider_metadata(provider_metadata_output)
+        with tempfile.TemporaryDirectory() as tls_directory:
+            tls_directory = Path(tls_directory)
+            tls_certificate = tls_directory / "server.pem"
+            tls_key = tls_directory / "server-key.pem"
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-sha256",
+                    "-nodes",
+                    "-days",
+                    "1",
+                    "-subj",
+                    "/CN=127.0.0.1",
+                    "-addext",
+                    "subjectAltName=IP:127.0.0.1",
+                    "-keyout",
+                    str(tls_key),
+                    "-out",
+                    str(tls_certificate),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            tls_server = HTTPServer(("127.0.0.1", 0), MockProviderHandler)
+            tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_context.load_cert_chain(tls_certificate, tls_key)
+            tls_server.socket = tls_context.wrap_socket(tls_server.socket, server_side=True)
+            tls_thread = threading.Thread(target=tls_server.serve_forever, daemon=True)
+            tls_thread.start()
+            try:
+                tls_output = run_duckdb_tls_trust(
+                    args.duckdb,
+                    f"https://127.0.0.1:{tls_server.server_address[1]}",
+                    tls_certificate,
+                )
+                assert_tls_trust(tls_output)
+            finally:
+                tls_server.shutdown()
+                tls_thread.join(timeout=5)
+        MockProviderHandler.reset()
         output = run_duckdb(args.duckdb, f"http://127.0.0.1:{port}")
         assert_smoke_result(output)
         MockProviderHandler.reset()
