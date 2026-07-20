@@ -2190,6 +2190,7 @@ def main():
             )
             tls_server = HTTPServer(("127.0.0.1", 0), MockProviderHandler)
             tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
             tls_context.load_cert_chain(tls_certificate, tls_key)
             tls_server.socket = tls_context.wrap_socket(tls_server.socket, server_side=True)
             tls_thread = threading.Thread(target=tls_server.serve_forever, daemon=True)
