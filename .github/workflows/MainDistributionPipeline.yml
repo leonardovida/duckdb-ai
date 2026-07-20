@@ -141,7 +141,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update -y -qq
-          sudo apt-get install -y -qq ninja-build libcurl4-openssl-dev ccache
+          sudo apt-get install -y -qq ninja-build libcurl4-openssl-dev ccache openssl
 
       - name: Build release extension
         shell: bash
@@ -152,6 +152,10 @@ jobs:
       - name: Run SQLLogicTests
         shell: bash
         run: make test
+
+      - name: Run TLS trust-store smoke test
+        shell: bash
+        run: python3 test/smoke/mock_provider_smoke.py --tls-only
 
       - name: Run mock-provider smoke test
         shell: bash
