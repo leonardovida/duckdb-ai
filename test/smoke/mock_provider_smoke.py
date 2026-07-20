@@ -2,7 +2,9 @@
 import argparse
 import json
 import os
+import ssl
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -320,6 +322,151 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def run_duckdb_tls_request(duckdb_path: Path, base_url: str, ca_environment: dict[str, str], expect_success: bool):
+    sql = f"""
+        SELECT ai_embed(
+            'tls trust smoke',
+            provider := 'openai',
+            model := 'mock-embedding',
+            base_url := '{base_url}'
+        )[1] AS first_embedding_value;
+    """
+    env = os.environ.copy()
+    for name in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+        env.pop(name, None)
+    env["OPENAI_API_KEY"] = "test-key"
+    env.update(ca_environment)
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if expect_success and result.returncode != 0:
+        raise AssertionError(f"duckdb TLS trust smoke exited with {result.returncode}\n{result.stdout}")
+    if not expect_success and result.returncode == 0:
+        raise AssertionError(f"duckdb TLS trust smoke unexpectedly succeeded\n{result.stdout}")
+    return result
+
+
+def run_duckdb_tls_log(
+    duckdb_path: Path, provider_base_url: str, log_endpoint: str, ca_environment: dict[str, str]
+) -> str:
+    sql = f"""
+        SET duckdb_ai_log_endpoint = '{log_endpoint}';
+        SET duckdb_ai_log_strict = true;
+        SELECT ai_complete(
+            'tls log smoke',
+            provider := 'openai',
+            model := 'mock-completion',
+            base_url := '{provider_base_url}'
+        ) AS completion;
+    """
+    env = os.environ.copy()
+    for name in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR"):
+        env.pop(name, None)
+    env["OPENAI_API_KEY"] = "test-key"
+    env.update(ca_environment)
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb TLS log smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def run_tls_smoke_suite(duckdb_path: Path, provider_base_url: str):
+    with tempfile.TemporaryDirectory() as tls_directory:
+        tls_directory = Path(tls_directory)
+        tls_certificate = tls_directory / "server.pem"
+        tls_key = tls_directory / "server-key.pem"
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-sha256",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=127.0.0.1",
+                "-addext",
+                "subjectAltName=IP:127.0.0.1",
+                "-keyout",
+                str(tls_key),
+                "-out",
+                str(tls_certificate),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        tls_server = HTTPServer(("127.0.0.1", 0), MockProviderHandler)
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls_context.load_cert_chain(tls_certificate, tls_key)
+        tls_server.socket = tls_context.wrap_socket(tls_server.socket, server_side=True)
+        tls_thread = threading.Thread(target=tls_server.serve_forever, daemon=True)
+        tls_thread.start()
+        try:
+            tls_base_url = f"https://127.0.0.1:{tls_server.server_address[1]}"
+            certificate_path = str(tls_certificate)
+
+            ssl_cert_result = run_duckdb_tls_request(
+                duckdb_path,
+                tls_base_url,
+                {"SSL_CERT_FILE": certificate_path},
+                expect_success=True,
+            )
+            if "first_embedding_value" not in ssl_cert_result.stdout or "0.25" not in ssl_cert_result.stdout:
+                raise AssertionError(f"SSL_CERT_FILE output missing embedding\n{ssl_cert_result.stdout}")
+
+            curl_bundle_result = run_duckdb_tls_request(
+                duckdb_path,
+                tls_base_url,
+                {
+                    "CURL_CA_BUNDLE": certificate_path,
+                    "SSL_CERT_FILE": str(tls_directory / "missing-ca.pem"),
+                },
+                expect_success=True,
+            )
+            if "0.25" not in curl_bundle_result.stdout:
+                raise AssertionError(f"CURL_CA_BUNDLE output missing embedding\n{curl_bundle_result.stdout}")
+
+            run_duckdb_tls_request(duckdb_path, tls_base_url, {}, expect_success=False)
+            run_duckdb_tls_request(
+                duckdb_path,
+                f"https://localhost:{tls_server.server_address[1]}",
+                {"SSL_CERT_FILE": certificate_path},
+                expect_success=False,
+            )
+
+            MockProviderHandler.reset()
+            tls_log_output = run_duckdb_tls_log(
+                duckdb_path,
+                provider_base_url,
+                f"{tls_base_url}/log",
+                {"SSL_CERT_FILE": certificate_path},
+            )
+            if "mock completion" not in tls_log_output or len(MockProviderHandler.log_requests) != 1:
+                raise AssertionError(f"HTTPS usage log smoke failed\n{tls_log_output}")
+        finally:
+            tls_server.shutdown()
+            tls_thread.join(timeout=5)
+
+
 def run_duckdb(duckdb_path: Path, base_url: str) -> str:
     sql = f"""
         SELECT * FROM ai_clear_usage();
@@ -332,6 +479,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SET duckdb_ai_sql_assistant_model = 'mock-sql-model';
         SET duckdb_ai_base_url = '{base_url}';
         SET duckdb_ai_log_endpoint = '{base_url}/log';
+        SET duckdb_ai_log_strict = true;
         SET duckdb_ai_timeout_seconds = 5;
         CREATE OR REPLACE SECRET smoke_duckdb_ai (
             TYPE duckdb_ai,
@@ -2111,6 +2259,7 @@ def main():
         default=repo_root() / "build" / "release" / "duckdb",
         help="Path to the built DuckDB shell with duckdb_ai linked",
     )
+    parser.add_argument("--tls-only", action="store_true", help="Run only the HTTPS trust-store regression suite")
     args = parser.parse_args()
     if not args.duckdb.exists():
         raise SystemExit(f"{args.duckdb} does not exist; run `GEN=ninja make release` first")
@@ -2122,6 +2271,11 @@ def main():
     try:
         provider_metadata_output = run_duckdb_provider_metadata(args.duckdb)
         assert_provider_metadata(provider_metadata_output)
+        run_tls_smoke_suite(args.duckdb, f"http://127.0.0.1:{port}")
+        if args.tls_only:
+            print("tls trust smoke passed")
+            return
+        MockProviderHandler.reset()
         output = run_duckdb(args.duckdb, f"http://127.0.0.1:{port}")
         assert_smoke_result(output)
         MockProviderHandler.reset()

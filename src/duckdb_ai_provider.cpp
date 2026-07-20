@@ -19,6 +19,7 @@
 #include <deque>
 #include <list>
 #include <exception>
+#include <fstream>
 #include <functional>
 #include <initializer_list>
 #include <iomanip>
@@ -603,6 +604,46 @@ CURL *ThreadLocalCurlHandle() {
 	thread_local CurlEasyHandle handle;
 	curl_easy_reset(handle.handle);
 	return handle.handle;
+}
+
+std::string CurlCaBundlePath() {
+	auto ca_bundle = GetEnv("CURL_CA_BUNDLE");
+	if (ca_bundle.empty()) {
+		ca_bundle = GetEnv("SSL_CERT_FILE");
+	}
+	if (!ca_bundle.empty()) {
+		return ca_bundle;
+	}
+
+#ifndef _WIN32
+	static const std::vector<std::string> system_ca_bundles {
+	    "/etc/ssl/certs/ca-certificates.crt",                // Debian, Ubuntu, Alpine
+	    "/etc/pki/tls/certs/ca-bundle.crt",                  // Fedora, RHEL
+	    "/etc/ssl/ca-bundle.pem",                            // openSUSE
+	    "/etc/pki/tls/cacert.pem",                           // OpenELEC
+	    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", // CentOS, RHEL
+	    "/etc/ssl/cert.pem",                                 // macOS
+	};
+	for (auto &path : system_ca_bundles) {
+		std::ifstream ca_bundle_file(path);
+		if (ca_bundle_file.good()) {
+			return path;
+		}
+	}
+#endif
+
+	return "";
+}
+
+void ConfigureCurlTrustStore(CURL *curl) {
+	auto ca_bundle = CurlCaBundlePath();
+	if (!ca_bundle.empty()) {
+		curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle.c_str());
+	}
+	auto ca_path = GetEnv("SSL_CERT_DIR");
+	if (!ca_path.empty()) {
+		curl_easy_setopt(curl, CURLOPT_CAPATH, ca_path.c_str());
+	}
 }
 
 bool EndsWith(const std::string &value, const std::string &suffix) {
@@ -2598,6 +2639,7 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 		curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlProgressCallback);
 		curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress_state);
+		ConfigureCurlTrustStore(curl);
 
 		auto start = std::chrono::steady_clock::now();
 		auto result = curl_easy_perform(curl);
