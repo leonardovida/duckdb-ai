@@ -2856,7 +2856,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"azure", "openai_chat", "gpt-4o", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
 	    {"anthropic", "anthropic_messages", "claude-haiku-4-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
 	     true},
-	    {"bedrock", "openai_chat", "openai.gpt-oss-120b-1:0", "", "", "AWS_BEDROCK_API_KEY", true},
+	    {"bedrock", "openai_chat", "openai.gpt-oss-120b", "", "", "AWS_BEDROCK_API_KEY", true},
 	    {"cerebras", "openai_chat", "gpt-oss-120b", "", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", true},
 	    {"cloudflare", "openai_chat", "@cf/zai-org/glm-4.7-flash", "@cf/baai/bge-base-en-v1.5", "",
 	     "CLOUDFLARE_API_KEY", true},

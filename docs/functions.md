@@ -1141,7 +1141,7 @@ Supported provider names and aliases are:
 | `openai` | none | Yes | Yes | `gpt-4o-mini` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
-| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b-1:0` |
+| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b` |
 | `cerebras` | `cerebras_cloud` | Yes | No | `gpt-oss-120b` |
 | `cloudflare` | `workers_ai`, `cloudflare_workers_ai`, `cloudflare_ai` | Yes | Yes | `@cf/zai-org/glm-4.7-flash` |
 | `cohere` | `cohere_ai` | Yes | Yes | `command-a-plus-05-2026` |

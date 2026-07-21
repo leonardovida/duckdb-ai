@@ -188,7 +188,7 @@ SELECT contains(ai_embedding_request_json('duck', provider := 'workers_ai'), '"m
 true	true	true
 
 query I
-SELECT contains(ai_completion_request_json('hello', provider := 'groq'), '"model":"openai/gpt-oss-20b"') AND contains(ai_completion_request_json('hello', provider := 'github'), '"model":"openai/gpt-4o"') AND contains(ai_completion_request_json('hello', provider := 'bedrock'), '"model":"openai.gpt-oss-120b-1:0"') AND contains(ai_completion_request_json('hello', provider := 'vertex'), '"model":"google/gemini-2.5-flash"');
+SELECT contains(ai_completion_request_json('hello', provider := 'groq'), '"model":"openai/gpt-oss-20b"') AND contains(ai_completion_request_json('hello', provider := 'github'), '"model":"openai/gpt-4o"') AND contains(ai_completion_request_json('hello', provider := 'bedrock'), '"model":"openai.gpt-oss-120b"') AND contains(ai_completion_request_json('hello', provider := 'vertex'), '"model":"google/gemini-2.5-flash"');
 ----
 true
 
