@@ -37,7 +37,7 @@ LIMIT 1;
 | `openai` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
 | `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
 | `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
-| `bedrock` | OpenAI-compatible chat | `openai.gpt-oss-120b-1:0` | `AWS_BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `BEDROCK_API_KEY` | Set `AWS_REGION`, `AWS_BEDROCK_REGION`, `AWS_BEDROCK_BASE_URL`, or secret `BASE_URL`. |
+| `bedrock` | OpenAI-compatible chat | `openai.gpt-oss-120b` | `AWS_BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `BEDROCK_API_KEY` | Set `AWS_REGION`, `AWS_BEDROCK_REGION`, `AWS_BEDROCK_BASE_URL`, or secret `BASE_URL`. |
 | `cerebras` | OpenAI-compatible chat | `gpt-oss-120b` | `CEREBRAS_API_KEY` | Defaults to `https://api.cerebras.ai/v1`. |
 | `cloudflare` / `workers_ai` | OpenAI-compatible chat and embeddings | `@cf/zai-org/glm-4.7-flash`; embeddings use `@cf/baai/bge-base-en-v1.5` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_API_TOKEN`, or `CLOUDFLARE_AUTH_TOKEN` | Derives the endpoint from `CLOUDFLARE_ACCOUNT_ID`, or accepts `CLOUDFLARE_WORKERS_AI_BASE_URL`, `CLOUDFLARE_AI_BASE_URL`, or secret `BASE_URL`. |
 | `cohere` | OpenAI-compatible chat and embeddings | `command-a-plus-05-2026`; embeddings use `embed-v4.0` | `COHERE_API_KEY` | Defaults to `https://api.cohere.ai/compatibility/v1`. |
@@ -1037,7 +1037,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET bedrock_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'bedrock',
-    MODEL 'openai.gpt-oss-120b-1:0'
+    MODEL 'openai.gpt-oss-120b'
 );
 
 SELECT ai_complete(

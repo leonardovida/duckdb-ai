@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Corrected the Amazon Bedrock Mantle default model ID for OpenAI-compatible
+  Chat Completions requests.
+- Refreshed the documentation lockfile to resolve the `body-parser` size-limit
+  advisory without changing direct package ranges.
+
 ## 0.4.14 - 2026-07-21
 
 ### Fixed

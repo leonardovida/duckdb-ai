@@ -1229,6 +1229,7 @@ def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
         SELECT ai_provider_protocol('sambanova_ai') AS sambanova_protocol;
         SELECT ai_provider_protocol('silicon_flow') AS siliconflow_protocol;
         SELECT ai_provider_protocol('x.ai') AS xai_protocol;
+        SELECT ai_completion_request_json('hello bedrock', provider := 'aws_bedrock') AS bedrock_request;
         SELECT ai_completion_request_json('hello qwen', provider := 'qwen') AS dashscope_request;
         SELECT ai_completion_request_json('hello kimi', provider := 'kimi') AS moonshot_request;
         SELECT ai_completion_request_json('hello ark', provider := 'ark') AS volcengine_request;
@@ -1278,6 +1279,7 @@ def assert_provider_metadata(output: str):
         "siliconflow_protocol",
         "xai_protocol",
         "openai_chat",
+        '"model":"openai.gpt-oss-120b"',
         '"model":"qwen-plus"',
         '"model":"kimi-k2.7-code"',
         '"model":"doubao-seed-2-1-pro-260628"',
