@@ -2901,7 +2901,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"siliconflow", "openai_chat", "Qwen/Qwen2.5-72B-Instruct", "", "https://api.siliconflow.com/v1",
 	     "SILICONFLOW_API_KEY", true},
 	    {"snowflake", "openai_chat", "claude-sonnet-4-5", "", "", "SNOWFLAKE_PAT", true},
-	    {"stepfun", "openai_chat", "step-3.7-flash", "", "https://api.stepfun.ai/v1", "STEPFUN_API_KEY", true},
+	    {"stepfun", "openai_chat", "step-3.5-flash", "", "https://api.stepfun.com/v1", "STEPFUN_API_KEY", true},
 	    {"together", "openai_chat", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "BAAI/bge-base-en-v1.5",
 	     "https://api.together.xyz/v1", "TOGETHER_API_KEY", true},
 	    {"vercel", "openai_chat", "openai/gpt-4o-mini", "openai/text-embedding-3-small",

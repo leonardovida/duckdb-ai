@@ -1233,6 +1233,7 @@ def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
         SELECT ai_completion_request_json('hello qwen', provider := 'qwen') AS dashscope_request;
         SELECT ai_completion_request_json('hello kimi', provider := 'kimi') AS moonshot_request;
         SELECT ai_completion_request_json('hello ark', provider := 'ark') AS volcengine_request;
+        SELECT ai_completion_request_json('hello stepfun', provider := 'step') AS stepfun_request;
         SELECT ai_embedding_request_json('hello cloudflare', provider := 'workers_ai') AS cloudflare_embedding_request;
         SELECT ai_completion_request_json('hello nvidia', provider := 'nvidia_nim') AS nvidia_request;
     """
@@ -1268,7 +1269,7 @@ def assert_provider_metadata(output: str):
         "https://api.moonshot.ai/v1",
         "https://qianfan.baidubce.com/v2",
         "https://tokenhub.tencentmaas.com/v1",
-        "https://api.stepfun.ai/v1",
+        "https://api.stepfun.com/v1",
         "https://ai-gateway.vercel.sh/v1",
         "https://ark.cn-beijing.volces.com/api/v3",
         "github_protocol",
@@ -1283,6 +1284,7 @@ def assert_provider_metadata(output: str):
         '"model":"qwen-plus"',
         '"model":"kimi-k2.7-code"',
         '"model":"doubao-seed-2-1-pro-260628"',
+        '"model":"step-3.5-flash"',
         '"model":"@cf/baai/bge-base-en-v1.5"',
         '"model":"meta/llama-3.3-70b-instruct"',
     ]

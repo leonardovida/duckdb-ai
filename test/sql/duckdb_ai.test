@@ -175,7 +175,7 @@ openai_chat@https://api.moonshot.ai/v1|openai_chat@https://qianfan.baidubce.com/
 query I
 SELECT ai_provider_protocol('step') || '@' || ai_provider_base_url('step') || '|' || ai_provider_protocol('mini_max') || '@' || ai_provider_base_url('mini_max') || '|' || ai_provider_protocol('poe') || '@' || ai_provider_base_url('poe') || '|' || ai_provider_protocol('doubao') || '@' || ai_provider_base_url('doubao');
 ----
-openai_chat@https://api.stepfun.ai/v1|openai_chat@https://api.minimax.io/v1|openai_chat@https://api.poe.com/v1|openai_chat@https://ark.cn-beijing.volces.com/api/v3
+openai_chat@https://api.stepfun.com/v1|openai_chat@https://api.minimax.io/v1|openai_chat@https://api.poe.com/v1|openai_chat@https://ark.cn-beijing.volces.com/api/v3
 
 query IIII
 SELECT contains(ai_embedding_request_json('duck', provider := 'cohere'), '"model":"embed-v4.0"'), contains(ai_embedding_request_json('duck', provider := 'together'), '"model":"BAAI/bge-base-en-v1.5"'), contains(ai_embedding_request_json('duck', provider := 'deepinfra'), '"model":"BAAI/bge-large-en-v1.5"'), contains(ai_embedding_request_json('duck', provider := 'fireworks'), '"model":"nomic-ai/nomic-embed-text-v1.5"');
@@ -203,7 +203,7 @@ SELECT contains(ai_completion_request_json('hello', provider := 'workers_ai'), '
 true
 
 query I
-SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hy3"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.7-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M2.7"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
+SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hy3"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.5-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M2.7"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
 ----
 true
 
