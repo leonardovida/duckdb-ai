@@ -65,7 +65,7 @@ LIMIT 1;
 | `sambanova` | OpenAI-compatible chat | `Meta-Llama-3.3-70B-Instruct` | `SAMBANOVA_API_KEY` | Defaults to `https://api.sambanova.ai/v1`. |
 | `siliconflow` | OpenAI-compatible chat | `Qwen/Qwen2.5-72B-Instruct` | `SILICONFLOW_API_KEY` | Defaults to `https://api.siliconflow.com/v1`. |
 | `together` | OpenAI-compatible chat and embeddings | `meta-llama/Llama-3.3-70B-Instruct-Turbo`; embeddings use `BAAI/bge-base-en-v1.5` | `TOGETHER_API_KEY` | Defaults to `https://api.together.xyz/v1`. |
-| `stepfun` / `step` | OpenAI-compatible chat | `step-3.7-flash` | `STEPFUN_API_KEY` or `STEP_API_KEY` | Defaults to `https://api.stepfun.ai/v1`. |
+| `stepfun` / `step` | OpenAI-compatible chat | `step-3.5-flash` | `STEPFUN_API_KEY` or `STEP_API_KEY` | Defaults to `https://api.stepfun.com/v1`. |
 | `vercel` / `vercel_ai_gateway` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `AI_GATEWAY_API_KEY`, `VERCEL_AI_GATEWAY_API_KEY`, or `VERCEL_OIDC_TOKEN` | Defaults to `https://ai-gateway.vercel.sh/v1`. |
 | `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-2.5-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
 | `volcengine` / `doubao` | OpenAI-compatible chat | `doubao-seed-2-1-pro-260628` | `VOLCENGINE_API_KEY`, `ARK_API_KEY`, or `DOUBAO_API_KEY` | Defaults to `https://ark.cn-beijing.volces.com/api/v3`. |
@@ -806,7 +806,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET stepfun_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'step',
-    MODEL 'step-3.7-flash'
+    MODEL 'step-3.5-flash'
 );
 
 SELECT ai_complete(

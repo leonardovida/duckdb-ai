@@ -1167,7 +1167,7 @@ Supported provider names and aliases are:
 | `sambanova` | `sambanova_ai`, `samba_nova`, `sambacloud` | Yes | No | `Meta-Llama-3.3-70B-Instruct` |
 | `siliconflow` | `silicon_flow` | Yes | No | `Qwen/Qwen2.5-72B-Instruct` |
 | `snowflake` | none | Yes | No | `claude-sonnet-4-5` |
-| `stepfun` | `step`, `step_fun` | Yes | No | `step-3.7-flash` |
+| `stepfun` | `step`, `step_fun` | Yes | No | `step-3.5-flash` |
 | `together` | `together_ai` | Yes | Yes | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
 | `vercel` | `vercel_ai_gateway`, `vercel_gateway`, `ai_gateway` | Yes | Yes | `openai/gpt-4o-mini` |
 | `vertex` | `google_vertex`, `vertex_ai`, `gcp_vertex` | Yes | No | `google/gemini-2.5-flash` |

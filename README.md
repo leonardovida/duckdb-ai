@@ -379,7 +379,7 @@ End-to-end setup examples for each provider are in
 | `sambanova` | SambaNova Cloud hosted open-weight models | `https://api.sambanova.ai/v1`; `SAMBANOVA_API_KEY` |
 | `siliconflow` | SiliconFlow hosted open-weight models | `https://api.siliconflow.com/v1`; `SILICONFLOW_API_KEY` |
 | `snowflake` | Snowflake Cortex REST Chat Completions API | Set `BASE_URL`, `SNOWFLAKE_ACCOUNT_URL`, or `SNOWFLAKE_ACCOUNT`; `SNOWFLAKE_PAT` |
-| `stepfun` / `step` | StepFun OpenAI-compatible models | `https://api.stepfun.ai/v1`; `STEPFUN_API_KEY` or `STEP_API_KEY` |
+| `stepfun` / `step` | StepFun OpenAI-compatible models | `https://api.stepfun.com/v1`; `STEPFUN_API_KEY` or `STEP_API_KEY` |
 | `together` | Together AI hosted open-weight chat and embedding models | `https://api.together.xyz/v1`; `TOGETHER_API_KEY` |
 | `vercel` / `vercel_ai_gateway` | Vercel AI Gateway multi-provider routing | `https://ai-gateway.vercel.sh/v1`; `AI_GATEWAY_API_KEY` |
 | `vertex` / `google_vertex` | Google Vertex AI OpenAI-compatible endpoints | Set `BASE_URL` or `GOOGLE_CLOUD_PROJECT`; `VERTEX_AI_ACCESS_TOKEN` or `GOOGLE_CLOUD_ACCESS_TOKEN` |

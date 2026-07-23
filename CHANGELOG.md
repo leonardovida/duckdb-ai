@@ -11,8 +11,12 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 - Corrected the Amazon Bedrock Mantle default model ID for OpenAI-compatible
   Chat Completions requests.
+- Restored StepFun's direct API default to the documented `step-3.5-flash`
+  model and canonical `https://api.stepfun.com/v1` endpoint.
 - Refreshed the documentation lockfile to resolve the `body-parser` size-limit
   advisory without changing direct package ranges.
+- Updated the documentation lockfile to React 19.2.8 and patched `fast-uri`
+  3.1.4, resolving its URI validation denial-of-service advisory.
 
 ## 0.4.14 - 2026-07-21
 
