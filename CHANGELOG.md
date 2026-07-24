@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Changed
+
+- Updated the local DuckDB and extension CI tooling to the 1.5.5 bugfix,
+  performance, and security patch release.
+- Updated Gemini's completion default and built-in pricing to stable
+  `gemini-3.6-flash`, omitting sampling parameters that the model deprecates.
+
 ### Fixed
 
 - Corrected the Amazon Bedrock Mantle default model ID for OpenAI-compatible

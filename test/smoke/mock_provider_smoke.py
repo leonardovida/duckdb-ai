@@ -1234,6 +1234,12 @@ def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
         SELECT ai_completion_request_json('hello kimi', provider := 'kimi') AS moonshot_request;
         SELECT ai_completion_request_json('hello ark', provider := 'ark') AS volcengine_request;
         SELECT ai_completion_request_json('hello stepfun', provider := 'step') AS stepfun_request;
+        SELECT ai_completion_request_json('hello gemini', provider := 'gemini') AS gemini_request;
+        SELECT CASE
+            WHEN contains(ai_completion_request_json('hello gemini', provider := 'gemini', temperature := 0.7), '"temperature"')
+                THEN 'gemini_sampling_parameter_present'
+            ELSE 'gemini_sampling_parameter_omitted'
+        END AS gemini_sampling_contract;
         SELECT ai_embedding_request_json('hello cloudflare', provider := 'workers_ai') AS cloudflare_embedding_request;
         SELECT ai_completion_request_json('hello nvidia', provider := 'nvidia_nim') AS nvidia_request;
     """
@@ -1285,6 +1291,8 @@ def assert_provider_metadata(output: str):
         '"model":"kimi-k2.7-code"',
         '"model":"doubao-seed-2-1-pro-260628"',
         '"model":"step-3.5-flash"',
+        '"model":"gemini-3.6-flash"',
+        "gemini_sampling_parameter_omitted",
         '"model":"@cf/baai/bge-base-en-v1.5"',
         '"model":"meta/llama-3.3-70b-instruct"',
     ]

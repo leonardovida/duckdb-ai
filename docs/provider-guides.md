@@ -44,7 +44,7 @@ LIMIT 1;
 | `dashscope` / `qwen` | OpenAI-compatible chat and embeddings | `qwen-plus`; embeddings use `text-embedding-v4` | `DASHSCOPE_API_KEY`, `ALIBABA_API_KEY`, or `QWEN_API_KEY` | Defaults to `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; override with a workspace-specific base URL when needed. |
 | `deepinfra` | OpenAI-compatible chat and embeddings | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`; embeddings use `BAAI/bge-large-en-v1.5` | `DEEPINFRA_API_KEY` | Defaults to `https://api.deepinfra.com/v1/openai`. |
 | `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/llama-v3p1-8b-instruct`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
-| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.5-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
+| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.6-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
 | `github` / `github_models` | OpenAI-compatible chat and embeddings | `openai/gpt-4o`; embeddings use `openai/text-embedding-3-small` | `GITHUB_TOKEN`, `GITHUB_MODELS_TOKEN`, or `GITHUB_API_KEY` | Defaults to `https://models.github.ai/inference`. |
 | `groq` | OpenAI-compatible chat | `openai/gpt-oss-20b` | `GROQ_API_KEY` | Defaults to `https://api.groq.com/openai/v1`. |
 | `huggingface` / `hf` | OpenAI-compatible chat | `openai/gpt-oss-120b` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | Defaults to `https://router.huggingface.co/v1`. |
@@ -236,7 +236,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET gemini_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'gemini',
-    MODEL 'gemini-3.5-flash'
+    MODEL 'gemini-3.6-flash'
 );
 
 SELECT ai_complete(
@@ -252,6 +252,8 @@ SELECT ai_embed(
 ```
 
 Provider aliases `gcp`, `google`, and `google_gemini` also resolve to Gemini.
+Gemini 3.6 Flash deprecates sampling parameters, so `duckdb_ai` omits
+`temperature` for this model even when the generic SQL option is provided.
 
 ## Mistral
 
