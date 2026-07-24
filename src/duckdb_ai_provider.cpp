@@ -3662,12 +3662,6 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	if (config.protocol == "anthropic_messages") {
 		ValidateResponseSchema(options);
 		auto format = NormalizeResponseFormat(options);
-		if (!options.response_schema.empty()) {
-			throw InvalidInputException(
-			    "AI option \"response_schema\" is not supported for provider \"%s\". Use an OpenAI-compatible or "
-			    "Ollama provider for enforced JSON Schema output.",
-			    config.provider);
-		}
 		if (format == "json_schema" && options.response_schema.empty()) {
 			throw InvalidInputException(
 			    "AI option \"response_schema\" must be provided when response_format is json_schema");
@@ -3684,6 +3678,10 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 		}
 		if (options.has_temperature) {
 			payload += ",\"temperature\":" + JsonDouble(options.temperature);
+		}
+		if (!options.response_schema.empty()) {
+			payload +=
+			    ",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":" + options.response_schema + "}}";
 		}
 		payload += ",\"messages\":[{\"role\":\"user\",\"content\":\"" + JsonEscape(prompt) + "\"}]}";
 		return payload;

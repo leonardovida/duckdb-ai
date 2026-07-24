@@ -430,6 +430,11 @@ SELECT contains(request, '"type":"array"') AND contains(request, '"type":"boolea
 true
 
 query I
+SELECT contains(request, '"output_config":{"format":{"type":"json_schema","schema":{"type":"object","properties"') AND NOT contains(request, '"response_format"') FROM (SELECT ai_completion_request_json('extract', provider := 'anthropic', model := 'claude-haiku-4-5', response_schema := '{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}') AS request);
+----
+true
+
+query I
 SELECT contains(request, '"response_format":{"type":"json_object","schema":{"type":"object"') AND NOT contains(request, '"json_schema"') FROM (SELECT ai_completion_request_json('extract', provider := 'cohere', model := 'command-test', response_schema := '{"type":"object","properties":{"summary":{"type":"string"}}}') AS request);
 ----
 true

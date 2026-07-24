@@ -9,6 +9,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Fixed
 
+- Sent JSON Schema completion requests to Anthropic through the current
+  `output_config.format` structured-output shape instead of rejecting them.
 - Corrected the Amazon Bedrock Mantle default model ID for OpenAI-compatible
   Chat Completions requests.
 - Restored StepFun's direct API default to the documented `step-3.5-flash`
