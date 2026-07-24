@@ -216,10 +216,22 @@ SELECT ai_summarize(
     secret := 'claude_ai',
     max_tokens := 80
 ) AS summary;
+
+SELECT ai_complete_json(
+    'Extract DuckDB as a database profile.',
+    secret := 'claude_ai',
+    response_schema := '{
+      "type": "object",
+      "properties": {"name": {"type": "string"}},
+      "required": ["name"],
+      "additionalProperties": false
+    }'
+) AS profile;
 ```
 
-Claude is configured for completion calls. Embeddings are not configured for this
-provider.
+For `response_schema := ...`, the extension sends Anthropic's
+`output_config.format` JSON Schema request shape. Claude is configured for
+completion calls; embeddings are not configured for this provider.
 
 ## Gemini
 

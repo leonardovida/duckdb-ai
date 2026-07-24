@@ -1083,7 +1083,7 @@ not from direct API key arguments.
 | `on_error` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Error handling mode: `fail`, `null`, or `capture`. `capture` is used by `ai_try_complete`; scalar/table functions that cannot return an error field use `NULL` behavior. |
 | `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Compatibility alias: `true` maps to `on_error := 'fail'`, `false` maps to `on_error := 'null'`. |
 | `response_format` | `VARCHAR` | Completion and SQL assistant | `text`, `json_object`, or `json_schema`. |
-| `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for structured output hints and validation. |
+| `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for provider-enforced structured output where supported, including OpenAI-compatible APIs, Anthropic, Cohere, llama.cpp, and Ollama, plus local response validation. |
 | `input_token_price_per_million` | `DOUBLE` | Completion, embedding, SQL assistant, aggregate | Manual input-token price for cost estimation. |
 | `output_token_price_per_million` | `DOUBLE` | Completion, SQL assistant, aggregate | Manual output-token price for cost estimation. |
 | `use_builtin_model_prices` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables lookup from `ai_model_prices()` when manual prices are not supplied. |

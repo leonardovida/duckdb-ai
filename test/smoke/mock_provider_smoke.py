@@ -617,6 +617,12 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             system_prompt := 'be exact',
             max_tokens := 13
         ) AS claude_completion;
+        SELECT ai_completion_request_json(
+            'extract structured claude output',
+            provider := 'anthropic',
+            model := 'claude-haiku-4-5',
+            response_schema := '{{"type":"object","properties":{{"summary":{{"type":"string"}}}},"required":["summary"],"additionalProperties":false}}'
+        ) AS claude_structured_request;
         SELECT ai_complete(
             'builtin pricing smoke',
             model := 'gpt-5.4-mini',
@@ -1313,6 +1319,7 @@ def assert_smoke_result(output: str):
         "mock retry completion",
         "mock ollama completion",
         "mock claude completion",
+        '"output_config":{"format":{"type":"json_schema","schema":{"type":"object"',
         "gpt-5.4-mini",
         "This query returns a single row with 42.",
         "SELECT 42",
