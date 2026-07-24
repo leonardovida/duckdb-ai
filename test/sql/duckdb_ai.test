@@ -42,6 +42,11 @@ SELECT provider, model, operation, printf('%.2f', input_token_price_per_million)
 ----
 gemini	gemini-3.5-flash	completion	1.50	9.00
 
+query IIIII
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'gemini' AND model = 'gemini-3.6-flash';
+----
+gemini	gemini-3.6-flash	completion	1.50	7.50
+
 query IIII
 SELECT provider, model, operation, printf('%.2f', input_token_price_per_million) FROM ai_model_prices() WHERE provider = 'gemini' AND model = 'gemini-embedding-2';
 ----
@@ -133,7 +138,7 @@ SELECT ai_provider_protocol('gemini') || '@' || ai_provider_base_url('gemini') |
 openai_chat@https://generativelanguage.googleapis.com/v1beta/openai|openai_chat@https://api.mistral.ai/v1|openai_chat@https://api.z.ai/api/paas/v4|openai_chat@https://api.deepseek.com|openai_chat@https://openrouter.ai/api/v1
 
 query IIII
-SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model":"glm-4.7-flash"'), contains(ai_completion_request_json('hello', provider := 'deepseek'), '"model":"deepseek-v4-flash"'), contains(ai_completion_request_json('hello', provider := 'gemini'), '"model":"gemini-3.5-flash"'), contains(ai_embedding_request_json('duck', provider := 'gemini'), '"model":"gemini-embedding-2"');
+SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model":"glm-4.7-flash"'), contains(ai_completion_request_json('hello', provider := 'deepseek'), '"model":"deepseek-v4-flash"'), contains(ai_completion_request_json('hello', provider := 'gemini'), '"model":"gemini-3.6-flash"'), contains(ai_embedding_request_json('duck', provider := 'gemini'), '"model":"gemini-embedding-2"');
 ----
 true	true	true	true
 
@@ -364,6 +369,11 @@ true
 
 query I
 SELECT contains(ai_completion_request_json('hello', provider := 'openai', temperature := 0.7, max_tokens := 42), '"temperature":0.7,"max_completion_tokens":42') AND NOT contains(ai_completion_request_json('hello', provider := 'openai', max_tokens := 42), '"max_tokens"');
+----
+true
+
+query I
+SELECT NOT contains(ai_completion_request_json('hello', provider := 'gemini', temperature := 0.7), '"temperature"') AND NOT contains(ai_completion_request_json('hello', provider := 'gemini', model := 'gemini-3.5-flash-lite', temperature := 0.7), '"temperature"');
 ----
 true
 

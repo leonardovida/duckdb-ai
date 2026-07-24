@@ -912,6 +912,8 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
 	    {"gemini", "gemini-3.5-flash", "completion", 1.50, 9.00, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text token pricing", "2026-07-08"},
+	    {"gemini", "gemini-3.6-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
+	     "standard text token pricing", "2026-07-24"},
 	    {"gemini", "gemini-embedding-2", "embedding", 0.20, -1, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text embedding input tokens only", "2026-07-17"},
 	    {"mistral", "mistral-small-latest", "completion", 0.15, 0.60, "https://mistral.ai/pricing/api/",
@@ -2870,7 +2872,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"deepseek", "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
 	    {"fireworks", "openai_chat", "accounts/fireworks/models/llama-v3p1-8b-instruct",
 	     "nomic-ai/nomic-embed-text-v1.5", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", true},
-	    {"gemini", "openai_chat", "gemini-3.5-flash", "gemini-embedding-2",
+	    {"gemini", "openai_chat", "gemini-3.6-flash", "gemini-embedding-2",
 	     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", true},
 	    {"github", "openai_chat", "openai/gpt-4o", "openai/text-embedding-3-small",
 	     "https://models.github.ai/inference", "GITHUB_TOKEN", true},
@@ -3638,6 +3640,11 @@ std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
 
+bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
+	return config.provider == "gemini" &&
+	       (config.model == "gemini-3.6-flash" || config.model == "gemini-3.5-flash-lite");
+}
+
 std::string OllamaFormatJson(const CompletionOptions &options) {
 	ValidateResponseSchema(options);
 	if (!options.response_schema.empty()) {
@@ -3711,10 +3718,12 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 		payload += "}";
 		return payload;
 	}
-	auto temperature = options.has_temperature ? options.temperature : 0.1;
-	auto payload = "{\"model\":\"" + escaped_model +
-	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt) +
-	               ",\"temperature\":" + JsonDouble(temperature);
+	auto payload =
+	    "{\"model\":\"" + escaped_model + "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt);
+	if (!GeminiOmitsSamplingParameters(config)) {
+		auto temperature = options.has_temperature ? options.temperature : 0.1;
+		payload += ",\"temperature\":" + JsonDouble(temperature);
+	}
 	if (options.has_max_tokens) {
 		if (config.provider == "openai" || config.provider == "cloudflare" || config.provider == "minimax" ||
 		    config.provider == "moonshot" || config.provider == "snowflake") {
