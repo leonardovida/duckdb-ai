@@ -2199,24 +2199,26 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	}
 }
 
-std::string RequiredRecordStringInput(const TableFunctionBindInput &input, idx_t index, const std::string &name) {
+std::string RequiredTableStringInput(const TableFunctionBindInput &input, idx_t index, const std::string &name,
+                                     const std::string &function_name) {
 	if (index >= input.inputs.size()) {
-		throw BinderException("ai_complete_record requires a %s argument", name);
+		throw BinderException("%s requires a %s argument", function_name, name);
 	}
 	auto &value = input.inputs[index];
 	if (value.IsNull()) {
-		throw BinderException("ai_complete_record %s argument must not be NULL", name);
+		throw BinderException("%s %s argument must not be NULL", function_name, name);
 	}
 	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 }
 
-std::string OptionalRecordStringInput(const TableFunctionBindInput &input, idx_t index) {
+std::string OptionalTableStringInput(const TableFunctionBindInput &input, idx_t index,
+                                     const std::string &function_name) {
 	if (index >= input.inputs.size()) {
 		return "";
 	}
 	auto &value = input.inputs[index];
 	if (value.IsNull()) {
-		throw BinderException("ai_complete_record positional options must not be NULL");
+		throw BinderException("%s positional options must not be NULL", function_name);
 	}
 	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 }
@@ -2380,16 +2382,16 @@ unique_ptr<FunctionData> AiRecordBind(ClientContext &context, TableFunctionBindI
 	auto bind_data = make_uniq<AiRecordBindData>();
 	ApplySettings(context, bind_data->options, AiModelSettingKind::COMPLETION);
 	StampProviderFunction(bind_data->options, "ai_complete_record");
-	bind_data->prompt = RequiredRecordStringInput(input, 0, "prompt");
-	bind_data->response_schema = RequiredRecordStringInput(input, 1, "response_schema");
+	bind_data->prompt = RequiredTableStringInput(input, 0, "prompt", "ai_complete_record");
+	bind_data->response_schema = RequiredTableStringInput(input, 1, "response_schema", "ai_complete_record");
 	ValidateResponseSchemaValue(bind_data->response_schema, "ai_complete_record");
 	bind_data->options.response_schema = bind_data->response_schema;
 	bind_data->options.response_format = "json_schema";
 	if (input.inputs.size() > 2) {
-		bind_data->options.model = OptionalRecordStringInput(input, 2);
+		bind_data->options.model = OptionalTableStringInput(input, 2, "ai_complete_record");
 	}
 	if (input.inputs.size() > 3) {
-		bind_data->options.provider = OptionalRecordStringInput(input, 3);
+		bind_data->options.provider = OptionalTableStringInput(input, 3, "ai_complete_record");
 	}
 	for (auto &named_parameter : input.named_parameters) {
 		ApplyAiRecordValueOption(bind_data->options, LowerAscii(named_parameter.first), named_parameter.second);
@@ -5423,28 +5425,6 @@ unique_ptr<TableRef> ParseReadOnlySubquery(const std::string &sql, const ParserO
 	return make_uniq<SubqueryRef>(std::move(select));
 }
 
-std::string RequiredTableStringInput(const TableFunctionBindInput &input, idx_t index, const std::string &name) {
-	if (index >= input.inputs.size()) {
-		throw BinderException("ai_query_data requires a %s argument", name);
-	}
-	auto &value = input.inputs[index];
-	if (value.IsNull()) {
-		throw BinderException("ai_query_data %s argument must not be NULL", name);
-	}
-	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-}
-
-std::string OptionalTableStringInput(const TableFunctionBindInput &input, idx_t index) {
-	if (index >= input.inputs.size()) {
-		return "";
-	}
-	auto &value = input.inputs[index];
-	if (value.IsNull()) {
-		throw BinderException("ai_query_data positional options must not be NULL");
-	}
-	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-}
-
 void ApplyPromptQueryValueOption(duckdb_ai::CompletionOptions &options, std::string &schema_context,
                                  PromptSchemaOptions &schema_options, int64_t &fix_attempts, const std::string &name,
                                  const Value &value_p) {
@@ -5572,15 +5552,15 @@ unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctio
 	ApplySettings(context, options, AiModelSettingKind::SQL_ASSISTANT);
 	StampProviderFunction(options, "ai_query_data");
 	duckdb_ai::AttachProviderRuntimeState(options, context);
-	auto question = RequiredTableStringInput(input, 0, "question");
-	auto schema_context = OptionalTableStringInput(input, 1);
+	auto question = RequiredTableStringInput(input, 0, "question", "ai_query_data");
+	auto schema_context = OptionalTableStringInput(input, 1, "ai_query_data");
 	PromptSchemaOptions schema_options;
 	int64_t fix_attempts = 0;
 	if (input.inputs.size() > 2) {
-		options.model = OptionalTableStringInput(input, 2);
+		options.model = OptionalTableStringInput(input, 2, "ai_query_data");
 	}
 	if (input.inputs.size() > 3) {
-		options.provider = OptionalTableStringInput(input, 3);
+		options.provider = OptionalTableStringInput(input, 3, "ai_query_data");
 	}
 	for (auto &named_parameter : input.named_parameters) {
 		ApplyPromptQueryValueOption(options, schema_context, schema_options, fix_attempts,
@@ -5819,30 +5799,6 @@ void PromptSchemaFunction(ClientContext &context, TableFunctionInput &input, Dat
 	duckdb_ai::RecordLocalUsageEvent(&context, "ai_schema_prompt", 0, static_cast<int64_t>(summary.size()));
 }
 
-std::string RequiredAssistantStringInput(const TableFunctionBindInput &input, idx_t index, const std::string &name,
-                                         const std::string &function_name) {
-	if (index >= input.inputs.size()) {
-		throw BinderException("%s requires a %s argument", function_name, name);
-	}
-	auto &value = input.inputs[index];
-	if (value.IsNull()) {
-		throw BinderException("%s %s argument must not be NULL", function_name, name);
-	}
-	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-}
-
-std::string OptionalAssistantStringInput(const TableFunctionBindInput &input, idx_t index,
-                                         const std::string &function_name) {
-	if (index >= input.inputs.size()) {
-		return "";
-	}
-	auto &value = input.inputs[index];
-	if (value.IsNull()) {
-		throw BinderException("%s positional options must not be NULL", function_name);
-	}
-	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
-}
-
 void ApplyPromptAssistantValueOption(PromptAssistantBindData &bind_data, PromptSchemaOptions &schema_options,
                                      bool &has_include_tables, bool &has_error, const std::string &function_name,
                                      const std::string &name, const Value &value_p) {
@@ -5946,11 +5902,11 @@ unique_ptr<FunctionData> PromptAssistantBindInternal(ClientContext &context, Tab
 		                      kind == PromptAssistantKind::FIX_LINE ? "one SQL argument and optional error argument"
 		                                                            : "one SQL argument");
 	}
-	bind_data->sql = RequiredAssistantStringInput(input, 0, "sql", function_name);
+	bind_data->sql = RequiredTableStringInput(input, 0, "sql", function_name);
 
 	bool has_error = false;
 	if (kind == PromptAssistantKind::FIX_LINE && input.inputs.size() > 1) {
-		bind_data->error_message = OptionalAssistantStringInput(input, 1, function_name);
+		bind_data->error_message = OptionalTableStringInput(input, 1, function_name);
 		has_error = true;
 	}
 
