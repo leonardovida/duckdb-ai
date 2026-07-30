@@ -208,9 +208,19 @@ SELECT contains(ai_completion_request_json('hello', provider := 'workers_ai'), '
 true
 
 query I
-SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hy3"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.5-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M2.7"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
+SELECT contains(ai_completion_request_json('hello', provider := 'kimi'), '"model":"kimi-k3"') AND contains(ai_completion_request_json('hello', provider := 'baidu'), '"model":"ernie-4.5-turbo-128k"') AND contains(ai_completion_request_json('hello', provider := 'hunyuan'), '"model":"hy3"') AND contains(ai_completion_request_json('hello', provider := 'step_fun'), '"model":"step-3.5-flash"') AND contains(ai_completion_request_json('hello', provider := 'minimax'), '"model":"MiniMax-M2.7"') AND contains(ai_completion_request_json('hello', provider := 'poe'), '"model":"GPT-5.4"') AND contains(ai_completion_request_json('hello', provider := 'ark'), '"model":"doubao-seed-2-1-pro-260628"');
 ----
 true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'kimi', model := 'kimi-k3'), '"model":"kimi-k3"') AND contains(ai_completion_request_json('hello', provider := 'kimi', model := 'kimi-k2.7-code'), '"model":"kimi-k2.7-code"') AND contains(ai_completion_request_json('hello', provider := 'kimi', model := 'kimi-k2.7-code-highspeed'), '"model":"kimi-k2.7-code-highspeed"') AND contains(ai_completion_request_json('hello', provider := 'kimi', model := 'kimi-k2.6'), '"model":"kimi-k2.6"') AND contains(ai_completion_request_json('hello', provider := 'kimi', model := 'kimi-k2.5'), '"model":"kimi-k2.5"') AND contains(ai_completion_request_json('hello', provider := 'kimi', model := 'moonshot-v1-128k'), '"model":"moonshot-v1-128k"') AND NOT contains(ai_completion_request_json('hello', provider := 'kimi'), '"temperature"');
+----
+true
+
+query IIII
+SELECT contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/models/deepseek-v3p1'), '"model":"accounts/fireworks/models/deepseek-v3p1"'), contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/routers/kimi-k2p6-turbo'), '"model":"accounts/fireworks/routers/kimi-k2p6-turbo"') AND NOT contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/routers/kimi-k2p6-turbo'), '"temperature"'), contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/example/deployments/custom-chat'), '"model":"accounts/example/deployments/custom-chat"'), contains(ai_embedding_request_json('duck', provider := 'fireworks', model := 'fireworks/qwen3-embedding-8b'), '"model":"fireworks/qwen3-embedding-8b"');
+----
+true	true	true	true
 
 query I
 SELECT contains(ai_completion_request_json('hello', provider := 'x.ai'), '"model":"grok-4.5"');
@@ -368,7 +378,7 @@ SELECT contains(ai_completion_request_json('hello', provider := 'anthropic', sys
 true
 
 query I
-SELECT contains(ai_completion_request_json('hello', provider := 'openai', temperature := 0.7, max_tokens := 42), '"temperature":0.7,"max_completion_tokens":42') AND NOT contains(ai_completion_request_json('hello', provider := 'openai', max_tokens := 42), '"max_tokens"');
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', temperature := 0.7, max_tokens := 42), '"temperature":0.7,"max_completion_tokens":42') AND NOT contains(ai_completion_request_json('hello', provider := 'openai', max_tokens := 42), '"max_tokens"') AND NOT contains(ai_completion_request_json('hello', provider := 'openai', max_tokens := 42), '"temperature"');
 ----
 true
 
@@ -467,12 +477,12 @@ SELECT ai_completion_request_json('redact email alice@example.com', provider := 
 query I
 SELECT ai_completion_request_json('hello databricks', provider := 'databricks');
 ----
-{"model":"databricks-gpt-oss-120b","messages":[{"role":"user","content":"hello databricks"}],"temperature":0.1}
+{"model":"databricks-gpt-oss-120b","messages":[{"role":"user","content":"hello databricks"}]}
 
 query I
 SELECT ai_completion_request_json('hello snowflake', provider := 'snowflake');
 ----
-{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello snowflake"}],"temperature":0.1}
+{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello snowflake"}]}
 
 statement ok
 SET duckdb_ai_provider = 'openai';

@@ -51,7 +51,7 @@ LIMIT 1;
 | `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat through Tencent TokenHub | `hy3` | `HUNYUAN_API_KEY`, `TOKENHUB_API_KEY`, or `TENCENT_TOKENHUB_API_KEY` | Defaults to `https://tokenhub.tencentmaas.com/v1`; `TOKENHUB_BASE_URL` selects another TokenHub region. |
 | `minimax` | OpenAI-compatible chat | `MiniMax-M2.7` | `MINIMAX_API_KEY` or `MINI_MAX_API_KEY` | Defaults to `https://api.minimax.io/v1`. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
-| `moonshot` / `kimi` | OpenAI-compatible chat | `kimi-k2.7-code` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Defaults to `https://api.moonshot.ai/v1`. |
+| `moonshot` / `kimi` | OpenAI-compatible chat | `kimi-k3` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Defaults to `https://api.moonshot.ai/v1`. |
 | `nebius` / `nebius_token_factory` | OpenAI-compatible chat | `meta-llama/Meta-Llama-3.1-70B-Instruct` | `NEBIUS_API_KEY` or `TOKEN_FACTORY_API_KEY` | Defaults to `https://api.tokenfactory.nebius.com/v1`. |
 | `nvidia` / `nvidia_nim` | OpenAI-compatible chat | `meta/llama-3.3-70b-instruct` | `NVIDIA_API_KEY` | Defaults to `https://integrate.api.nvidia.com/v1`. |
 | `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4.7-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://api.z.ai/api/paas/v4`. |
@@ -471,6 +471,12 @@ SELECT ai_embed(
 )[1] AS first_embedding_value;
 ```
 
+Fireworks model IDs are passed through unchanged. This supports serverless base
+models such as `accounts/fireworks/models/deepseek-v3p1`, fast routers such as
+`accounts/fireworks/routers/kimi-k2p6-turbo`, account deployments, and embedding
+models such as `fireworks/qwen3-embedding-8b`. Use a model ID available to the
+configured Fireworks account.
+
 ## DeepInfra
 
 ```sh
@@ -742,7 +748,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET kimi_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'kimi',
-    MODEL 'kimi-k2.7-code'
+    MODEL 'kimi-k3'
 );
 
 SELECT ai_complete(
@@ -752,7 +758,10 @@ SELECT ai_complete(
 ```
 
 Aliases `moonshot`, `kimi`, `moonshot_ai`, and `kimi_api` resolve to the same
-provider. Embeddings are not configured for this provider.
+provider. The current Kimi chat model IDs are passed through unchanged, including
+`kimi-k3`, `kimi-k2.7-code`, `kimi-k2.7-code-highspeed`, `kimi-k2.6`, and
+`kimi-k2.5`. Moonshot V1 model IDs are also accepted while they remain available
+to the configured account. Embeddings are not configured for this provider.
 
 ## Baidu Qianfan / ERNIE
 

@@ -1064,7 +1064,7 @@ not from direct API key arguments.
 | `model` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Provider model name. |
 | `provider` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Provider name or alias. |
 | `profile`, `secret`, `secret_name` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | DuckDB secret name or profile. |
-| `temperature` | `DOUBLE` | Completion, SQL assistant, aggregate | Sampling temperature between 0 and 2. |
+| `temperature` | `DOUBLE` | Completion, SQL assistant, aggregate | Optional sampling temperature between 0 and 2. When omitted, the provider or model default is used. |
 | `system_prompt` | `VARCHAR` | Completion, SQL assistant, aggregate | Optional system message for providers that support chat-style payloads. |
 | `max_tokens` | `BIGINT` | Completion, SQL assistant, aggregate | Maximum provider output tokens. Must be greater than 0. OpenAI, Cloudflare, MiniMax, Moonshot/Kimi, and Snowflake requests emit the current `max_completion_tokens` API field; other compatible providers retain `max_tokens`. |
 | `base_url` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Provider or gateway base URL override. |
@@ -1157,7 +1157,7 @@ Supported provider names and aliases are:
 | `hunyuan` | `tencent`, `tencent_hunyuan` | Yes | No | `hy3` |
 | `minimax` | `mini_max` | Yes | No | `MiniMax-M2.7` |
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
-| `moonshot` | `kimi`, `moonshot_ai`, `kimi_api` | Yes | No | `kimi-k2.7-code` |
+| `moonshot` | `kimi`, `moonshot_ai`, `kimi_api` | Yes | No | `kimi-k3` |
 | `nebius` | `nebius_token_factory`, `token_factory` | Yes | No | `meta-llama/Meta-Llama-3.1-70B-Instruct` |
 | `nvidia` | `nvidia_nim`, `nim` | Yes | No | `meta/llama-3.3-70b-instruct` |
 | `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |

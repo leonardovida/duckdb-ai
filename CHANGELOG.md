@@ -13,6 +13,10 @@ include SQL API changes and patch versions should preserve the SQL API.
   performance, and security patch release.
 - Updated Gemini's completion default and built-in pricing to stable
   `gemini-3.6-flash`, omitting sampling parameters that the model deprecates.
+- Updated Kimi's default completion model to `kimi-k3`.
+- Stopped injecting a generic sampling temperature when callers omit it, so
+  model-specific provider defaults remain valid across Kimi, Fireworks, and
+  other OpenAI-compatible catalogs.
 
 ### Fixed
 

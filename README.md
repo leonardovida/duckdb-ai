@@ -387,6 +387,13 @@ End-to-end setup examples for each provider are in
 | `xai` / `grok` | xAI Grok chat models | `https://api.x.ai/v1`; `XAI_API_KEY` |
 | `zai` | Z.ai / BigModel chat models | `https://api.z.ai/api/paas/v4`; `ZAI_API_KEY` |
 
+Provider model catalogs are dynamic. The `model` option is passed through to the
+selected provider instead of being restricted to the documented default, so
+current text/chat model IDs, Fireworks routers and account deployments, and
+provider embedding IDs can be selected without an extension update. The
+extension does not expose provider-specific image, video, or audio generation
+APIs.
+
 You can configure providers three ways:
 
 ```sql
