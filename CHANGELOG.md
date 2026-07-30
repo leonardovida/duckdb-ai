@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.15 - 2026-07-30
+
 ### Changed
 
 - Updated the local DuckDB and extension CI tooling to the 1.5.5 bugfix,
