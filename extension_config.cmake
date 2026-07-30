@@ -3,7 +3,7 @@
 # Extension from this repo
 duckdb_extension_load(ai
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
-    EXTENSION_VERSION 0.4.14
+    EXTENSION_VERSION 0.4.15
 )
 
 # Any extra extensions that should be built
