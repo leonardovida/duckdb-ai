@@ -2883,7 +2883,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"minimax", "openai_chat", "MiniMax-M2.7", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
 	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
 	     "MISTRAL_API_KEY", true},
-	    {"moonshot", "openai_chat", "kimi-k2.7-code", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
+	    {"moonshot", "openai_chat", "kimi-k3", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
 	    {"nebius", "openai_chat", "meta-llama/Meta-Llama-3.1-70B-Instruct", "",
 	     "https://api.tokenfactory.nebius.com/v1", "NEBIUS_API_KEY", true},
 	    {"nvidia", "openai_chat", "meta/llama-3.3-70b-instruct", "", "https://integrate.api.nvidia.com/v1",
@@ -3720,9 +3720,8 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	}
 	auto payload =
 	    "{\"model\":\"" + escaped_model + "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt);
-	if (!GeminiOmitsSamplingParameters(config)) {
-		auto temperature = options.has_temperature ? options.temperature : 0.1;
-		payload += ",\"temperature\":" + JsonDouble(temperature);
+	if (options.has_temperature && !GeminiOmitsSamplingParameters(config)) {
+		payload += ",\"temperature\":" + JsonDouble(options.temperature);
 	}
 	if (options.has_max_tokens) {
 		if (config.provider == "openai" || config.provider == "cloudflare" || config.provider == "minimax" ||
