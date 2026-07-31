@@ -7,6 +7,12 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Changed
+
+- Updated the OpenAI completion default from `gpt-4o-mini` to
+  `gpt-5.6-luna` for stronger quality at a cost-efficient GPT-5.6 tier. Explicit
+  per-call, secret, environment, and session model overrides remain unchanged.
+
 ## 0.4.16 - 2026-07-31
 
 ### Fixed

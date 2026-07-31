@@ -1089,7 +1089,6 @@ def run_duckdb_openai_prompt_cache(duckdb_path: Path, base_url: str) -> str:
         SELECT ai_complete(
             'changing row prompt',
             provider := 'openai',
-            model := 'gpt-5.6',
             base_url := '{base_url}',
             system_prompt := repeat('stable prefix ', 100),
             prompt_cache := true
@@ -1132,6 +1131,8 @@ def assert_openai_prompt_cache(output: str):
         )
 
     current_request, older_request = MockProviderHandler.completion_requests
+    if current_request.get("model") != "gpt-5.6-luna":
+        raise AssertionError(f"unexpected OpenAI default model: {current_request}")
     current_system_content = current_request["messages"][0]["content"]
     if (
         not isinstance(current_system_content, list)

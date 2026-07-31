@@ -143,6 +143,11 @@ SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model"
 true	true	true	true
 
 query I
+SELECT contains(ai_completion_request_json('hello', provider := 'openai'), '"model":"gpt-5.6-luna"');
+----
+true
+
+query I
 SELECT ai_provider_protocol('groq') || '@' || ai_provider_base_url('groq') || '|' || ai_provider_protocol('together') || '@' || ai_provider_base_url('together') || '|' || ai_provider_protocol('fireworks') || '@' || ai_provider_base_url('fireworks') || '|' || ai_provider_protocol('deepinfra') || '@' || ai_provider_base_url('deepinfra');
 ----
 openai_chat@https://api.groq.com/openai/v1|openai_chat@https://api.together.xyz/v1|openai_chat@https://api.fireworks.ai/inference/v1|openai_chat@https://api.deepinfra.com/v1/openai

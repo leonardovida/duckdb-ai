@@ -109,7 +109,7 @@ CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'openai',
     API_KEY '...',
-    MODEL 'gpt-4o-mini'
+    MODEL 'gpt-5.6-luna'
 );
 
 SELECT ai_complete(
@@ -399,7 +399,7 @@ You can configure providers three ways:
 ```sql
 -- Session defaults.
 SET duckdb_ai_provider = 'openai';
-SET duckdb_ai_model = 'gpt-4o-mini';
+SET duckdb_ai_model = 'gpt-5.6-luna';
 SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 SET duckdb_ai_timeout_seconds = 120;
 
@@ -435,10 +435,10 @@ to different models. These override `duckdb_ai_model`, and per-call `model := ..
 still overrides both:
 
 ```sql
-SET duckdb_ai_completion_model = 'gpt-4o-mini';
-SET duckdb_ai_task_model = 'gpt-4o-mini';
-SET duckdb_ai_aggregate_model = 'gpt-4o-mini';
-SET duckdb_ai_sql_assistant_model = 'gpt-4o';
+SET duckdb_ai_completion_model = 'gpt-5.6-luna';
+SET duckdb_ai_task_model = 'gpt-5.6-luna';
+SET duckdb_ai_aggregate_model = 'gpt-5.6-luna';
+SET duckdb_ai_sql_assistant_model = 'gpt-5.6-luna';
 SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 ```
 
