@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Replaced Together AI's retired default embedding model with the current
+  `intfloat/multilingual-e5-large-instruct` serverless model.
+- Rejected structured-output options for Poe Chat Completions instead of
+  sending a `response_format` field that Poe ignores.
+
 ## 0.4.15 - 2026-07-30
 
 ### Changed

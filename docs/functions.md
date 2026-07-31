@@ -1082,8 +1082,8 @@ not from direct API key arguments.
 | `allowed_hosts` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Comma-separated provider/logging host allowlist. Entries may be hostnames, `host:port`, full URLs, `*.example.com`, or `*`. |
 | `on_error` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Error handling mode: `fail`, `null`, or `capture`. `capture` is used by `ai_try_complete`; scalar/table functions that cannot return an error field use `NULL` behavior. |
 | `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Compatibility alias: `true` maps to `on_error := 'fail'`, `false` maps to `on_error := 'null'`. |
-| `response_format` | `VARCHAR` | Completion and SQL assistant | `text`, `json_object`, or `json_schema`. |
-| `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for provider-enforced structured output where supported, including OpenAI-compatible APIs, Anthropic, Cohere, llama.cpp, and Ollama, plus local response validation. |
+| `response_format` | `VARCHAR` | Completion and SQL assistant | `text`, `json_object`, or `json_schema`. Poe's Chat Completions API ignores this field, so non-text formats are rejected for that provider. |
+| `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for provider-enforced structured output where supported, including OpenAI-compatible APIs, Anthropic, Cohere, llama.cpp, and Ollama, plus local response validation. Poe is excluded because its Chat Completions API ignores `response_format`. |
 | `input_token_price_per_million` | `DOUBLE` | Completion, embedding, SQL assistant, aggregate | Manual input-token price for cost estimation. |
 | `output_token_price_per_million` | `DOUBLE` | Completion, SQL assistant, aggregate | Manual output-token price for cost estimation. |
 | `use_builtin_model_prices` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables lookup from `ai_model_prices()` when manual prices are not supplied. |
