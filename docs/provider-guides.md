@@ -64,7 +64,7 @@ LIMIT 1;
 | `qianfan` / `ernie` | OpenAI-compatible chat | `ernie-4.5-turbo-128k` | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY`, or `BAIDU_API_KEY` | Defaults to `https://qianfan.baidubce.com/v2`. |
 | `sambanova` | OpenAI-compatible chat | `Meta-Llama-3.3-70B-Instruct` | `SAMBANOVA_API_KEY` | Defaults to `https://api.sambanova.ai/v1`. |
 | `siliconflow` | OpenAI-compatible chat | `Qwen/Qwen2.5-72B-Instruct` | `SILICONFLOW_API_KEY` | Defaults to `https://api.siliconflow.com/v1`. |
-| `together` | OpenAI-compatible chat and embeddings | `meta-llama/Llama-3.3-70B-Instruct-Turbo`; embeddings use `BAAI/bge-base-en-v1.5` | `TOGETHER_API_KEY` | Defaults to `https://api.together.xyz/v1`. |
+| `together` | OpenAI-compatible chat and embeddings | `meta-llama/Llama-3.3-70B-Instruct-Turbo`; embeddings use `intfloat/multilingual-e5-large-instruct` | `TOGETHER_API_KEY` | Defaults to `https://api.together.xyz/v1`. |
 | `stepfun` / `step` | OpenAI-compatible chat | `step-3.5-flash` | `STEPFUN_API_KEY` or `STEP_API_KEY` | Defaults to `https://api.stepfun.com/v1`. |
 | `vercel` / `vercel_ai_gateway` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `AI_GATEWAY_API_KEY`, `VERCEL_AI_GATEWAY_API_KEY`, or `VERCEL_OIDC_TOKEN` | Defaults to `https://ai-gateway.vercel.sh/v1`. |
 | `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-2.5-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
@@ -439,7 +439,7 @@ SELECT ai_complete(
 SELECT ai_embed(
     'DuckDB vector search',
     secret := 'together_ai',
-    model := 'BAAI/bge-base-en-v1.5'
+    model := 'intfloat/multilingual-e5-large-instruct'
 )[1] AS first_embedding_value;
 ```
 
@@ -889,7 +889,10 @@ SELECT ai_complete(
 ```
 
 Aliases `poe` and `poe_api` resolve to the same provider. Embeddings are not
-configured for this provider.
+configured for this provider. Poe's Chat Completions compatibility layer ignores
+`response_format`, so `duckdb_ai` rejects non-text `response_format` values and
+`response_schema` for this provider instead of promising unenforced structured
+output.
 
 ## Volcengine Ark / Doubao
 

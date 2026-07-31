@@ -1346,6 +1346,8 @@ def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
             provider := 'fireworks',
             model := 'fireworks/qwen3-embedding-8b'
         ) AS fireworks_embedding_request;
+        SELECT ai_embedding_request_json('hello together embedding', provider := 'together')
+            AS together_embedding_request;
         SELECT ai_completion_request_json('hello ark', provider := 'ark') AS volcengine_request;
         SELECT ai_completion_request_json('hello stepfun', provider := 'step') AS stepfun_request;
         SELECT ai_completion_request_json('hello gemini', provider := 'gemini') AS gemini_request;
@@ -1407,6 +1409,7 @@ def assert_provider_metadata(output: str):
         '"model":"accounts/fireworks/routers/kimi-k2p6-turbo"',
         '"model":"accounts/example/deployments/custom-chat"',
         '"model":"fireworks/qwen3-embedding-8b"',
+        '"model":"intfloat/multilingual-e5-large-instruct"',
         "fireworks_provider_default_temperature",
         '"model":"doubao-seed-2-1-pro-260628"',
         '"model":"step-3.5-flash"',

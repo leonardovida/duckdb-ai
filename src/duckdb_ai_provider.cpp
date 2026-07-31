@@ -2904,8 +2904,8 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "SILICONFLOW_API_KEY", true},
 	    {"snowflake", "openai_chat", "claude-sonnet-4-5", "", "", "SNOWFLAKE_PAT", true},
 	    {"stepfun", "openai_chat", "step-3.5-flash", "", "https://api.stepfun.com/v1", "STEPFUN_API_KEY", true},
-	    {"together", "openai_chat", "meta-llama/Llama-3.3-70B-Instruct-Turbo", "BAAI/bge-base-en-v1.5",
-	     "https://api.together.xyz/v1", "TOGETHER_API_KEY", true},
+	    {"together", "openai_chat", "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+	     "intfloat/multilingual-e5-large-instruct", "https://api.together.xyz/v1", "TOGETHER_API_KEY", true},
 	    {"vercel", "openai_chat", "openai/gpt-4o-mini", "openai/text-embedding-3-small",
 	     "https://ai-gateway.vercel.sh/v1", "AI_GATEWAY_API_KEY", true},
 	    {"vertex", "openai_chat", "google/gemini-2.5-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
@@ -3653,6 +3653,18 @@ bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
 	       (config.model == "gemini-3.6-flash" || config.model == "gemini-3.5-flash-lite");
 }
 
+void ValidateProviderResponseFormat(const ProviderConfig &config, const CompletionOptions &options) {
+	if (config.provider != "poe") {
+		return;
+	}
+	ValidateResponseSchema(options);
+	auto format = NormalizeResponseFormat(options);
+	if (!options.response_schema.empty() || (!format.empty() && format != "text")) {
+		throw InvalidInputException(
+		    "AI provider \"poe\" does not support response_format or response_schema in Chat Completions");
+	}
+}
+
 bool OpenAIUsesExplicitPromptCache(const ProviderConfig &config, const CompletionOptions &options) {
 	auto model = LowerAscii(config.model);
 	return config.provider == "openai" && PromptCacheEnabled(options) && !options.system_prompt.empty() &&
@@ -3747,6 +3759,7 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 		}
 	}
 	std::string response_format;
+	ValidateProviderResponseFormat(config, options);
 	if (config.provider == "cohere") {
 		response_format = CohereResponseFormatJson(options);
 	} else if (config.provider == "llamacpp") {
