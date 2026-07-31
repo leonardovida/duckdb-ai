@@ -2853,7 +2853,7 @@ std::string ProviderSpecificEnvPrefix(const std::string &provider) {
 const std::vector<ProviderSpec> &ProviderCatalog() {
 	static const std::vector<ProviderSpec> providers {
 	    {"ollama", "ollama_chat", "llama3.2", "nomic-embed-text", "http://localhost:11434", "OLLAMA_API_KEY", false},
-	    {"openai", "openai_chat", "gpt-4o-mini", "text-embedding-3-small", "https://api.openai.com/v1",
+	    {"openai", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "https://api.openai.com/v1",
 	     "OPENAI_API_KEY", true},
 	    {"azure", "openai_chat", "gpt-4o", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
 	    {"anthropic", "anthropic_messages", "claude-haiku-4-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",

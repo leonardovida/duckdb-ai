@@ -34,7 +34,7 @@ LIMIT 1;
 | Provider | Protocol | Default model | Credentials | Base URL behavior |
 | --- | --- | --- | --- | --- |
 | `ollama` | Ollama chat and embeddings | `llama3.2`; embeddings use `nomic-embed-text` | Optional `OLLAMA_API_KEY` | Defaults to `http://localhost:11434`; `OLLAMA_HOST` overrides it. |
-| `openai` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
+| `openai` | OpenAI-compatible chat and embeddings | `gpt-5.6-luna`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
 | `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
 | `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
 | `bedrock` | OpenAI-compatible chat | `openai.gpt-oss-120b` | `AWS_BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `BEDROCK_API_KEY` | Set `AWS_REGION`, `AWS_BEDROCK_REGION`, `AWS_BEDROCK_BASE_URL`, or secret `BASE_URL`. |
@@ -126,7 +126,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'openai',
-    MODEL 'gpt-4o-mini'
+    MODEL 'gpt-5.6-luna'
 );
 
 SELECT ai_complete(

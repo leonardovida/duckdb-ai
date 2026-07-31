@@ -1138,7 +1138,7 @@ Supported provider names and aliases are:
 | Provider | Aliases | Completion support | Embedding support | Default completion model |
 | --- | --- | --- | --- | --- |
 | `ollama` | none | Yes | Yes | `llama3.2` |
-| `openai` | none | Yes | Yes | `gpt-4o-mini` |
+| `openai` | none | Yes | Yes | `gpt-5.6-luna` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
 | `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b` |
@@ -1182,7 +1182,7 @@ Session defaults can be configured with DuckDB settings:
 
 ```sql
 SET duckdb_ai_provider = 'openai';
-SET duckdb_ai_model = 'gpt-4o-mini';
+SET duckdb_ai_model = 'gpt-5.6-luna';
 SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 SET duckdb_ai_base_url = 'https://api.openai.com/v1';
 SET duckdb_ai_timeout_seconds = 120;
@@ -1217,7 +1217,7 @@ CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'openai',
     API_KEY '...',
-    MODEL 'gpt-4o-mini'
+    MODEL 'gpt-5.6-luna'
 );
 
 SELECT ai_complete('hello', secret := 'openai_ai');
