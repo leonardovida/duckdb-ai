@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.16 - 2026-07-31
+
 ### Fixed
 
 - Marked stable OpenAI GPT-5.6 system-message prefixes with explicit prompt
