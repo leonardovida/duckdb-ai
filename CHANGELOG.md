@@ -7,6 +7,14 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Marked stable OpenAI GPT-5.6 system-message prefixes with explicit prompt
+  cache breakpoints, preventing changing row prompts from causing unnecessary
+  billable cache writes.
+- Updated the documentation lockfile to `brace-expansion` 5.0.9 and
+  `@types/react` 19.2.18, resolving the remaining dependency audit advisory.
+
 ## 0.4.15 - 2026-07-30
 
 ### Changed

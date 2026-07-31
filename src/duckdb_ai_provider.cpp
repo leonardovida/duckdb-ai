@@ -3542,11 +3542,19 @@ std::string RequestEndpoint(const ProviderConfig &config) {
 	return config.base_url + "/chat/completions";
 }
 
-std::string ChatMessagesJson(const std::string &prompt, const std::string &system_prompt) {
+std::string ChatMessagesJson(const std::string &prompt, const std::string &system_prompt,
+                             bool explicit_system_cache_breakpoint = false) {
 	auto escaped_prompt = JsonEscape(prompt);
 	std::string messages = "[";
 	if (!system_prompt.empty()) {
-		messages += "{\"role\":\"system\",\"content\":\"" + JsonEscape(system_prompt) + "\"},";
+		messages += "{\"role\":\"system\",\"content\":";
+		if (explicit_system_cache_breakpoint) {
+			messages += "[{\"type\":\"text\",\"text\":\"" + JsonEscape(system_prompt) +
+			            "\",\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}}]";
+		} else {
+			messages += "\"" + JsonEscape(system_prompt) + "\"";
+		}
+		messages += "},";
 	}
 	messages += "{\"role\":\"user\",\"content\":\"" + escaped_prompt + "\"}]";
 	return messages;
@@ -3645,6 +3653,12 @@ bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
 	       (config.model == "gemini-3.6-flash" || config.model == "gemini-3.5-flash-lite");
 }
 
+bool OpenAIUsesExplicitPromptCache(const ProviderConfig &config, const CompletionOptions &options) {
+	auto model = LowerAscii(config.model);
+	return config.provider == "openai" && PromptCacheEnabled(options) && !options.system_prompt.empty() &&
+	       (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-"));
+}
+
 std::string OllamaFormatJson(const CompletionOptions &options) {
 	ValidateResponseSchema(options);
 	if (!options.response_schema.empty()) {
@@ -3718,8 +3732,9 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 		payload += "}";
 		return payload;
 	}
-	auto payload =
-	    "{\"model\":\"" + escaped_model + "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt);
+	auto explicit_openai_prompt_cache = OpenAIUsesExplicitPromptCache(config, options);
+	auto payload = "{\"model\":\"" + escaped_model +
+	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt, explicit_openai_prompt_cache);
 	if (options.has_temperature && !GeminiOmitsSamplingParameters(config)) {
 		payload += ",\"temperature\":" + JsonDouble(options.temperature);
 	}
@@ -3746,6 +3761,9 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 		auto prompt_cache_key = PromptCacheKey(config, options);
 		if (!prompt_cache_key.empty()) {
 			payload += ",\"prompt_cache_key\":\"" + JsonEscape(prompt_cache_key) + "\"";
+		}
+		if (explicit_openai_prompt_cache) {
+			payload += ",\"prompt_cache_options\":{\"mode\":\"explicit\"}";
 		}
 	}
 	payload += "}";
