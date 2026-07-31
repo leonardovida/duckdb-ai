@@ -372,6 +372,11 @@ SELECT contains(ai_completion_request_json('hello', provider := 'openai', system
 ----
 true
 
+query III
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-5.6', system_prompt := 'system', prompt_cache := true), '"content":[{"type":"text","text":"system","prompt_cache_breakpoint":{"mode":"explicit"}}]'), contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-5.6-sol', system_prompt := 'system', prompt_cache := true), '"prompt_cache_options":{"mode":"explicit"}'), NOT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-5.5', system_prompt := 'system', prompt_cache := true), '"prompt_cache_breakpoint"');
+----
+true	true	true
+
 query I
 SELECT contains(ai_completion_request_json('hello', provider := 'anthropic', system_prompt := 'system', prompt_cache := true), '"cache_control":{"type":"ephemeral"}');
 ----
