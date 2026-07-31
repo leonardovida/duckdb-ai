@@ -11,6 +11,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 
+def message_text(message):
+    content = message["content"]
+    if isinstance(content, str):
+        return content
+    return "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
+
+
 class MockProviderHandler(BaseHTTPRequestHandler):
     request_lock = threading.Lock()
     completion_requests = []
@@ -68,8 +75,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 self.xai_conversation_headers.append(self.headers.get("x-grok-conv-id"))
             request = json.loads(body)
             self.completion_requests.append(request)
-            prompt = request["messages"][-1]["content"]
-            full_prompt = "\n".join(message["content"] for message in request["messages"])
+            prompt = message_text(request["messages"][-1])
+            full_prompt = "\n".join(message_text(message) for message in request["messages"])
             concurrency_group = None
             if prompt.startswith("cap one "):
                 concurrency_group = "cap_one"
@@ -1075,6 +1082,75 @@ def assert_openrouter_headers(output: str):
         raise AssertionError(f"unexpected OpenRouter referer headers: {MockProviderHandler.openrouter_referer_headers}")
     if MockProviderHandler.openrouter_title_headers != ["DuckDB AI smoke"]:
         raise AssertionError(f"unexpected OpenRouter title headers: {MockProviderHandler.openrouter_title_headers}")
+
+
+def run_duckdb_openai_prompt_cache(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT ai_complete(
+            'changing row prompt',
+            provider := 'openai',
+            model := 'gpt-5.6',
+            base_url := '{base_url}',
+            system_prompt := repeat('stable prefix ', 100),
+            prompt_cache := true
+        );
+        SELECT ai_complete(
+            'older model prompt',
+            provider := 'openai',
+            model := 'gpt-5.5',
+            base_url := '{base_url}',
+            system_prompt := repeat('stable prefix ', 100),
+            prompt_cache := true
+        );
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "openai-test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb OpenAI prompt-cache smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_openai_prompt_cache(output: str):
+    if output.count("mock completion") != 2:
+        raise AssertionError(f"duckdb OpenAI prompt-cache output missing completions\n{output}")
+    if MockProviderHandler.authorization_headers != ["Bearer openai-test-key"] * 2:
+        raise AssertionError(
+            f"unexpected OpenAI prompt-cache authorization headers: {MockProviderHandler.authorization_headers}"
+        )
+    if len(MockProviderHandler.completion_requests) != 2:
+        raise AssertionError(
+            f"expected two OpenAI prompt-cache completion requests, got {MockProviderHandler.completion_requests}"
+        )
+
+    current_request, older_request = MockProviderHandler.completion_requests
+    current_system_content = current_request["messages"][0]["content"]
+    if (
+        not isinstance(current_system_content, list)
+        or len(current_system_content) != 1
+        or current_system_content[0].get("type") != "text"
+        or current_system_content[0].get("prompt_cache_breakpoint") != {"mode": "explicit"}
+    ):
+        raise AssertionError(f"unexpected GPT-5.6 system cache breakpoint: {current_request}")
+    if current_request.get("prompt_cache_options") != {"mode": "explicit"}:
+        raise AssertionError(f"unexpected GPT-5.6 prompt cache policy: {current_request}")
+    if not current_request.get("prompt_cache_key", "").startswith("duckdb-ai-"):
+        raise AssertionError(f"missing GPT-5.6 prompt cache key: {current_request}")
+
+    if not isinstance(older_request["messages"][0]["content"], str):
+        raise AssertionError(f"older OpenAI model system prompt shape changed: {older_request}")
+    if "prompt_cache_breakpoint" in json.dumps(older_request) or "prompt_cache_options" in older_request:
+        raise AssertionError(f"older OpenAI model received unsupported cache controls: {older_request}")
+    if not older_request.get("prompt_cache_key", "").startswith("duckdb-ai-"):
+        raise AssertionError(f"missing older-model prompt cache key: {older_request}")
 
 
 def run_duckdb_xai_prompt_cache_header(duckdb_path: Path, base_url: str) -> str:
@@ -2373,6 +2449,9 @@ def main():
         MockProviderHandler.reset()
         openrouter_headers_output = run_duckdb_openrouter_headers(args.duckdb, f"http://127.0.0.1:{port}")
         assert_openrouter_headers(openrouter_headers_output)
+        MockProviderHandler.reset()
+        openai_prompt_cache_output = run_duckdb_openai_prompt_cache(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_openai_prompt_cache(openai_prompt_cache_output)
         MockProviderHandler.reset()
         xai_header_output = run_duckdb_xai_prompt_cache_header(args.duckdb, f"http://127.0.0.1:{port}")
         assert_xai_prompt_cache_header(xai_header_output)
