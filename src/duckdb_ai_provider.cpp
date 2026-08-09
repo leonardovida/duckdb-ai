@@ -4166,11 +4166,11 @@ void PushUsageEvent(ProviderRuntimeState &state, UsageEvent event) {
 	}
 }
 
-void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionResult &result,
-                      const CompletionOptions &options) {
-	UsageEvent event;
+UsageEvent BaseProviderUsageEvent(const ProviderConfig &config, const CompletionOptions &options,
+                                  const std::string &event_name, int64_t prompt_chars, int64_t input_chars) {
+	UsageEvent event {};
 	event.created_at = CurrentTimestamp();
-	event.event = "ai_completion";
+	event.event = event_name;
 	event.function_name = options.function_name;
 	event.query_id = options.query_id;
 	event.operation_id = options.operation_id;
@@ -4178,10 +4178,24 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 	event.provider = config.provider;
 	event.protocol = config.protocol;
 	event.model = config.model;
-	event.prompt_chars = static_cast<int64_t>(prompt.size());
-	event.response_chars = static_cast<int64_t>(result.text.size());
-	event.input_chars = -1;
+	event.prompt_chars = prompt_chars;
+	event.response_chars = 0;
+	event.input_chars = input_chars;
 	event.dimensions = -1;
+	event.prompt_tokens = -1;
+	event.completion_tokens = -1;
+	event.total_tokens = -1;
+	event.cached_prompt_tokens = -1;
+	event.cache_creation_prompt_tokens = -1;
+	event.elapsed_ms = -1;
+	event.estimated_cost_usd = -1;
+	return event;
+}
+
+void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionResult &result,
+                      const CompletionOptions &options) {
+	auto event = BaseProviderUsageEvent(config, options, "ai_completion", static_cast<int64_t>(prompt.size()), -1);
+	event.response_chars = static_cast<int64_t>(result.text.size());
 	event.prompt_tokens = result.prompt_tokens;
 	event.completion_tokens = result.completion_tokens;
 	event.total_tokens = result.total_tokens;
@@ -4199,56 +4213,21 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 
 void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options,
                             long http_status, const std::string &error, int64_t retries) {
-	UsageEvent event;
-	event.created_at = CurrentTimestamp();
-	event.event = "ai_completion";
-	event.function_name = options.function_name;
-	event.query_id = options.query_id;
-	event.operation_id = options.operation_id;
-	event.parent_operation_id = options.parent_operation_id;
-	event.provider = config.provider;
-	event.protocol = config.protocol;
-	event.model = config.model;
-	event.prompt_chars = static_cast<int64_t>(prompt.size());
-	event.response_chars = 0;
-	event.input_chars = -1;
-	event.dimensions = -1;
-	event.prompt_tokens = -1;
-	event.completion_tokens = -1;
-	event.total_tokens = -1;
-	event.cached_prompt_tokens = -1;
-	event.cache_creation_prompt_tokens = -1;
-	event.elapsed_ms = -1;
+	auto event = BaseProviderUsageEvent(config, options, "ai_completion", static_cast<int64_t>(prompt.size()), -1);
 	event.retries = retries;
 	event.http_status = http_status;
-	event.cache_hit = false;
 	event.status = "error";
 	event.error = error;
-	event.estimated_cost_usd = -1;
 	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
 void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input, const EmbeddingResult &result,
                                const CompletionOptions &options, int64_t dimensions = -1) {
-	UsageEvent event;
-	event.created_at = CurrentTimestamp();
-	event.event = "ai_embedding";
-	event.function_name = options.function_name;
-	event.query_id = options.query_id;
-	event.operation_id = options.operation_id;
-	event.parent_operation_id = options.parent_operation_id;
-	event.provider = config.provider;
-	event.protocol = config.protocol;
-	event.model = config.model;
-	event.prompt_chars = static_cast<int64_t>(input.size());
-	event.response_chars = 0;
-	event.input_chars = static_cast<int64_t>(input.size());
+	auto input_chars = static_cast<int64_t>(input.size());
+	auto event = BaseProviderUsageEvent(config, options, "ai_embedding", input_chars, input_chars);
 	event.dimensions = dimensions >= 0 ? dimensions : static_cast<int64_t>(result.values.size());
 	event.prompt_tokens = result.prompt_tokens;
-	event.completion_tokens = -1;
 	event.total_tokens = result.total_tokens;
-	event.cached_prompt_tokens = -1;
-	event.cache_creation_prompt_tokens = -1;
 	event.elapsed_ms = result.elapsed_ms;
 	event.retries = result.retries;
 	event.http_status = result.http_status;
@@ -4262,32 +4241,12 @@ void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &
 void RecordFailedEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input,
                                      const CompletionOptions &options, long http_status, const std::string &error,
                                      int64_t retries) {
-	UsageEvent event;
-	event.created_at = CurrentTimestamp();
-	event.event = "ai_embedding";
-	event.function_name = options.function_name;
-	event.query_id = options.query_id;
-	event.operation_id = options.operation_id;
-	event.parent_operation_id = options.parent_operation_id;
-	event.provider = config.provider;
-	event.protocol = config.protocol;
-	event.model = config.model;
-	event.prompt_chars = static_cast<int64_t>(input.size());
-	event.response_chars = 0;
-	event.input_chars = static_cast<int64_t>(input.size());
-	event.dimensions = -1;
-	event.prompt_tokens = -1;
-	event.completion_tokens = -1;
-	event.total_tokens = -1;
-	event.cached_prompt_tokens = -1;
-	event.cache_creation_prompt_tokens = -1;
-	event.elapsed_ms = -1;
+	auto input_chars = static_cast<int64_t>(input.size());
+	auto event = BaseProviderUsageEvent(config, options, "ai_embedding", input_chars, input_chars);
 	event.retries = retries;
 	event.http_status = http_status;
-	event.cache_hit = false;
 	event.status = "error";
 	event.error = error;
-	event.estimated_cost_usd = -1;
 	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
