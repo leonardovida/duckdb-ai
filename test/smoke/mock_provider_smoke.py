@@ -1321,6 +1321,10 @@ def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
             model := 'kimi-k2.7-code-highspeed'
         ) AS moonshot_highspeed_request;
         SELECT ai_completion_request_json(
+            'hello fireworks default',
+            provider := 'fireworks'
+        ) AS fireworks_default_request;
+        SELECT ai_completion_request_json(
             'hello fireworks router',
             provider := 'fireworks',
             model := 'accounts/fireworks/routers/kimi-k2p6-turbo'
@@ -1407,6 +1411,7 @@ def assert_provider_metadata(output: str):
         '"model":"qwen-plus"',
         '"model":"kimi-k3"',
         '"model":"kimi-k2.7-code-highspeed"',
+        '"model":"accounts/fireworks/models/gpt-oss-20b"',
         '"model":"accounts/fireworks/routers/kimi-k2p6-turbo"',
         '"model":"accounts/example/deployments/custom-chat"',
         '"model":"fireworks/qwen3-embedding-8b"',
