@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.17 - 2026-08-09
+
 ### Fixed
 
 - Replaced Fireworks AI's non-serverless completion default with the supported
