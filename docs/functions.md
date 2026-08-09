@@ -1149,7 +1149,7 @@ Supported provider names and aliases are:
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-gpt-oss-120b` |
 | `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo` |
 | `deepseek` | none | Yes | No | `deepseek-v4-flash` |
-| `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/llama-v3p1-8b-instruct` |
+| `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/gpt-oss-20b` |
 | `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.6-flash` |
 | `github` | `github_models`, `github-models`, `gh_models` | Yes | Yes | `openai/gpt-4o` |
 | `groq` | `groqcloud`, `groq_cloud` | Yes | No | `openai/gpt-oss-20b` |

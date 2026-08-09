@@ -208,6 +208,11 @@ SELECT contains(ai_completion_request_json('hello', provider := 'deepinfra'), '"
 true
 
 query I
+SELECT contains(ai_completion_request_json('hello', provider := 'fireworks'), '"model":"accounts/fireworks/models/gpt-oss-20b"') AND NOT contains(ai_completion_request_json('hello', provider := 'fireworks'), '"temperature"');
+----
+true
+
+query I
 SELECT contains(ai_completion_request_json('hello', provider := 'workers_ai'), '"model":"@cf/zai-org/glm-4.7-flash"') AND contains(ai_completion_request_json('hello', provider := 'qwen'), '"model":"qwen-plus"') AND contains(ai_completion_request_json('hello', provider := 'nebius'), '"model":"meta-llama/Meta-Llama-3.1-70B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'sambanova'), '"model":"Meta-Llama-3.3-70B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'siliconflow'), '"model":"Qwen/Qwen2.5-72B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'vercel'), '"model":"openai/gpt-4o-mini"');
 ----
 true
@@ -223,7 +228,7 @@ SELECT contains(ai_completion_request_json('hello', provider := 'kimi', model :=
 true
 
 query IIII
-SELECT contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/models/deepseek-v3p1'), '"model":"accounts/fireworks/models/deepseek-v3p1"'), contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/routers/kimi-k2p6-turbo'), '"model":"accounts/fireworks/routers/kimi-k2p6-turbo"') AND NOT contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/routers/kimi-k2p6-turbo'), '"temperature"'), contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/example/deployments/custom-chat'), '"model":"accounts/example/deployments/custom-chat"'), contains(ai_embedding_request_json('duck', provider := 'fireworks', model := 'fireworks/qwen3-embedding-8b'), '"model":"fireworks/qwen3-embedding-8b"');
+SELECT contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/models/gpt-oss-120b'), '"model":"accounts/fireworks/models/gpt-oss-120b"'), contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/routers/kimi-k2p6-turbo'), '"model":"accounts/fireworks/routers/kimi-k2p6-turbo"') AND NOT contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/fireworks/routers/kimi-k2p6-turbo'), '"temperature"'), contains(ai_completion_request_json('hello', provider := 'fireworks', model := 'accounts/example/deployments/custom-chat'), '"model":"accounts/example/deployments/custom-chat"'), contains(ai_embedding_request_json('duck', provider := 'fireworks', model := 'fireworks/qwen3-embedding-8b'), '"model":"fireworks/qwen3-embedding-8b"');
 ----
 true	true	true	true
 

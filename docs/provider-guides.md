@@ -43,7 +43,7 @@ LIMIT 1;
 | `cohere` | OpenAI-compatible chat and embeddings | `command-a-plus-05-2026`; embeddings use `embed-v4.0` | `COHERE_API_KEY` | Defaults to `https://api.cohere.ai/compatibility/v1`. |
 | `dashscope` / `qwen` | OpenAI-compatible chat and embeddings | `qwen-plus`; embeddings use `text-embedding-v4` | `DASHSCOPE_API_KEY`, `ALIBABA_API_KEY`, or `QWEN_API_KEY` | Defaults to `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; override with a workspace-specific base URL when needed. |
 | `deepinfra` | OpenAI-compatible chat and embeddings | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`; embeddings use `BAAI/bge-large-en-v1.5` | `DEEPINFRA_API_KEY` | Defaults to `https://api.deepinfra.com/v1/openai`. |
-| `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/llama-v3p1-8b-instruct`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
+| `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/gpt-oss-20b`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
 | `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.6-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
 | `github` / `github_models` | OpenAI-compatible chat and embeddings | `openai/gpt-4o`; embeddings use `openai/text-embedding-3-small` | `GITHUB_TOKEN`, `GITHUB_MODELS_TOKEN`, or `GITHUB_API_KEY` | Defaults to `https://models.github.ai/inference`. |
 | `groq` | OpenAI-compatible chat | `openai/gpt-oss-20b` | `GROQ_API_KEY` | Defaults to `https://api.groq.com/openai/v1`. |
@@ -456,7 +456,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET fireworks_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'fireworks',
-    MODEL 'accounts/fireworks/models/llama-v3p1-8b-instruct'
+    MODEL 'accounts/fireworks/models/gpt-oss-20b'
 );
 
 SELECT ai_complete(
@@ -472,7 +472,7 @@ SELECT ai_embed(
 ```
 
 Fireworks model IDs are passed through unchanged. This supports serverless base
-models such as `accounts/fireworks/models/deepseek-v3p1`, fast routers such as
+models such as `accounts/fireworks/models/gpt-oss-20b`, fast routers such as
 `accounts/fireworks/routers/kimi-k2p6-turbo`, account deployments, and embedding
 models such as `fireworks/qwen3-embedding-8b`. Use a model ID available to the
 configured Fireworks account.

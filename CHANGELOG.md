@@ -7,6 +7,14 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Replaced Fireworks AI's non-serverless completion default with the supported
+  `accounts/fireworks/models/gpt-oss-20b` serverless model.
+- Updated the documentation lockfile to patched `fast-uri`, `js-yaml`, `nanoid`,
+  and `postcss` releases, resolving all dependency advisories with published
+  fixes.
+
 ### Changed
 
 - Updated the OpenAI completion default from `gpt-4o-mini` to
