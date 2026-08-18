@@ -249,10 +249,6 @@ std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	if (provider == "fireworks_ai" || provider == "fireworks-ai") {
 		return "fireworks";
 	}
-	if (provider == "github_models" || provider == "github-models" || provider == "github_model" ||
-	    provider == "github-model" || provider == "gh_models" || provider == "gh-models") {
-		return "github";
-	}
 	if (provider == "groqcloud" || provider == "groq_cloud" || provider == "groq-cloud") {
 		return "groq";
 	}
@@ -888,10 +884,10 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	static const std::vector<ModelPrice> prices {
 	    {"openai", "gpt-5.6-sol", "completion", 5.00, 30.00, "https://developers.openai.com/api/docs/pricing",
 	     "standard text token pricing", "2026-07-15"},
-	    {"openai", "gpt-5.6-terra", "completion", 2.50, 15.00, "https://developers.openai.com/api/docs/pricing",
-	     "standard text token pricing", "2026-07-15"},
-	    {"openai", "gpt-5.6-luna", "completion", 1.00, 6.00, "https://developers.openai.com/api/docs/pricing",
-	     "standard text token pricing", "2026-07-15"},
+	    {"openai", "gpt-5.6-terra", "completion", 2.00, 12.00, "https://developers.openai.com/api/docs/pricing",
+	     "standard text token pricing", "2026-07-30"},
+	    {"openai", "gpt-5.6-luna", "completion", 0.20, 1.20, "https://developers.openai.com/api/docs/pricing",
+	     "standard text token pricing", "2026-07-30"},
 	    {"openai", "gpt-5.5", "completion", 5.00, 30.00, "https://developers.openai.com/api/docs/pricing",
 	     "standard text token pricing for <272K context length", "2026-07-07"},
 	    {"openai", "gpt-5.4", "completion", 2.50, 15.00, "https://developers.openai.com/api/docs/pricing",
@@ -2874,8 +2870,6 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", true},
 	    {"gemini", "openai_chat", "gemini-3.6-flash", "gemini-embedding-2",
 	     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", true},
-	    {"github", "openai_chat", "openai/gpt-4o", "openai/text-embedding-3-small",
-	     "https://models.github.ai/inference", "GITHUB_TOKEN", true},
 	    {"groq", "openai_chat", "openai/gpt-oss-20b", "", "https://api.groq.com/openai/v1", "GROQ_API_KEY", true},
 	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
 	    {"hunyuan", "openai_chat", "hy3", "", "https://tokenhub.tencentmaas.com/v1", "HUNYUAN_API_KEY", true},
@@ -2934,7 +2928,7 @@ std::string SupportedProvidersList() {
 		}
 		result += ProviderCatalog()[i].provider;
 	}
-	result += ", claude, gcp, google, zhipu, azure_openai, databricks_ai, local, llama.cpp, github_models, "
+	result += ", claude, gcp, google, zhipu, azure_openai, databricks_ai, local, llama.cpp, "
 	          "hugging_face, x.ai, nvidia_nim, aws_bedrock, google_vertex, workers_ai, qwen, alibaba, "
 	          "nebius_token_factory, sambanova_ai, silicon_flow, vercel_ai_gateway, kimi, baidu, ernie, "
 	          "tencent_hunyuan, step, mini_max, doubao, ark";
@@ -3295,12 +3289,6 @@ std::string ResolveApiKey(const ProviderConfig &config) {
 			return vertex_api_key;
 		}
 	}
-	if (config.provider == "github") {
-		auto github_models_token = GetEnv("GITHUB_MODELS_TOKEN");
-		if (!github_models_token.empty()) {
-			return github_models_token;
-		}
-	}
 	if (config.provider == "huggingface") {
 		auto hub_token = GetEnv("HUGGING_FACE_HUB_TOKEN");
 		if (!hub_token.empty()) {
@@ -3449,12 +3437,6 @@ std::string ResolveModel(const ProviderConfig &config, const std::string &model_
 		auto google_vertex_model = GetEnv("GOOGLE_VERTEX_MODEL");
 		if (!google_vertex_model.empty()) {
 			return google_vertex_model;
-		}
-	}
-	if (config.provider == "github") {
-		auto github_models_model = GetEnv("GITHUB_MODELS_MODEL");
-		if (!github_models_model.empty()) {
-			return github_models_model;
 		}
 	}
 	if (config.provider == "huggingface") {

@@ -11,6 +11,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 - Corrected the built-in Anthropic prices for Claude Haiku 4.5, Sonnet 4.5,
   and Sonnet 5 so opt-in usage-cost estimates match current Claude API rates.
+- Updated built-in GPT-5.6 Terra and Luna token prices after OpenAI reduced
+  their API prices.
+
+### Removed
+
+- Removed GitHub Models provider defaults, aliases, credentials, and docs
+  because GitHub fully retired the inference API on July 30, 2026.
 
 ## 0.4.17 - 2026-08-09
 

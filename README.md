@@ -362,7 +362,6 @@ End-to-end setup examples for each provider are in
 | `deepseek` | DeepSeek chat models | `https://api.deepseek.com`; `DEEPSEEK_API_KEY` |
 | `fireworks` | Fireworks AI hosted open-weight chat and embedding models | `https://api.fireworks.ai/inference/v1`; `FIREWORKS_API_KEY` |
 | `gemini` / `gcp` / `google` | Gemini through the OpenAI-compatible endpoint | `GEMINI_API_KEY` |
-| `github` / `github_models` | GitHub Models for prototyping and CI workflows | `https://models.github.ai/inference`; `GITHUB_TOKEN` |
 | `groq` | GroqCloud low-latency hosted open-weight models | `https://api.groq.com/openai/v1`; `GROQ_API_KEY` |
 | `huggingface` / `hf` | Hugging Face Inference Providers router | `https://router.huggingface.co/v1`; `HF_TOKEN` |
 | `hunyuan` / `tencent_hunyuan` | Tencent TokenHub Hy3 models | `https://tokenhub.tencentmaas.com/v1`; `HUNYUAN_API_KEY` or `TOKENHUB_API_KEY` |

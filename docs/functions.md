@@ -1151,7 +1151,6 @@ Supported provider names and aliases are:
 | `deepseek` | none | Yes | No | `deepseek-v4-flash` |
 | `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/gpt-oss-20b` |
 | `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.6-flash` |
-| `github` | `github_models`, `github-models`, `gh_models` | Yes | Yes | `openai/gpt-4o` |
 | `groq` | `groqcloud`, `groq_cloud` | Yes | No | `openai/gpt-oss-20b` |
 | `huggingface` | `hf`, `hugging_face`, `huggingface_hub` | Yes | No | `openai/gpt-oss-120b` |
 | `hunyuan` | `tencent`, `tencent_hunyuan` | Yes | No | `hy3` |
