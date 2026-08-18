@@ -59,7 +59,6 @@ Use provider-specific environment variables for local development:
 | `deepseek` | `DEEPSEEK_API_KEY` | `DEEPSEEK_BASE_URL` |
 | `fireworks` | `FIREWORKS_API_KEY` | `FIREWORKS_BASE_URL` |
 | `gemini` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
-| `github` / `github_models` | `GITHUB_TOKEN`, `GITHUB_MODELS_TOKEN`, or `GITHUB_API_KEY` | `GITHUB_BASE_URL` |
 | `groq` | `GROQ_API_KEY` | `GROQ_BASE_URL` |
 | `huggingface` / `hf` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | `HUGGINGFACE_BASE_URL` |
 | `hunyuan` / `tencent_hunyuan` | `HUNYUAN_API_KEY` or `TENCENT_HUNYUAN_API_KEY` | `HUNYUAN_BASE_URL` or `TENCENT_HUNYUAN_BASE_URL` |
