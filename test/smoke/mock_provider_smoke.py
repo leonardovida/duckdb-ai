@@ -1305,7 +1305,6 @@ def run_duckdb_provider_metadata(duckdb_path: Path) -> str:
         SELECT ai_provider_base_url('step') AS stepfun_url;
         SELECT ai_provider_base_url('vercel_ai_gateway') AS vercel_url;
         SELECT ai_provider_base_url('doubao') AS volcengine_url;
-        SELECT ai_provider_protocol('github_models') AS github_protocol;
         SELECT ai_provider_protocol('hf') AS huggingface_protocol;
         SELECT ai_provider_protocol('mini_max') AS minimax_protocol;
         SELECT ai_provider_protocol('poe_api') AS poe_protocol;
@@ -1399,7 +1398,6 @@ def assert_provider_metadata(output: str):
         "https://api.stepfun.com/v1",
         "https://ai-gateway.vercel.sh/v1",
         "https://ark.cn-beijing.volces.com/api/v3",
-        "github_protocol",
         "huggingface_protocol",
         "minimax_protocol",
         "poe_protocol",

@@ -45,7 +45,6 @@ LIMIT 1;
 | `deepinfra` | OpenAI-compatible chat and embeddings | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`; embeddings use `BAAI/bge-large-en-v1.5` | `DEEPINFRA_API_KEY` | Defaults to `https://api.deepinfra.com/v1/openai`. |
 | `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/gpt-oss-20b`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
 | `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.6-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
-| `github` / `github_models` | OpenAI-compatible chat and embeddings | `openai/gpt-4o`; embeddings use `openai/text-embedding-3-small` | `GITHUB_TOKEN`, `GITHUB_MODELS_TOKEN`, or `GITHUB_API_KEY` | Defaults to `https://models.github.ai/inference`. |
 | `groq` | OpenAI-compatible chat | `openai/gpt-oss-20b` | `GROQ_API_KEY` | Defaults to `https://api.groq.com/openai/v1`. |
 | `huggingface` / `hf` | OpenAI-compatible chat | `openai/gpt-oss-120b` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | Defaults to `https://router.huggingface.co/v1`. |
 | `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat through Tencent TokenHub | `hy3` | `HUNYUAN_API_KEY`, `TOKENHUB_API_KEY`, or `TENCENT_TOKENHUB_API_KEY` | Defaults to `https://tokenhub.tencentmaas.com/v1`; `TOKENHUB_BASE_URL` selects another TokenHub region. |
@@ -944,31 +943,6 @@ SELECT ai_complete(
 Aliases `hf`, `hugging_face`, `huggingface_hub`, and `hf_inference` resolve to
 `huggingface`. Embeddings are not configured by default; use
 `openai_compatible` with an embedding-capable router endpoint if needed.
-
-## GitHub Models
-
-```sh
-export GITHUB_TOKEN='...'
-./build/release/duckdb
-```
-
-```sql
-LOAD ai;
-
-CREATE OR REPLACE SECRET github_models_ai (
-    TYPE duckdb_ai,
-    AI_PROVIDER 'github_models',
-    MODEL 'openai/gpt-4o'
-);
-
-SELECT ai_complete(
-    'Write one concise test-case title for an AI SQL helper.',
-    secret := 'github_models_ai'
-) AS answer;
-```
-
-Aliases `github`, `github_models`, `github-models`, and `gh_models` resolve to
-the same provider.
 
 ## xAI / SpaceXAI
 
