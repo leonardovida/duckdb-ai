@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.18 - 2026-08-18
+
 ### Fixed
 
 - Corrected the built-in Anthropic prices for Claude Haiku 4.5, Sonnet 4.5,
