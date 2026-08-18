@@ -7,6 +7,11 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Corrected the built-in Anthropic prices for Claude Haiku 4.5, Sonnet 4.5,
+  and Sonnet 5 so opt-in usage-cost estimates match current Claude API rates.
+
 ## 0.4.17 - 2026-08-09
 
 ### Fixed
