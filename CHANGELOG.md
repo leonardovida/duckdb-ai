@@ -9,6 +9,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Fixed
 
+- Corrected the built-in Anthropic prices for Claude Haiku 4.5, Sonnet 4.5,
+  and Sonnet 5 so opt-in usage-cost estimates match current Claude API rates.
 - Updated built-in GPT-5.6 Terra and Luna token prices after OpenAI reduced
   their API prices.
 

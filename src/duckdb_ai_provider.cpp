@@ -899,13 +899,13 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	    {"openai", "text-embedding-3-small", "embedding", 0.02, -1,
 	     "https://developers.openai.com/api/docs/models/text-embedding-3-small", "embedding input tokens only",
 	     "2026-06-30"},
-	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
-	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
-	    {"anthropic", "claude-sonnet-5", "completion", 2.00, 10.00,
-	     "https://platform.claude.com/docs/en/about-claude/pricing",
-	     "introductory text token pricing through 2026-08-31", "2026-07-15"},
-	    {"anthropic", "claude-sonnet-4-5", "completion", 3.00, 15.00,
-	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-06-30"},
+	    {"anthropic", "claude-haiku-4-5", "completion", 0.50, 2.50,
+	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-18"},
+	    {"anthropic", "claude-sonnet-5", "completion", 1.50, 7.50,
+	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing starting 2026-09-01",
+	     "2026-08-18"},
+	    {"anthropic", "claude-sonnet-4-5", "completion", 1.50, 7.50,
+	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-18"},
 	    {"gemini", "gemini-3.5-flash", "completion", 1.50, 9.00, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text token pricing", "2026-07-08"},
 	    {"gemini", "gemini-3.6-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
@@ -936,18 +936,19 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	return prices;
 }
 
-const ModelPrice *FindBuiltinModelPrice(const std::string &provider, const std::string &model,
-                                        const std::string &operation) {
+bool TryFindBuiltinModelPrice(const std::string &provider, const std::string &model, const std::string &operation,
+                              ModelPrice &result) {
 	auto provider_key = LowerAscii(provider);
 	auto model_key = LowerAscii(model);
 	auto operation_key = LowerAscii(operation);
-	for (auto &price : BuiltinModelPrices()) {
+	for (auto &price : ModelPrices()) {
 		if (LowerAscii(price.provider) == provider_key && LowerAscii(price.model) == model_key &&
 		    LowerAscii(price.operation) == operation_key) {
-			return &price;
+			result = price;
+			return true;
 		}
 	}
-	return nullptr;
+	return false;
 }
 
 bool BuiltinModelPricingEnabled(const CompletionOptions &options) {
@@ -4087,14 +4088,14 @@ double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionO
 	auto has_output_price = options.has_output_token_price_per_million;
 	auto output_price = options.output_token_price_per_million;
 	if (BuiltinModelPricingEnabled(options)) {
-		auto price = FindBuiltinModelPrice(config.provider, config.model, "completion");
-		if (price) {
+		ModelPrice price;
+		if (TryFindBuiltinModelPrice(config.provider, config.model, "completion", price)) {
 			if (!has_input_price) {
-				input_price = price->input_token_price_per_million;
+				input_price = price.input_token_price_per_million;
 				has_input_price = input_price >= 0;
 			}
 			if (!has_output_price) {
-				output_price = price->output_token_price_per_million;
+				output_price = price.output_token_price_per_million;
 				has_output_price = output_price >= 0;
 			}
 		}
@@ -4124,9 +4125,9 @@ double EstimateEmbeddingCostUsd(const ProviderConfig &config, const CompletionOp
 	auto has_input_price = options.has_input_token_price_per_million;
 	auto input_price = options.input_token_price_per_million;
 	if (BuiltinModelPricingEnabled(options)) {
-		auto price = FindBuiltinModelPrice(config.provider, config.model, "embedding");
-		if (price && !has_input_price) {
-			input_price = price->input_token_price_per_million;
+		ModelPrice price;
+		if (TryFindBuiltinModelPrice(config.provider, config.model, "embedding", price) && !has_input_price) {
+			input_price = price.input_token_price_per_million;
 			has_input_price = input_price >= 0;
 		}
 	}
@@ -5258,7 +5259,18 @@ void ClearResponseCache(ClientContext &context) {
 }
 
 std::vector<ModelPrice> ModelPrices() {
-	return BuiltinModelPrices();
+	auto prices = BuiltinModelPrices();
+	if (CurrentTimestamp().compare(0, 10, "2026-09-01") < 0) {
+		for (auto &price : prices) {
+			if (price.provider == "anthropic" && price.model == "claude-sonnet-5" && price.operation == "completion") {
+				price.input_token_price_per_million = 1.00;
+				price.output_token_price_per_million = 5.00;
+				price.source_note = "introductory text token pricing through 2026-08-31";
+				break;
+			}
+		}
+	}
+	return prices;
 }
 
 void RecordLocalUsageEvent(ClientContext *context, const std::string &event_name, int64_t input_chars,

@@ -69,9 +69,15 @@ openai	gpt-5.6-luna	completion	0.20	1.20
 openai	gpt-5.6-terra	completion	2.00	12.00
 
 query IIIII
-SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'anthropic' AND model = 'claude-sonnet-5';
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'anthropic' AND model != 'claude-sonnet-5' ORDER BY model;
 ----
-anthropic	claude-sonnet-5	completion	2.00	10.00
+anthropic	claude-haiku-4-5	completion	0.50	2.50
+anthropic	claude-sonnet-4-5	completion	1.50	7.50
+
+query I
+SELECT (input_token_price_per_million = 1.00 AND output_token_price_per_million = 5.00 AND contains(source_note, 'through 2026-08-31')) OR (input_token_price_per_million = 1.50 AND output_token_price_per_million = 7.50 AND contains(source_note, 'starting 2026-09-01')) FROM ai_model_prices() WHERE provider = 'anthropic' AND model = 'claude-sonnet-5';
+----
+true
 
 query I
 SELECT contains(source_url, 'openrouter.ai') FROM ai_model_prices() WHERE provider = 'openrouter' AND model = 'openai/gpt-4o-mini';

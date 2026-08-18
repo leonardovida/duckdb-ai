@@ -619,10 +619,11 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SELECT ai_complete(
             'hello claude',
             provider := 'claude',
-            model := 'mock-claude-model',
+            model := 'claude-haiku-4-5',
             base_url := '{base_url}',
             system_prompt := 'be exact',
-            max_tokens := 13
+            max_tokens := 13,
+            use_builtin_model_prices := true
         ) AS claude_completion;
         SELECT ai_completion_request_json(
             'extract structured claude output',
@@ -1706,7 +1707,7 @@ def assert_smoke_result(output: str):
     if len(MockProviderHandler.claude_requests) != 1:
         raise AssertionError(f"expected 1 Claude request, got {len(MockProviderHandler.claude_requests)}")
     claude_request = MockProviderHandler.claude_requests[0]
-    if claude_request.get("model") != "mock-claude-model":
+    if claude_request.get("model") != "claude-haiku-4-5":
         raise AssertionError(f"unexpected Claude model: {claude_request}")
     if claude_request.get("system") != "be exact":
         raise AssertionError(f"unexpected Claude system prompt: {claude_request}")
@@ -1833,6 +1834,14 @@ def assert_smoke_result(output: str):
     builtin_estimated_cost = builtin_price_log.get("estimated_cost_usd")
     if builtin_estimated_cost is None or abs(builtin_estimated_cost - 0.00001875) > 0.000000001:
         raise AssertionError(f"unexpected builtin pricing cost: {builtin_price_log}")
+    anthropic_price_log = next(
+        (request for request in completion_logs if request.get("model") == "claude-haiku-4-5"), None
+    )
+    if anthropic_price_log is None:
+        raise AssertionError(f"missing Anthropic builtin pricing log: {completion_logs}")
+    anthropic_estimated_cost = anthropic_price_log.get("estimated_cost_usd")
+    if anthropic_estimated_cost is None or abs(anthropic_estimated_cost - 0.0000145) > 0.000000001:
+        raise AssertionError(f"unexpected Anthropic builtin pricing cost: {anthropic_price_log}")
     databricks_log = next(
         (request for request in completion_logs if request.get("model") == "databricks-gpt-oss-120b"), None
     )
