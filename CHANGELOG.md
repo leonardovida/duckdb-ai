@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.19 - 2026-08-21
+
 ### Changed
 
 - Updated Gemini's completion default to stable `gemini-3.7-flash` and omitted
