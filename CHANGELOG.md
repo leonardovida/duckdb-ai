@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.20 - 2026-08-21
+
 ### Fixed
 
 - Corrected Anthropic's built-in standard API prices after discounted Batch API
