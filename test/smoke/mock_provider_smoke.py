@@ -625,6 +625,13 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
             max_tokens := 13,
             use_builtin_model_prices := true
         ) AS claude_completion;
+        SELECT ai_complete(
+            'gemini builtin pricing smoke',
+            provider := 'gemini',
+            model := 'gemini-3.7-flash',
+            base_url := '{base_url}',
+            use_builtin_model_prices := true
+        ) AS gemini_completion;
         SELECT ai_completion_request_json(
             'extract structured claude output',
             provider := 'anthropic',
@@ -698,6 +705,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         {
             "OPENAI_API_KEY": "test-key",
             "ANTHROPIC_API_KEY": "anthropic-test-key",
+            "GEMINI_API_KEY": "gemini-test-key",
         }
     )
     result = subprocess.run(
@@ -1485,13 +1493,14 @@ def assert_smoke_result(output: str):
     if missing:
         raise AssertionError(f"duckdb output missing {missing}\n{output}")
 
-    if len(MockProviderHandler.completion_requests) != 34:
-        raise AssertionError(f"expected 34 completion requests, got {len(MockProviderHandler.completion_requests)}")
-    if len(MockProviderHandler.authorization_headers) != 40:
-        raise AssertionError(f"expected 40 auth headers, got {len(MockProviderHandler.authorization_headers)}")
-    for header in MockProviderHandler.authorization_headers:
-        if header != "Bearer test-key":
-            raise AssertionError(f"unexpected authorization header: {header}")
+    if len(MockProviderHandler.completion_requests) != 35:
+        raise AssertionError(f"expected 35 completion requests, got {len(MockProviderHandler.completion_requests)}")
+    if len(MockProviderHandler.authorization_headers) != 41:
+        raise AssertionError(f"expected 41 auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if MockProviderHandler.authorization_headers.count("Bearer test-key") != 40:
+        raise AssertionError(f"unexpected default authorization headers: {MockProviderHandler.authorization_headers}")
+    if MockProviderHandler.authorization_headers.count("Bearer gemini-test-key") != 1:
+        raise AssertionError(f"unexpected Gemini authorization headers: {MockProviderHandler.authorization_headers}")
 
     completion_models = [request["model"] for request in MockProviderHandler.completion_requests]
     if completion_models[0:9] != ["mock-completion-model"] * 9:
@@ -1644,34 +1653,39 @@ def assert_smoke_result(output: str):
     otlp_prompt = MockProviderHandler.completion_requests[27]["messages"][-1]["content"]
     if otlp_prompt != "otlp log smoke":
         raise AssertionError(f"unexpected OTLP completion prompt: {otlp_prompt}")
-    builtin_price_request = MockProviderHandler.completion_requests[28]
+    gemini_price_request = MockProviderHandler.completion_requests[28]
+    if gemini_price_request.get("model") != "gemini-3.7-flash":
+        raise AssertionError(f"unexpected Gemini pricing model: {gemini_price_request}")
+    if gemini_price_request["messages"][-1]["content"] != "gemini builtin pricing smoke":
+        raise AssertionError(f"unexpected Gemini pricing prompt: {gemini_price_request}")
+    builtin_price_request = MockProviderHandler.completion_requests[29]
     if builtin_price_request.get("model") != "gpt-5.4-mini":
         raise AssertionError(f"unexpected builtin pricing model: {builtin_price_request}")
     if builtin_price_request["messages"][-1]["content"] != "builtin pricing smoke":
         raise AssertionError(f"unexpected builtin pricing prompt: {builtin_price_request}")
-    databricks_request = MockProviderHandler.completion_requests[29]
+    databricks_request = MockProviderHandler.completion_requests[30]
     if databricks_request.get("model") != "databricks-gpt-oss-120b":
         raise AssertionError(f"unexpected Databricks model: {databricks_request}")
     if databricks_request["messages"][-1]["content"] != "hello databricks":
         raise AssertionError(f"unexpected Databricks prompt: {databricks_request}")
-    snowflake_request = MockProviderHandler.completion_requests[30]
+    snowflake_request = MockProviderHandler.completion_requests[31]
     if snowflake_request.get("model") != "claude-sonnet-4-5":
         raise AssertionError(f"unexpected Snowflake model: {snowflake_request}")
     if snowflake_request.get("max_completion_tokens") != 19 or "max_tokens" in snowflake_request:
         raise AssertionError(f"unexpected Snowflake token limit: {snowflake_request}")
     if snowflake_request["messages"][-1]["content"] != "hello snowflake":
         raise AssertionError(f"unexpected Snowflake prompt: {snowflake_request}")
-    try_complete_request = MockProviderHandler.completion_requests[31]
+    try_complete_request = MockProviderHandler.completion_requests[32]
     if try_complete_request["messages"][-1]["content"] != "try complete smoke":
         raise AssertionError(f"unexpected try completion prompt: {try_complete_request}")
     if try_complete_request.get("max_completion_tokens") != 5 or "max_tokens" in try_complete_request:
         raise AssertionError(f"unexpected try completion token limit: {try_complete_request}")
-    extract_record_request = MockProviderHandler.completion_requests[32]
+    extract_record_request = MockProviderHandler.completion_requests[33]
     if extract_record_request["messages"][-1]["content"] != "return scalar record JSON object":
         raise AssertionError(f"unexpected extract record prompt: {extract_record_request}")
     if "Return only valid JSON" not in extract_record_request["messages"][0]["content"]:
         raise AssertionError(f"unexpected extract record system prompt: {extract_record_request}")
-    rerank_request = MockProviderHandler.completion_requests[33]
+    rerank_request = MockProviderHandler.completion_requests[34]
     if "Score candidate relevance" not in rerank_request["messages"][0]["content"]:
         raise AssertionError(f"unexpected rerank system prompt: {rerank_request}")
     if (
@@ -1745,25 +1759,25 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected packed constant similarity inputs: {constant_similarity_inputs}")
 
     log_deadline = time.time() + 5
-    while len(MockProviderHandler.log_requests) < 47 and time.time() < log_deadline:
+    while len(MockProviderHandler.log_requests) < 48 and time.time() < log_deadline:
         time.sleep(0.05)
-    if len(MockProviderHandler.log_requests) != 47:
+    if len(MockProviderHandler.log_requests) != 48:
         event_counts = {}
         for request in MockProviderHandler.log_requests:
             event = "otlp" if "resourceLogs" in request else request.get("event", "unknown")
             event_counts[event] = event_counts.get(event, 0) + 1
-        raise AssertionError(f"expected 47 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
+        raise AssertionError(f"expected 48 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 34 or len(embedding_logs) != 12:
+    if len(completion_logs) != 35 or len(embedding_logs) != 12:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")
     logged_providers = {request.get("provider") for request in completion_logs}
-    if not {"openai", "ollama", "anthropic", "databricks", "snowflake", "openai_privacy_filter"}.issubset(
+    if not {"openai", "ollama", "anthropic", "gemini", "databricks", "snowflake", "openai_privacy_filter"}.issubset(
         logged_providers
     ):
         raise AssertionError(f"missing provider logs: {completion_logs}")
@@ -1842,6 +1856,14 @@ def assert_smoke_result(output: str):
     anthropic_estimated_cost = anthropic_price_log.get("estimated_cost_usd")
     if anthropic_estimated_cost is None or abs(anthropic_estimated_cost - 0.0000145) > 0.000000001:
         raise AssertionError(f"unexpected Anthropic builtin pricing cost: {anthropic_price_log}")
+    gemini_price_log = next(
+        (request for request in completion_logs if request.get("model") == "gemini-3.7-flash"), None
+    )
+    if gemini_price_log is None:
+        raise AssertionError(f"missing Gemini builtin pricing log: {completion_logs}")
+    gemini_estimated_cost = gemini_price_log.get("estimated_cost_usd")
+    if gemini_estimated_cost is None or abs(gemini_estimated_cost - 0.0000165) > 0.000000001:
+        raise AssertionError(f"unexpected Gemini builtin pricing cost: {gemini_price_log}")
     databricks_log = next(
         (request for request in completion_logs if request.get("model") == "databricks-gpt-oss-120b"), None
     )
