@@ -16,6 +16,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 - Applied Google's introductory Gemini 3.7/3.6 Flash prices through December
   31, 2026, with an automatic rollover to the published standard rate.
+- Updated the documentation lockfile to NanoID 3.3.18, resolving its
+  zero-length custom-generator denial-of-service advisory.
 
 ## 0.4.18 - 2026-08-18
 
