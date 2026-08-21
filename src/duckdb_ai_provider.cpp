@@ -909,7 +909,9 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	    {"gemini", "gemini-3.5-flash", "completion", 1.50, 9.00, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text token pricing", "2026-07-08"},
 	    {"gemini", "gemini-3.6-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
-	     "standard text token pricing", "2026-07-24"},
+	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
+	    {"gemini", "gemini-3.7-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
+	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
 	    {"gemini", "gemini-embedding-2", "embedding", 0.20, -1, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text embedding input tokens only", "2026-07-17"},
 	    {"mistral", "mistral-small-latest", "completion", 0.15, 0.60, "https://mistral.ai/pricing/api/",
@@ -2869,7 +2871,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"deepseek", "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
 	    {"fireworks", "openai_chat", "accounts/fireworks/models/gpt-oss-20b", "nomic-ai/nomic-embed-text-v1.5",
 	     "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", true},
-	    {"gemini", "openai_chat", "gemini-3.6-flash", "gemini-embedding-2",
+	    {"gemini", "openai_chat", "gemini-3.7-flash", "gemini-embedding-2",
 	     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", true},
 	    {"groq", "openai_chat", "openai/gpt-oss-20b", "", "https://api.groq.com/openai/v1", "GROQ_API_KEY", true},
 	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
@@ -3632,8 +3634,8 @@ std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
 }
 
 bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
-	return config.provider == "gemini" &&
-	       (config.model == "gemini-3.6-flash" || config.model == "gemini-3.5-flash-lite");
+	return config.provider == "gemini" && (config.model == "gemini-3.7-flash" || config.model == "gemini-3.6-flash" ||
+	                                       config.model == "gemini-3.5-flash-lite");
 }
 
 void ValidateProviderResponseFormat(const ProviderConfig &config, const CompletionOptions &options) {
@@ -5267,6 +5269,17 @@ std::vector<ModelPrice> ModelPrices() {
 				price.output_token_price_per_million = 5.00;
 				price.source_note = "introductory text token pricing through 2026-08-31";
 				break;
+			}
+		}
+	}
+	if (CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
+		for (auto &price : prices) {
+			if (price.provider == "gemini" &&
+			    (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash") &&
+			    price.operation == "completion") {
+				price.input_token_price_per_million = 0.75;
+				price.output_token_price_per_million = 3.75;
+				price.source_note = "introductory text token pricing through 2026-12-31";
 			}
 		}
 	}
