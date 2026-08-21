@@ -899,13 +899,13 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	    {"openai", "text-embedding-3-small", "embedding", 0.02, -1,
 	     "https://developers.openai.com/api/docs/models/text-embedding-3-small", "embedding input tokens only",
 	     "2026-06-30"},
-	    {"anthropic", "claude-haiku-4-5", "completion", 0.50, 2.50,
-	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-18"},
-	    {"anthropic", "claude-sonnet-5", "completion", 1.50, 7.50,
+	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
+	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
+	    {"anthropic", "claude-sonnet-5", "completion", 3.00, 15.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing starting 2026-09-01",
-	     "2026-08-18"},
-	    {"anthropic", "claude-sonnet-4-5", "completion", 1.50, 7.50,
-	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-18"},
+	     "2026-08-21"},
+	    {"anthropic", "claude-sonnet-4-5", "completion", 3.00, 15.00,
+	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
 	    {"gemini", "gemini-3.5-flash", "completion", 1.50, 9.00, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text token pricing", "2026-07-08"},
 	    {"gemini", "gemini-3.6-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
@@ -5265,8 +5265,8 @@ std::vector<ModelPrice> ModelPrices() {
 	if (CurrentTimestamp().compare(0, 10, "2026-09-01") < 0) {
 		for (auto &price : prices) {
 			if (price.provider == "anthropic" && price.model == "claude-sonnet-5" && price.operation == "completion") {
-				price.input_token_price_per_million = 1.00;
-				price.output_token_price_per_million = 5.00;
+				price.input_token_price_per_million = 2.00;
+				price.output_token_price_per_million = 10.00;
 				price.source_note = "introductory text token pricing through 2026-08-31";
 				break;
 			}
