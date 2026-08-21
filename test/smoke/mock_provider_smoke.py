@@ -1854,7 +1854,7 @@ def assert_smoke_result(output: str):
     if anthropic_price_log is None:
         raise AssertionError(f"missing Anthropic builtin pricing log: {completion_logs}")
     anthropic_estimated_cost = anthropic_price_log.get("estimated_cost_usd")
-    if anthropic_estimated_cost is None or abs(anthropic_estimated_cost - 0.0000145) > 0.000000001:
+    if anthropic_estimated_cost is None or abs(anthropic_estimated_cost - 0.000029) > 0.000000001:
         raise AssertionError(f"unexpected Anthropic builtin pricing cost: {anthropic_price_log}")
     gemini_price_log = next(
         (request for request in completion_logs if request.get("model") == "gemini-3.7-flash"), None
