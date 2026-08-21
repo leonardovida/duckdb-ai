@@ -7,6 +7,16 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Changed
+
+- Updated Gemini's completion default to stable `gemini-3.7-flash` and omitted
+  sampling parameters that Google no longer accepts for this model.
+
+### Fixed
+
+- Applied Google's introductory Gemini 3.7/3.6 Flash prices through December
+  31, 2026, with an automatic rollover to the published standard rate.
+
 ## 0.4.18 - 2026-08-18
 
 ### Fixed

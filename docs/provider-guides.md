@@ -44,7 +44,7 @@ LIMIT 1;
 | `dashscope` / `qwen` | OpenAI-compatible chat and embeddings | `qwen-plus`; embeddings use `text-embedding-v4` | `DASHSCOPE_API_KEY`, `ALIBABA_API_KEY`, or `QWEN_API_KEY` | Defaults to `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; override with a workspace-specific base URL when needed. |
 | `deepinfra` | OpenAI-compatible chat and embeddings | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`; embeddings use `BAAI/bge-large-en-v1.5` | `DEEPINFRA_API_KEY` | Defaults to `https://api.deepinfra.com/v1/openai`. |
 | `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/gpt-oss-20b`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
-| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.6-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
+| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.7-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
 | `groq` | OpenAI-compatible chat | `openai/gpt-oss-20b` | `GROQ_API_KEY` | Defaults to `https://api.groq.com/openai/v1`. |
 | `huggingface` / `hf` | OpenAI-compatible chat | `openai/gpt-oss-120b` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | Defaults to `https://router.huggingface.co/v1`. |
 | `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat through Tencent TokenHub | `hy3` | `HUNYUAN_API_KEY`, `TOKENHUB_API_KEY`, or `TENCENT_TOKENHUB_API_KEY` | Defaults to `https://tokenhub.tencentmaas.com/v1`; `TOKENHUB_BASE_URL` selects another TokenHub region. |
@@ -247,7 +247,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET gemini_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'gemini',
-    MODEL 'gemini-3.6-flash'
+    MODEL 'gemini-3.7-flash'
 );
 
 SELECT ai_complete(
@@ -263,8 +263,11 @@ SELECT ai_embed(
 ```
 
 Provider aliases `gcp`, `google`, and `google_gemini` also resolve to Gemini.
-Gemini 3.6 Flash deprecates sampling parameters, so `duckdb_ai` omits
-`temperature` for this model even when the generic SQL option is provided.
+Gemini 3.7 Flash and 3.6 Flash deprecate sampling parameters, so `duckdb_ai`
+omits `temperature` for these models even when the generic SQL option is
+provided. Built-in cost estimates use Google's introductory 3.7/3.6 Flash
+pricing through December 31, 2026 and roll over to the published standard rate
+on January 1, 2027.
 
 ## Mistral
 

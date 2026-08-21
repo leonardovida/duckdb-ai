@@ -42,10 +42,10 @@ SELECT provider, model, operation, printf('%.2f', input_token_price_per_million)
 ----
 gemini	gemini-3.5-flash	completion	1.50	9.00
 
-query IIIII
-SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'gemini' AND model = 'gemini-3.6-flash';
+query I
+SELECT count(*) = 2 AND bool_and((input_token_price_per_million = 0.75 AND output_token_price_per_million = 3.75 AND contains(source_note, 'through 2026-12-31')) OR (input_token_price_per_million = 1.50 AND output_token_price_per_million = 7.50 AND contains(source_note, 'starting 2027-01-01'))) FROM ai_model_prices() WHERE provider = 'gemini' AND model IN ('gemini-3.6-flash', 'gemini-3.7-flash');
 ----
-gemini	gemini-3.6-flash	completion	1.50	7.50
+true
 
 query IIII
 SELECT provider, model, operation, printf('%.2f', input_token_price_per_million) FROM ai_model_prices() WHERE provider = 'gemini' AND model = 'gemini-embedding-2';
@@ -145,7 +145,7 @@ SELECT ai_provider_protocol('gemini') || '@' || ai_provider_base_url('gemini') |
 openai_chat@https://generativelanguage.googleapis.com/v1beta/openai|openai_chat@https://api.mistral.ai/v1|openai_chat@https://api.z.ai/api/paas/v4|openai_chat@https://api.deepseek.com|openai_chat@https://openrouter.ai/api/v1
 
 query IIII
-SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model":"glm-4.7-flash"'), contains(ai_completion_request_json('hello', provider := 'deepseek'), '"model":"deepseek-v4-flash"'), contains(ai_completion_request_json('hello', provider := 'gemini'), '"model":"gemini-3.6-flash"'), contains(ai_embedding_request_json('duck', provider := 'gemini'), '"model":"gemini-embedding-2"');
+SELECT contains(ai_completion_request_json('hello', provider := 'zai'), '"model":"glm-4.7-flash"'), contains(ai_completion_request_json('hello', provider := 'deepseek'), '"model":"deepseek-v4-flash"'), contains(ai_completion_request_json('hello', provider := 'gemini'), '"model":"gemini-3.7-flash"'), contains(ai_embedding_request_json('duck', provider := 'gemini'), '"model":"gemini-embedding-2"');
 ----
 true	true	true	true
 

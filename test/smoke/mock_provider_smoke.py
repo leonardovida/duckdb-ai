@@ -1418,7 +1418,7 @@ def assert_provider_metadata(output: str):
         "fireworks_provider_default_temperature",
         '"model":"doubao-seed-2-1-pro-260628"',
         '"model":"step-3.5-flash"',
-        '"model":"gemini-3.6-flash"',
+        '"model":"gemini-3.7-flash"',
         "gemini_sampling_parameter_omitted",
         '"model":"@cf/baai/bge-base-en-v1.5"',
         '"model":"meta/llama-3.3-70b-instruct"',
