@@ -1511,6 +1511,24 @@ void ApplyAiProviderSecret(ClientContext &context, duckdb_ai::CompletionOptions 
 	}
 }
 
+template <class BIND_DATA>
+void BindModelProviderPositionalOption(BIND_DATA &bind_data, ScalarFunction &bound_function, idx_t argument_index,
+                                       idx_t &positional_option_count,
+                                       const std::string &option_context = std::string()) {
+	positional_option_count++;
+	if (positional_option_count == 1) {
+		bind_data.has_model_arg = true;
+		bind_data.model_index = argument_index;
+	} else if (positional_option_count == 2) {
+		bind_data.has_provider_arg = true;
+		bind_data.provider_index = argument_index;
+	} else {
+		throw BinderException("%s supports at most two positional options%s: model and provider", bound_function.name,
+		                      option_context);
+	}
+	bound_function.arguments.emplace_back(LogicalType::VARCHAR);
+}
+
 unique_ptr<FunctionData> AiCompletionBindInternal(ClientContext &context, ScalarFunction &bound_function,
                                                   vector<unique_ptr<Expression>> &arguments,
                                                   bool validate_json_output = false) {
@@ -1525,19 +1543,7 @@ unique_ptr<FunctionData> AiCompletionBindInternal(ClientContext &context, Scalar
 	for (idx_t i = 1; i < arguments.size(); i++) {
 		auto alias = LowerAscii(arguments[i]->GetAlias());
 		if (alias.empty()) {
-			positional_option_count++;
-			if (positional_option_count == 1) {
-				bind_data->has_model_arg = true;
-				bind_data->model_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else if (positional_option_count == 2) {
-				bind_data->has_provider_arg = true;
-				bind_data->provider_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else {
-				throw BinderException("%s supports at most two positional options: model and provider",
-				                      bound_function.name);
-			}
+			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
@@ -2483,20 +2489,8 @@ unique_ptr<FunctionData> AiExtractRecordBind(ClientContext &context, ScalarFunct
 	for (idx_t i = 2; i < arguments.size(); i++) {
 		auto alias = LowerAscii(arguments[i]->GetAlias());
 		if (alias.empty()) {
-			positional_option_count++;
-			if (positional_option_count == 1) {
-				bind_data->has_model_arg = true;
-				bind_data->model_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else if (positional_option_count == 2) {
-				bind_data->has_provider_arg = true;
-				bind_data->provider_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else {
-				throw BinderException("%s supports at most two positional options after response_schema: model and "
-				                      "provider",
-				                      bound_function.name);
-			}
+			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count,
+			                                  " after response_schema");
 			continue;
 		}
 		if (alias == "response_schema" || alias == "json_schema" || alias == "response_format") {
@@ -2626,19 +2620,7 @@ unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarF
 	for (idx_t i = 1; i < arguments.size(); i++) {
 		auto alias = LowerAscii(arguments[i]->GetAlias());
 		if (alias.empty()) {
-			positional_option_count++;
-			if (positional_option_count == 1) {
-				bind_data->has_model_arg = true;
-				bind_data->model_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else if (positional_option_count == 2) {
-				bind_data->has_provider_arg = true;
-				bind_data->provider_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else {
-				throw BinderException("%s supports at most two positional options: model and provider",
-				                      bound_function.name);
-			}
+			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
 		}
 		if (!IsEmbeddingOption(alias)) {
@@ -2681,19 +2663,7 @@ unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction
 	for (idx_t i = 2; i < arguments.size(); i++) {
 		auto alias = LowerAscii(arguments[i]->GetAlias());
 		if (alias.empty()) {
-			positional_option_count++;
-			if (positional_option_count == 1) {
-				bind_data->has_model_arg = true;
-				bind_data->model_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else if (positional_option_count == 2) {
-				bind_data->has_provider_arg = true;
-				bind_data->provider_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else {
-				throw BinderException("%s supports at most two positional options: model and provider",
-				                      bound_function.name);
-			}
+			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
 		}
 		if (!IsEmbeddingOption(alias)) {
@@ -2726,19 +2696,7 @@ unique_ptr<FunctionData> AiRerankBind(ClientContext &context, ScalarFunction &bo
 	for (idx_t i = 2; i < arguments.size(); i++) {
 		auto alias = LowerAscii(arguments[i]->GetAlias());
 		if (alias.empty()) {
-			positional_option_count++;
-			if (positional_option_count == 1) {
-				bind_data->has_model_arg = true;
-				bind_data->model_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else if (positional_option_count == 2) {
-				bind_data->has_provider_arg = true;
-				bind_data->provider_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else {
-				throw BinderException("%s supports at most two positional options: model and provider",
-				                      bound_function.name);
-			}
+			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
@@ -3258,19 +3216,7 @@ unique_ptr<FunctionData> AiTaskBindInternal(ClientContext &context, ScalarFuncti
 	for (idx_t i = required_args; i < arguments.size(); i++) {
 		auto alias = LowerAscii(arguments[i]->GetAlias());
 		if (alias.empty()) {
-			positional_option_count++;
-			if (positional_option_count == 1) {
-				bind_data->has_model_arg = true;
-				bind_data->model_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else if (positional_option_count == 2) {
-				bind_data->has_provider_arg = true;
-				bind_data->provider_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
-			} else {
-				throw BinderException("%s supports at most two positional options: model and provider",
-				                      bound_function.name);
-			}
+			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
 		}
 		if (task == AiTaskKind::CLASSIFY &&
