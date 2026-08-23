@@ -369,6 +369,16 @@ SELECT ai_completion_request_json('hello', 'gpt-test', 'openai') LIKE '%"model":
 ----
 true
 
+statement error
+SELECT ai_completion_request_json('hello', 'gpt-test', 'openai', 'extra');
+----
+Binder Error: ai_completion_request_json supports at most two positional options: model and provider
+
+statement error
+SELECT ai_extract_record('hello', '{"type":"object","properties":{"value":{"type":"string"}}}', 'gpt-test', 'openai', 'extra');
+----
+Binder Error: ai_extract_record supports at most two positional options after response_schema: model and provider
+
 query I
 SELECT ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test') LIKE '%"model":"gpt-test"%';
 ----
@@ -598,6 +608,11 @@ true
 
 query I
 SELECT ai_embedding_request_json('duck', provider := 'openai', model := 'embed-test') = '{"model":"embed-test","input":"duck"}';
+----
+true
+
+query I
+SELECT ai_embedding_request_json('duck', 'embed-test', 'openai') = '{"model":"embed-test","input":"duck"}';
 ----
 true
 
