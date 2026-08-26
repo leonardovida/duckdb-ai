@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.21 - 2026-08-26
+
 ### Fixed
 
 - Corrected GPT-5.6 Sol built-in token prices and applied the same rates to the
