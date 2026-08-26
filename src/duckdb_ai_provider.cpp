@@ -882,8 +882,10 @@ bool HasEstimatedCost(double estimated_cost_usd) {
 
 const std::vector<ModelPrice> &BuiltinModelPrices() {
 	static const std::vector<ModelPrice> prices {
-	    {"openai", "gpt-5.6-sol", "completion", 5.00, 30.00, "https://developers.openai.com/api/docs/pricing",
-	     "standard text token pricing", "2026-07-15"},
+	    {"openai", "gpt-5.6", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
+	     "standard text token pricing; alias routes to gpt-5.6-sol", "2026-08-26"},
+	    {"openai", "gpt-5.6-sol", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
+	     "standard text token pricing", "2026-08-26"},
 	    {"openai", "gpt-5.6-terra", "completion", 2.00, 12.00, "https://developers.openai.com/api/docs/pricing",
 	     "standard text token pricing", "2026-07-30"},
 	    {"openai", "gpt-5.6-luna", "completion", 0.20, 1.20, "https://developers.openai.com/api/docs/pricing",
