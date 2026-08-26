@@ -1163,6 +1163,52 @@ def assert_openai_prompt_cache(output: str):
         raise AssertionError(f"missing older-model prompt cache key: {older_request}")
 
 
+def run_duckdb_openai_pricing(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SELECT ai_complete(
+            'Sol pricing smoke',
+            provider := 'openai',
+            model := 'gpt-5.6-sol',
+            base_url := '{base_url}',
+            use_builtin_model_prices := true
+        );
+        SELECT ai_complete(
+            'alias pricing smoke',
+            provider := 'openai',
+            model := 'gpt-5.6',
+            base_url := '{base_url}',
+            use_builtin_model_prices := true
+        );
+        SELECT count(*) = 2
+               AND bool_and(prompt_tokens = 7)
+               AND bool_and(completion_tokens = 3)
+               AND bool_and(abs(estimated_cost_usd - 0.000088) < 0.000000001) AS pricing_matches
+        FROM ai_usage();
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "openai-test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb OpenAI pricing smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_openai_pricing(output: str):
+    if "pricing_matches" not in output or "true" not in output:
+        raise AssertionError(f"OpenAI builtin pricing estimates did not match current rates\n{output}")
+    models = [request.get("model") for request in MockProviderHandler.completion_requests]
+    if models != ["gpt-5.6-sol", "gpt-5.6"]:
+        raise AssertionError(f"unexpected OpenAI pricing models: {MockProviderHandler.completion_requests}")
+
+
 def run_duckdb_xai_prompt_cache_header(duckdb_path: Path, base_url: str) -> str:
     sql = f"""
         SELECT ai_complete(
@@ -2490,6 +2536,9 @@ def main():
         MockProviderHandler.reset()
         openai_prompt_cache_output = run_duckdb_openai_prompt_cache(args.duckdb, f"http://127.0.0.1:{port}")
         assert_openai_prompt_cache(openai_prompt_cache_output)
+        MockProviderHandler.reset()
+        openai_pricing_output = run_duckdb_openai_pricing(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_openai_pricing(openai_pricing_output)
         MockProviderHandler.reset()
         xai_header_output = run_duckdb_xai_prompt_cache_header(args.duckdb, f"http://127.0.0.1:{port}")
         assert_xai_prompt_cache_header(xai_header_output)

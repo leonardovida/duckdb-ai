@@ -7,6 +7,11 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Corrected GPT-5.6 Sol built-in token prices and applied the same rates to the
+  `gpt-5.6` alias so opt-in usage-cost estimates match current OpenAI billing.
+
 ## 0.4.20 - 2026-08-21
 
 ### Fixed
