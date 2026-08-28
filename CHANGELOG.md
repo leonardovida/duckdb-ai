@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.22 - 2026-08-28
+
 ### Fixed and performance
 
 - Honored embedding response indexes when mapping batched provider results back
