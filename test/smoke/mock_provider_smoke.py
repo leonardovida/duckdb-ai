@@ -1396,7 +1396,7 @@ def assert_xai_prompt_cache_header(output: str):
     if len(MockProviderHandler.completion_requests) != 1:
         raise AssertionError(f"expected one xAI completion request, got {MockProviderHandler.completion_requests}")
     request = MockProviderHandler.completion_requests[0]
-    if request["model"] != "grok-4.5":
+    if request["model"] != "grok-4.6":
         raise AssertionError(f"unexpected xAI default model: {request}")
     if "prompt_cache_key" in request:
         raise AssertionError(f"xAI prompt cache key should be sent as a header, not request JSON: {request}")

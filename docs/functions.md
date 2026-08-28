@@ -1171,7 +1171,7 @@ Supported provider names and aliases are:
 | `vercel` | `vercel_ai_gateway`, `vercel_gateway`, `ai_gateway` | Yes | Yes | `openai/gpt-4o-mini` |
 | `vertex` | `google_vertex`, `vertex_ai`, `gcp_vertex` | Yes | No | `google/gemini-2.5-flash` |
 | `volcengine` | `volcano_engine`, `volcengine_ark`, `doubao`, `ark` | Yes | No | `doubao-seed-2-1-pro-260628` |
-| `xai` | `x.ai`, `x-ai`, `grok` | Yes | No | `grok-4.5` |
+| `xai` | `x.ai`, `x-ai`, `grok` | Yes | No | `grok-4.6` |
 | `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |
 | `openai_privacy_filter` | `privacy_filter`, `pii_filter`, `opf` | Redaction only | No | `openai/privacy-filter` |
 | `openai_compatible` | `local`, `openai-compatible`, `local_openai`, `local-models`, `local_models` | Yes | Yes | `gpt-4o-mini` |
