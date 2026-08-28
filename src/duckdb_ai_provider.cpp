@@ -903,9 +903,8 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "2026-06-30"},
 	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
-	    {"anthropic", "claude-sonnet-5", "completion", 3.00, 15.00,
-	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing starting 2026-09-01",
-	     "2026-08-21"},
+	    {"anthropic", "claude-sonnet-5", "completion", 2.00, 10.00,
+	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-28"},
 	    {"anthropic", "claude-sonnet-4-5", "completion", 3.00, 15.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
 	    {"gemini", "gemini-3.5-flash", "completion", 1.50, 9.00, "https://ai.google.dev/gemini-api/docs/pricing",
@@ -934,8 +933,10 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "live model feed pricing", "2026-06-30"},
 	    {"openrouter", "z-ai/glm-4.7-flash", "completion", 0.06, 0.40, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
-	    {"xai", "grok-4.5", "completion", 2.00, 6.00, "https://docs.x.ai/developers/models",
-	     "standard text token pricing", "2026-07-09"},
+	    {"xai", "grok-4.5", "completion", 2.00, 6.00, "https://docs.x.ai/developers/models/grok-4.5",
+	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
+	    {"xai", "grok-4.6", "completion", 2.00, 6.00, "https://docs.x.ai/developers/grok-4-6",
+	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
 	};
 	return prices;
 }
@@ -2948,7 +2949,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"vertex", "openai_chat", "google/gemini-2.5-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
 	    {"volcengine", "openai_chat", "doubao-seed-2-1-pro-260628", "", "https://ark.cn-beijing.volces.com/api/v3",
 	     "VOLCENGINE_API_KEY", true},
-	    {"xai", "openai_chat", "grok-4.5", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
+	    {"xai", "openai_chat", "grok-4.6", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
 	    {"zai", "openai_chat", "glm-4.7-flash", "embedding-3", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY", true},
 	};
 	return providers;
@@ -5351,16 +5352,6 @@ void ClearResponseCache(ClientContext &context) {
 
 std::vector<ModelPrice> ModelPrices() {
 	auto prices = BuiltinModelPrices();
-	if (CurrentTimestamp().compare(0, 10, "2026-09-01") < 0) {
-		for (auto &price : prices) {
-			if (price.provider == "anthropic" && price.model == "claude-sonnet-5" && price.operation == "completion") {
-				price.input_token_price_per_million = 2.00;
-				price.output_token_price_per_million = 10.00;
-				price.source_note = "introductory text token pricing through 2026-08-31";
-				break;
-			}
-		}
-	}
 	if (CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
 		for (auto &price : prices) {
 			if (price.provider == "gemini" &&

@@ -7,6 +7,17 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Changed
+
+- Updated the xAI / SpaceXAI completion default to `grok-4.6`, while retaining
+  explicit `grok-4.5` selection and pricing metadata.
+
+### Fixed
+
+- Kept Claude Sonnet 5 built-in cost estimates at Anthropic's permanent
+  $2/M input and $10/M output rates instead of applying the canceled September
+  price increase.
+
 ## 0.4.22 - 2026-08-28
 
 ### Fixed and performance
