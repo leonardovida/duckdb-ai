@@ -1681,6 +1681,40 @@ bool JsonValueEquals(const JsonValue &left, const JsonValue &right) {
 	return false;
 }
 
+void HashCombine(size_t &seed, size_t value) {
+	seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+size_t JsonValueHash(const JsonValue &value) {
+	auto hash = std::hash<int> {}(static_cast<int>(value.type));
+	switch (value.type) {
+	case JsonValueType::NULL_VALUE:
+		return hash;
+	case JsonValueType::BOOLEAN:
+		HashCombine(hash, std::hash<bool> {}(value.boolean_value));
+		return hash;
+	case JsonValueType::NUMBER:
+		// JsonValueEquals treats positive and negative zero as equal.
+		HashCombine(hash, std::hash<double> {}(value.number_value == 0 ? 0.0 : value.number_value));
+		return hash;
+	case JsonValueType::STRING:
+		HashCombine(hash, std::hash<std::string> {}(value.string_value));
+		return hash;
+	case JsonValueType::ARRAY:
+		for (auto &entry : value.array_value) {
+			HashCombine(hash, JsonValueHash(entry));
+		}
+		return hash;
+	case JsonValueType::OBJECT:
+		for (auto &entry : value.object_value) {
+			HashCombine(hash, std::hash<std::string> {}(entry.first));
+			HashCombine(hash, JsonValueHash(entry.second));
+		}
+		return hash;
+	}
+	return hash;
+}
+
 std::string JsonValueToJson(const JsonValue &value) {
 	switch (value.type) {
 	case JsonValueType::NULL_VALUE:
@@ -2114,13 +2148,17 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		auto unique_items_schema = ObjectField(schema, "uniqueItems");
 		if (unique_items_schema && unique_items_schema->type == JsonValueType::BOOLEAN &&
 		    unique_items_schema->boolean_value) {
+			std::unordered_map<size_t, std::vector<const JsonValue *>> seen_items;
+			seen_items.reserve(value.array_value.size());
 			for (idx_t i = 0; i < value.array_value.size(); i++) {
-				for (idx_t j = i + 1; j < value.array_value.size(); j++) {
-					if (JsonValueEquals(value.array_value[i], value.array_value[j])) {
-						error = JsonPathIndex(path, j) + " duplicates an earlier item";
+				auto &same_hash_items = seen_items[JsonValueHash(value.array_value[i])];
+				for (auto earlier : same_hash_items) {
+					if (JsonValueEquals(*earlier, value.array_value[i])) {
+						error = JsonPathIndex(path, i) + " duplicates an earlier item";
 						return false;
 					}
 				}
+				same_hash_items.push_back(&value.array_value[i]);
 			}
 		}
 		auto items_schema = ObjectField(schema, "items");
@@ -3834,7 +3872,14 @@ std::vector<double> FindEmbeddingArray(const std::string &body, const std::strin
 	return {};
 }
 
-std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &config, const std::string &body) {
+struct ParsedEmbeddingArray {
+	std::vector<double> values;
+	bool has_index = false;
+	int64_t index = -1;
+};
+
+std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &config, const std::string &body,
+                                                      idx_t expected_count) {
 	std::string error;
 	auto doc = ReadYyjsonDocument(body, error);
 	if (!doc) {
@@ -3859,14 +3904,56 @@ std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &conf
 	}
 	auto data = YyjsonObjectGet(root, "data");
 	if (duckdb_yyjson::yyjson_is_arr(data)) {
+		std::vector<ParsedEmbeddingArray> parsed_embeddings;
 		duckdb_yyjson::yyjson_val *entry;
 		size_t index;
 		size_t max;
 		yyjson_arr_foreach(data, index, max, entry) {
-			std::vector<double> values;
-			if (YyjsonDirectNumberArray(entry, "embedding", values)) {
-				embeddings.push_back(std::move(values));
+			ParsedEmbeddingArray parsed;
+			if (YyjsonDirectNumberArray(entry, "embedding", parsed.values)) {
+				auto index_value = YyjsonObjectGet(entry, "index");
+				parsed.has_index = index_value != nullptr;
+				if (parsed.has_index && !YyjsonDirectInteger(entry, "index", parsed.index)) {
+					throw IOException("AI provider embedding response contained a non-integer index");
+				}
+				parsed_embeddings.push_back(std::move(parsed));
 			}
+		}
+		bool has_index = false;
+		bool has_unindexed = false;
+		for (auto &parsed : parsed_embeddings) {
+			has_index = has_index || parsed.has_index;
+			has_unindexed = has_unindexed || !parsed.has_index;
+		}
+		if (has_index && has_unindexed) {
+			throw IOException("AI provider embedding response mixed indexed and unindexed entries");
+		}
+		if (!has_index) {
+			for (auto &parsed : parsed_embeddings) {
+				embeddings.push_back(std::move(parsed.values));
+			}
+			return embeddings;
+		}
+		if (parsed_embeddings.size() != expected_count) {
+			throw IOException("AI provider embedding response returned %llu embeddings for %llu inputs",
+			                  static_cast<unsigned long long>(parsed_embeddings.size()),
+			                  static_cast<unsigned long long>(expected_count));
+		}
+		embeddings.resize(expected_count);
+		std::vector<bool> seen_indexes(expected_count, false);
+		for (auto &parsed : parsed_embeddings) {
+			if (parsed.index < 0 || static_cast<uint64_t>(parsed.index) >= static_cast<uint64_t>(expected_count)) {
+				throw IOException("AI provider embedding response index %lld is outside the expected range [0, %llu)",
+				                  static_cast<long long>(parsed.index),
+				                  static_cast<unsigned long long>(expected_count));
+			}
+			auto result_index = static_cast<idx_t>(parsed.index);
+			if (seen_indexes[result_index]) {
+				throw IOException("AI provider embedding response contained duplicate index %lld",
+				                  static_cast<long long>(parsed.index));
+			}
+			seen_indexes[result_index] = true;
+			embeddings[result_index] = std::move(parsed.values);
 		}
 	}
 	return embeddings;
@@ -3893,7 +3980,7 @@ EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpRes
 
 std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config, const HttpResponse &response,
                                                    idx_t expected_count) {
-	auto values = ParseEmbeddingArrays(config, response.body);
+	auto values = ParseEmbeddingArrays(config, response.body, expected_count);
 	if (values.size() != expected_count) {
 		if (expected_count == 1) {
 			return {ParseEmbeddingResult(config, response)};
