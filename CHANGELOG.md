@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.23 - 2026-08-28
+
 ### Changed
 
 - Updated the xAI / SpaceXAI completion default to `grok-4.6`, while retaining
