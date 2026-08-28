@@ -147,6 +147,10 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = '{"score":2}'
             elif "return array violation JSON" in prompt:
                 content = '{"tags":["duck","duck"]}'
+            elif "return numeric unique violation JSON" in prompt:
+                content = '[0,-0.0,1]'
+            elif "return object unique violation JSON" in prompt:
+                content = '[{"a":1,"b":2},{"b":2,"a":1}]'
             elif "return oneOf violation JSON" in prompt:
                 content = '{"a":1,"b":2}'
             elif "Score how well the input satisfies the supplied criteria" in full_prompt:
@@ -211,8 +215,24 @@ class MockProviderHandler(BaseHTTPRequestHandler):
 
             input_values = inputs if isinstance(inputs, list) else [inputs]
             usage_tokens = 5 if any("uneven usage" in value for value in input_values) else 2 * input_count
+            embedding_data = [
+                {"embedding": embedding(value), "index": index} for index, value in enumerate(input_values)
+            ]
+            if any("unindexed response" in value for value in input_values):
+                for item in embedding_data:
+                    item.pop("index")
+            elif any("mixed index response" in value for value in input_values):
+                embedding_data[-1].pop("index")
+            elif any("duplicate index response" in value for value in input_values):
+                embedding_data[-1]["index"] = embedding_data[0]["index"]
+            elif any("out of range index response" in value for value in input_values):
+                embedding_data[0]["index"] = len(embedding_data)
+            elif any("non integer index response" in value for value in input_values):
+                embedding_data[0]["index"] = "0"
+            if any("reverse indexed response" in value for value in input_values):
+                embedding_data.reverse()
             payload = {
-                "data": [{"embedding": embedding(value)} for value in input_values],
+                "data": embedding_data,
                 "usage": {
                     "prompt_tokens": usage_tokens,
                     "total_tokens": usage_tokens,
@@ -720,6 +740,139 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
     if result.returncode != 0:
         raise AssertionError(f"duckdb exited with {result.returncode}\n{result.stdout}")
     return result.stdout
+
+
+def run_duckdb_embedding_indexes(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_embedding_model = 'mock-indexed-embedding';
+        SET duckdb_ai_base_url = '{base_url}';
+        CREATE OR REPLACE SECRET smoke_duckdb_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai'
+        );
+        SELECT input, embedding[1] AS x, embedding[2] AS y
+        FROM (
+            SELECT input, ai_embed(input) AS embedding
+            FROM (VALUES
+                ('alpha reverse indexed response'),
+                ('beta reverse indexed response')
+            ) AS inputs(input)
+        )
+        ORDER BY input;
+        SELECT input, embedding[1] AS x, embedding[2] AS y
+        FROM (
+            SELECT input, ai_embed(input) AS embedding
+            FROM (VALUES
+                ('alpha unindexed response'),
+                ('beta unindexed response')
+            ) AS inputs(input)
+        )
+        ORDER BY input;
+    """
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb embedding index smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_embedding_indexes(output: str):
+    expected = [
+        "alpha reverse indexed response│ 1.0 │ 0.0",
+        "beta reverse indexed response │ 0.0 │ 1.0",
+        "alpha unindexed response│ 1.0 │ 0.0",
+        "beta unindexed response │ 0.0 │ 1.0",
+    ]
+    normalized = output.replace(" ", "")
+    missing = [value.replace(" ", "") for value in expected if value.replace(" ", "") not in normalized]
+    if missing:
+        raise AssertionError(f"indexed embedding response mapped to the wrong inputs\n{output}")
+    if len(MockProviderHandler.embedding_requests) != 2:
+        raise AssertionError(
+            f"expected indexed and unindexed embedding batches, got {MockProviderHandler.embedding_requests}"
+        )
+
+
+def run_duckdb_embedding_index_error(duckdb_path: Path, base_url: str, marker: str) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_embedding_model = 'mock-indexed-embedding';
+        SET duckdb_ai_base_url = '{base_url}';
+        CREATE OR REPLACE SECRET smoke_duckdb_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai'
+        );
+        SELECT count(ai_embed(input))
+        FROM (VALUES ('alpha {marker}'), ('beta {marker}')) AS inputs(input);
+    """
+    result = subprocess.run(
+        [str(duckdb_path), "-bail", "-c", sql],
+        cwd=repo_root(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode == 0:
+        raise AssertionError(f"duckdb accepted malformed embedding indexes\n{result.stdout}")
+    return result.stdout
+
+
+def assert_embedding_index_error(output: str, expected: str):
+    if expected not in output:
+        raise AssertionError(f"embedding index error missing {expected!r}\n{output}")
+
+
+def run_duckdb_json_unique_items(duckdb_path: Path, base_url: str) -> str:
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_model = 'mock-model';
+        SET duckdb_ai_base_url = '{base_url}';
+        CREATE OR REPLACE SECRET smoke_duckdb_ai (
+            TYPE duckdb_ai,
+            API_KEY 'test-key',
+            AI_PROVIDER 'openai'
+        );
+        SELECT ai_complete_json(
+            'return numeric unique violation JSON',
+            response_schema := '{{"type":"array","uniqueItems":true}}',
+            fail_on_error := false
+        ) IS NULL AS numeric_unique_violation;
+        SELECT ai_complete_json(
+            'return object unique violation JSON',
+            response_schema := '{{"type":"array","uniqueItems":true}}',
+            fail_on_error := false
+        ) IS NULL AS object_unique_violation;
+    """
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"duckdb JSON uniqueItems smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_json_unique_items(output: str):
+    if "numeric_unique_violation" not in output or "object_unique_violation" not in output:
+        raise AssertionError(f"JSON uniqueItems output missing result columns\n{output}")
+    if output.count("true") < 2:
+        raise AssertionError(f"JSON uniqueItems accepted equivalent numeric or object values\n{output}")
+    if len(MockProviderHandler.completion_requests) != 2:
+        raise AssertionError(f"expected two JSON uniqueItems requests, got {MockProviderHandler.completion_requests}")
 
 
 def run_duckdb_self_correction(duckdb_path: Path, base_url: str) -> str:
@@ -2494,6 +2647,22 @@ def main():
         MockProviderHandler.reset()
         output = run_duckdb(args.duckdb, f"http://127.0.0.1:{port}")
         assert_smoke_result(output)
+        MockProviderHandler.reset()
+        embedding_index_output = run_duckdb_embedding_indexes(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_embedding_indexes(embedding_index_output)
+        embedding_index_errors = [
+            ("mixed index response", "mixed indexed and unindexed entries"),
+            ("duplicate index response", "duplicate index 0"),
+            ("out of range index response", "outside the expected range [0, 2)"),
+            ("non integer index response", "non-integer index"),
+        ]
+        for marker, expected in embedding_index_errors:
+            MockProviderHandler.reset()
+            embedding_index_error = run_duckdb_embedding_index_error(args.duckdb, f"http://127.0.0.1:{port}", marker)
+            assert_embedding_index_error(embedding_index_error, expected)
+        MockProviderHandler.reset()
+        unique_items_output = run_duckdb_json_unique_items(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_json_unique_items(unique_items_output)
         MockProviderHandler.reset()
         adaptive_batch_output = run_duckdb_adaptive_batches(args.duckdb, f"http://127.0.0.1:{port}")
         assert_adaptive_batches(adaptive_batch_output)

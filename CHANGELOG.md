@@ -7,6 +7,16 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed and performance
+
+- Honored embedding response indexes when mapping batched provider results back
+  to inputs, preventing out-of-order OpenAI-compatible responses from silently
+  assigning vectors to the wrong rows. Malformed indexes now fail explicitly,
+  while gateways that omit indexes remain compatible.
+- Replaced quadratic JSON Schema `uniqueItems` validation with hash-bucketed
+  structural comparison, while preserving exact numeric, array, and object
+  equality checks.
+
 ## 0.4.21 - 2026-08-26
 
 ### Fixed
