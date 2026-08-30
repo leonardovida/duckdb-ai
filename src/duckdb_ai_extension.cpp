@@ -1675,6 +1675,17 @@ struct ProviderJobBase {
 	bool completed = false;
 };
 
+bool ProviderJobResultAvailable(const ProviderJobBase &job, ValidityMask &result_validity) {
+	if (job.exception && job.fail_on_error) {
+		std::rethrow_exception(job.exception);
+	}
+	if (job.exception || !job.completed) {
+		result_validity.SetInvalid(job.row);
+		return false;
+	}
+	return true;
+}
+
 struct ProviderStringJob : public ProviderJobBase {
 	std::string input;
 	std::string parameter;
@@ -2102,15 +2113,7 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	});
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row] = StringVector::AddString(result, job.output);
@@ -2560,15 +2563,7 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 	                [&](ProviderStringJob &job) { job.output = duckdb_ai::Complete(job.input, job.options).text; });
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		std::string error;
@@ -2863,15 +2858,7 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	});
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row] = job.output;
@@ -3033,15 +3020,7 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	});
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row] = job.output;
@@ -3094,15 +3073,7 @@ void AiEmbeddingRequestJsonFunction(DataChunk &args, ExpressionState &state, Vec
 	});
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row] = StringVector::AddString(result, job.output);
@@ -3183,15 +3154,7 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row].offset = ListVector::GetListSize(result);
@@ -4344,15 +4307,7 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	});
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row] = StringVector::AddString(result, job.output);
@@ -4430,15 +4385,7 @@ void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &r
 	});
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row].offset = ListVector::GetListSize(result);
@@ -5024,15 +4971,7 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	});
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row] = job.output;
@@ -5624,15 +5563,7 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 	}
 
 	for (auto &job : jobs) {
-		if (job.exception) {
-			if (job.fail_on_error) {
-				std::rethrow_exception(job.exception);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
 		result_data[job.row] = StringVector::AddString(result, job.output);
