@@ -7,6 +7,12 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Accepted Databricks reasoning-model responses with typed text content blocks
+  and omitted unsupported sampling temperature for Claude Sonnet 5 and Opus 5
+  model services, fixing the completion failures reported in #85.
+
 ## 0.4.23 - 2026-08-28
 
 ### Changed

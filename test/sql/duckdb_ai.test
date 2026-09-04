@@ -515,6 +515,11 @@ SELECT ai_completion_request_json('hello databricks', provider := 'databricks');
 {"model":"databricks-gpt-oss-120b","messages":[{"role":"user","content":"hello databricks"}]}
 
 query I
+SELECT NOT contains(opus_request, '"temperature"') AND NOT contains(sonnet_request, '"temperature"') AND contains(older_claude_request, '"temperature":0.2') AND contains(gpt_oss_request, '"temperature":0.2') FROM (SELECT ai_completion_request_json('hello', provider := 'databricks', model := 'system.ai.claude-opus-5', temperature := 0.2) AS opus_request, ai_completion_request_json('hello', provider := 'databricks', model := 'databricks-claude-sonnet-5', temperature := 0.2) AS sonnet_request, ai_completion_request_json('hello', provider := 'databricks', model := 'system.ai.claude-sonnet-4-5', temperature := 0.2) AS older_claude_request, ai_completion_request_json('hello', provider := 'databricks', model := 'system.ai.gpt-oss-120b', temperature := 0.2) AS gpt_oss_request);
+----
+true
+
+query I
 SELECT ai_completion_request_json('hello snowflake', provider := 'snowflake');
 ----
 {"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello snowflake"}]}
