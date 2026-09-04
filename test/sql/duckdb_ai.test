@@ -57,6 +57,11 @@ SELECT provider, model, operation, printf('%.2f', input_token_price_per_million)
 ----
 mistral	mistral-small-latest	completion	0.15	0.60
 
+query IIIII
+SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'deepseek' AND model = 'deepseek-v4-flash';
+----
+deepseek	deepseek-v4-flash	completion	0.44	1.32
+
 query IIIII rowsort
 SELECT provider, model, operation, printf('%.2f', input_token_price_per_million), printf('%.2f', output_token_price_per_million) FROM ai_model_prices() WHERE provider = 'xai';
 ----
@@ -224,6 +229,11 @@ true
 
 query I
 SELECT contains(ai_completion_request_json('hello', provider := 'workers_ai'), '"model":"@cf/zai-org/glm-4.7-flash"') AND contains(ai_completion_request_json('hello', provider := 'qwen'), '"model":"qwen-plus"') AND contains(ai_completion_request_json('hello', provider := 'nebius'), '"model":"meta-llama/Meta-Llama-3.1-70B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'sambanova'), '"model":"Meta-Llama-3.3-70B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'siliconflow'), '"model":"Qwen/Qwen2.5-72B-Instruct"') AND contains(ai_completion_request_json('hello', provider := 'vercel'), '"model":"openai/gpt-4o-mini"');
+----
+true
+
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'nvidia'), '"model":"nvidia/nemotron-3-super-120b-a12b"');
 ----
 true
 

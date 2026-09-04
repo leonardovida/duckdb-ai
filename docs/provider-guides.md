@@ -52,7 +52,7 @@ LIMIT 1;
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
 | `moonshot` / `kimi` | OpenAI-compatible chat | `kimi-k3` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Defaults to `https://api.moonshot.ai/v1`. |
 | `nebius` / `nebius_token_factory` | OpenAI-compatible chat | `meta-llama/Meta-Llama-3.1-70B-Instruct` | `NEBIUS_API_KEY` or `TOKEN_FACTORY_API_KEY` | Defaults to `https://api.tokenfactory.nebius.com/v1`. |
-| `nvidia` / `nvidia_nim` | OpenAI-compatible chat | `meta/llama-3.3-70b-instruct` | `NVIDIA_API_KEY` | Defaults to `https://integrate.api.nvidia.com/v1`. |
+| `nvidia` / `nvidia_nim` | OpenAI-compatible chat | `nvidia/nemotron-3-super-120b-a12b` | `NVIDIA_API_KEY` | Defaults to `https://integrate.api.nvidia.com/v1`. |
 | `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4.7-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://api.z.ai/api/paas/v4`. |
 | `deepseek` | OpenAI-compatible chat | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
 | `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
@@ -356,7 +356,8 @@ SELECT ai_classify(
 ```
 
 DeepSeek is configured for completion calls. Embeddings are not configured for
-this provider.
+this provider. Built-in cost estimates use the published peak-hour cache-miss
+rates; DeepSeek charges 50% less during its documented off-peak windows.
 
 ## OpenRouter
 
@@ -1010,7 +1011,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET nvidia_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'nvidia_nim',
-    MODEL 'meta/llama-3.3-70b-instruct'
+    MODEL 'nvidia/nemotron-3-super-120b-a12b'
 );
 
 SELECT ai_complete(

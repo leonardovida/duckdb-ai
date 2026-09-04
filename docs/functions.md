@@ -1158,7 +1158,7 @@ Supported provider names and aliases are:
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
 | `moonshot` | `kimi`, `moonshot_ai`, `kimi_api` | Yes | No | `kimi-k3` |
 | `nebius` | `nebius_token_factory`, `token_factory` | Yes | No | `meta-llama/Meta-Llama-3.1-70B-Instruct` |
-| `nvidia` | `nvidia_nim`, `nim` | Yes | No | `meta/llama-3.3-70b-instruct` |
+| `nvidia` | `nvidia_nim`, `nim` | Yes | No | `nvidia/nemotron-3-super-120b-a12b` |
 | `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
 | `perplexity` | `pplx` | Yes | No | `sonar` |
 | `poe` | `poe_api` | Yes | No | `GPT-5.4` |

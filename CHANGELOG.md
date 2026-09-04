@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Fixed
+
+- Updated DeepSeek V4 Flash built-in token estimates to the current peak-hour
+  cache-miss rates, while documenting that off-peak billing is 50% lower.
+- Replaced NVIDIA NIM's deprecated free-endpoint default with the supported
+  `nvidia/nemotron-3-super-120b-a12b` model.
+
 ## 0.4.23 - 2026-08-28
 
 ### Changed
