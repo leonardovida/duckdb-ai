@@ -3679,6 +3679,18 @@ bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
 	                                       config.model == "gemini-3.5-flash-lite");
 }
 
+bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
+	if (config.provider != "databricks") {
+		return false;
+	}
+	auto model = LowerAscii(config.model);
+	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5");
+}
+
+bool ProviderOmitsSamplingParameters(const ProviderConfig &config) {
+	return GeminiOmitsSamplingParameters(config) || DatabricksOmitsSamplingParameters(config);
+}
+
 void ValidateProviderResponseFormat(const ProviderConfig &config, const CompletionOptions &options) {
 	if (config.provider != "poe") {
 		return;
@@ -3773,7 +3785,7 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	auto explicit_openai_prompt_cache = OpenAIUsesExplicitPromptCache(config, options);
 	auto payload = "{\"model\":\"" + escaped_model +
 	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt, explicit_openai_prompt_cache);
-	if (options.has_temperature && !GeminiOmitsSamplingParameters(config)) {
+	if (options.has_temperature && !ProviderOmitsSamplingParameters(config)) {
 		payload += ",\"temperature\":" + JsonDouble(options.temperature);
 	}
 	if (options.has_max_tokens) {
@@ -4053,6 +4065,39 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config, const Comp
 	return headers;
 }
 
+bool ExtractMessageContentText(duckdb_yyjson::yyjson_val *message, std::string &result) {
+	auto content = YyjsonObjectGet(message, "content");
+	if (content && duckdb_yyjson::yyjson_is_str(content)) {
+		result = YyjsonString(content);
+		return true;
+	}
+	if (!content || !duckdb_yyjson::yyjson_is_arr(content)) {
+		return false;
+	}
+
+	std::string combined;
+	bool found_text = false;
+	duckdb_yyjson::yyjson_val *entry;
+	size_t index;
+	size_t max;
+	yyjson_arr_foreach(content, index, max, entry) {
+		std::string type;
+		if (YyjsonDirectString(entry, "type", type) && type != "text") {
+			continue;
+		}
+		std::string text;
+		if (YyjsonDirectString(entry, "text", text)) {
+			combined += text;
+			found_text = true;
+		}
+	}
+	if (!found_text) {
+		return false;
+	}
+	result = std::move(combined);
+	return true;
+}
+
 std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::yyjson_val *root,
                                   const std::string &body) {
 	std::string value;
@@ -4086,7 +4131,7 @@ std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::y
 		} else {
 			auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
 			auto message = YyjsonObjectGet(first_choice, "message");
-			if (YyjsonDirectString(message, "content", value)) {
+			if (ExtractMessageContentText(message, value)) {
 				return value;
 			}
 			if (YyjsonDirectString(message, "refusal", value)) {
