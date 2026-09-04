@@ -7,7 +7,7 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
-## 0.4.24 - 2026-09-04
+## 0.4.25 - 2026-09-04
 
 ### Fixed
 
@@ -15,6 +15,11 @@ include SQL API changes and patch versions should preserve the SQL API.
   cache-miss rates, while documenting that off-peak billing is 50% lower.
 - Replaced NVIDIA NIM's deprecated free-endpoint default with the supported
   `nvidia/nemotron-3-super-120b-a12b` model.
+
+## 0.4.24 - 2026-09-04
+
+### Fixed
+
 - Accepted Databricks reasoning-model responses with typed text content blocks
   and omitted unsupported sampling temperature for Claude Sonnet 5 and Opus 5
   model services, fixing the completion failures reported in #85.
