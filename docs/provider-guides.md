@@ -1117,6 +1117,13 @@ If `BASE_URL` is omitted, set `DATABRICKS_HOST`; the extension derives
 `/serving-endpoints`, `/ai-gateway/mlflow/v1`, or `/chat/completions` endpoint.
 Aliases `mosaic`, `mosaic_ai`, and `databricks_ai` resolve to `databricks`.
 
+Databricks reasoning models can return `message.content` as typed reasoning and
+text blocks. `duckdb_ai` returns the text blocks and ignores reasoning summaries.
+Databricks Claude Sonnet 5 and Claude Opus 5 model services reject sampling
+temperature, so the extension omits `temperature` for those model IDs even when
+the generic SQL option is set. Older Claude and other Databricks models retain
+explicit temperature support.
+
 ## Snowflake Cortex REST
 
 Snowflake Cortex REST exposes a Chat Completions API compatible with the OpenAI

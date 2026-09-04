@@ -13,8 +13,11 @@ include SQL API changes and patch versions should preserve the SQL API.
   cache-miss rates, while documenting that off-peak billing is 50% lower.
 - Replaced NVIDIA NIM's deprecated free-endpoint default with the supported
   `nvidia/nemotron-3-super-120b-a12b` model.
-- Updated documentation dependencies to patched `fast-uri` 3.1.6 and `qs`
-  6.16.0 releases, resolving five published request-parsing advisories.
+- Accepted Databricks reasoning-model responses with typed text content blocks
+  and omitted unsupported sampling temperature for Claude Sonnet 5 and Opus 5
+  model services, fixing the completion failures reported in #85.
+- Updated the documentation lockfile to patched `fast-uri` and `qs` releases,
+  resolving their URL-confusion, SSRF, and query-parser advisories.
 
 ## 0.4.23 - 2026-08-28
 

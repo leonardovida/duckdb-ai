@@ -77,6 +77,15 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             self.completion_requests.append(request)
             prompt = message_text(request["messages"][-1])
             full_prompt = "\n".join(message_text(message) for message in request["messages"])
+            if (
+                request.get("model") in {"system.ai.claude-opus-5", "system.ai.claude-sonnet-5"}
+                and "temperature" in request
+            ):
+                self._send_json(
+                    {"error": {"message": "model does not support the temperature parameter"}},
+                    status=400,
+                )
+                return
             concurrency_group = None
             if prompt.startswith("cap one "):
                 concurrency_group = "cap_one"
@@ -183,6 +192,15 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "total_tokens": 10,
                 },
             }
+            if prompt == "databricks typed content":
+                payload["choices"][0]["message"]["content"] = [
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "private reasoning"}],
+                    },
+                    {"type": "text", "text": "visible "},
+                    {"type": "text", "text": "answer"},
+                ]
             if concurrency_group:
                 with self.request_lock:
                     active_name = f"active_{concurrency_group}_requests"
@@ -722,6 +740,13 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SELECT round(sum(ai_similarity('constant query', candidate)), 6) AS constant_similarity_sum
         FROM (VALUES ('candidate one'), ('candidate two'), ('candidate three')) AS input(candidate);
         SELECT ai_rerank('analytics database', 'DuckDB runs analytical SQL') AS rerank_score;
+        SELECT ai_complete(
+            'databricks typed content',
+            secret := 'smoke_databricks_ai',
+            provider := 'databricks',
+            model := 'system.ai.claude-opus-5',
+            temperature := 0.2
+        ) AS databricks_typed_content;
         SELECT event, provider, protocol, model, prompt_chars, response_chars, input_chars,
                dimensions, prompt_tokens, completion_tokens, total_tokens, http_status,
                estimated_cost_usd
@@ -1686,6 +1711,7 @@ def assert_smoke_result(output: str):
         "billing, overdue",
         "performance",
         "0.82",
+        "visible answer",
         "0.25",
         "1.0",
         "3.0",
@@ -1700,11 +1726,11 @@ def assert_smoke_result(output: str):
     if missing:
         raise AssertionError(f"duckdb output missing {missing}\n{output}")
 
-    if len(MockProviderHandler.completion_requests) != 36:
-        raise AssertionError(f"expected 36 completion requests, got {len(MockProviderHandler.completion_requests)}")
-    if len(MockProviderHandler.authorization_headers) != 42:
-        raise AssertionError(f"expected 42 auth headers, got {len(MockProviderHandler.authorization_headers)}")
-    if MockProviderHandler.authorization_headers.count("Bearer test-key") != 40:
+    if len(MockProviderHandler.completion_requests) != 37:
+        raise AssertionError(f"expected 37 completion requests, got {len(MockProviderHandler.completion_requests)}")
+    if len(MockProviderHandler.authorization_headers) != 43:
+        raise AssertionError(f"expected 43 auth headers, got {len(MockProviderHandler.authorization_headers)}")
+    if MockProviderHandler.authorization_headers.count("Bearer test-key") != 41:
         raise AssertionError(f"unexpected default authorization headers: {MockProviderHandler.authorization_headers}")
     if MockProviderHandler.authorization_headers.count("Bearer gemini-test-key") != 1:
         raise AssertionError(f"unexpected Gemini authorization headers: {MockProviderHandler.authorization_headers}")
@@ -1907,6 +1933,13 @@ def assert_smoke_result(output: str):
         != "Query:\nanalytics database\n\nCandidate:\nDuckDB runs analytical SQL"
     ):
         raise AssertionError(f"unexpected rerank prompt: {rerank_request}")
+    databricks_typed_request = MockProviderHandler.completion_requests[36]
+    if databricks_typed_request.get("model") != "system.ai.claude-opus-5":
+        raise AssertionError(f"unexpected Databricks typed-content model: {databricks_typed_request}")
+    if "temperature" in databricks_typed_request:
+        raise AssertionError(
+            f"Databricks Claude 5 request included unsupported temperature: {databricks_typed_request}"
+        )
     if len(MockProviderHandler.privacy_filter_requests) != 1:
         raise AssertionError(
             f"expected 1 Privacy Filter request, got {len(MockProviderHandler.privacy_filter_requests)}"
@@ -1973,20 +2006,20 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected packed constant similarity inputs: {constant_similarity_inputs}")
 
     log_deadline = time.time() + 5
-    while len(MockProviderHandler.log_requests) < 49 and time.time() < log_deadline:
+    while len(MockProviderHandler.log_requests) < 50 and time.time() < log_deadline:
         time.sleep(0.05)
-    if len(MockProviderHandler.log_requests) != 49:
+    if len(MockProviderHandler.log_requests) != 50:
         event_counts = {}
         for request in MockProviderHandler.log_requests:
             event = "otlp" if "resourceLogs" in request else request.get("event", "unknown")
             event_counts[event] = event_counts.get(event, 0) + 1
-        raise AssertionError(f"expected 49 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
+        raise AssertionError(f"expected 50 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 36 or len(embedding_logs) != 12:
+    if len(completion_logs) != 37 or len(embedding_logs) != 12:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")
