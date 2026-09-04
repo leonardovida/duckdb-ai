@@ -11,6 +11,10 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Fixed
 
+- Updated DeepSeek V4 Flash built-in token estimates to the current peak-hour
+  cache-miss rates, while documenting that off-peak billing is 50% lower.
+- Replaced NVIDIA NIM's deprecated free-endpoint default with the supported
+  `nvidia/nemotron-3-super-120b-a12b` model.
 - Accepted Databricks reasoning-model responses with typed text content blocks
   and omitted unsupported sampling temperature for Claude Sonnet 5 and Opus 5
   model services, fixing the completion failures reported in #85.
