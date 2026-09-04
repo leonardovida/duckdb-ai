@@ -7,13 +7,16 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.24 - 2026-09-04
+
 ### Fixed
 
 - Accepted Databricks reasoning-model responses with typed text content blocks
   and omitted unsupported sampling temperature for Claude Sonnet 5 and Opus 5
   model services, fixing the completion failures reported in #85.
-- Updated the documentation lockfile to patched `fast-uri` and `qs` releases,
-  resolving their URL-confusion, SSRF, and query-parser advisories.
+- Updated the documentation lockfile to patched `browserslist`, `fast-uri`, and
+  `qs` releases, resolving their memory-growth, crash, URL-confusion, SSRF, and
+  query-parser advisories.
 
 ## 0.4.23 - 2026-08-28
 
