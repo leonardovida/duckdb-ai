@@ -7,6 +7,8 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.4.24 - 2026-09-04
+
 ### Fixed
 
 - Accepted Databricks reasoning-model responses with typed text content blocks
