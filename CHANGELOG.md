@@ -13,6 +13,8 @@ include SQL API changes and patch versions should preserve the SQL API.
   cache-miss rates, while documenting that off-peak billing is 50% lower.
 - Replaced NVIDIA NIM's deprecated free-endpoint default with the supported
   `nvidia/nemotron-3-super-120b-a12b` model.
+- Updated documentation dependencies to patched `fast-uri` 3.1.6 and `qs`
+  6.16.0 releases, resolving five published request-parsing advisories.
 
 ## 0.4.23 - 2026-08-28
 
