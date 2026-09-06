@@ -1,14 +1,19 @@
 ---
 sidebar_position: 1
 slug: /
+title: DuckDB AI extension — LLMs, embeddings, and structured extraction in SQL
+description: Run local or hosted AI models from DuckDB SQL. Start with agent integration, provider setup, embeddings, JSON extraction, and text-to-SQL examples.
 ---
 
-# duckdb-ai documentation
+# DuckDB AI: LLMs and embeddings in SQL
 
-duckdb-ai is a DuckDB extension that lets SQL call AI model providers. It
-currently focuses on deterministic request shaping, provider metadata,
-completion and embedding calls, structured JSON validation, generated read-only
-SQL, and usage logging.
+duckdb-ai adds AI functions to DuckDB SQL for text summarization, classification,
+structured JSON extraction, embeddings, semantic search preparation, and
+text-to-SQL. Use local Ollama or llama.cpp models, hosted APIs such as OpenAI,
+Claude and Gemini, or enterprise gateways such as Databricks and Snowflake Cortex.
+
+The extension is named `ai`; its functions use `ai_*` and its settings use
+`duckdb_ai_*`. Check the installed version before using source-only features.
 
 ## Installation
 
@@ -22,6 +27,8 @@ LOAD ai;
 
 ## Start here
 
+- [Agent integration guide](agent-guide.md): discover the installed API, configure
+  credentials, preview requests, and verify behavior with local mocks.
 - [SQL function reference](functions.md): every scalar, aggregate, and table
   function exposed by the extension, with examples and result shapes.
 - [Cookbooks](cookbooks/index.md): practical workflows over local tables and

@@ -1,106 +1,100 @@
-<p align="center">
-  <img src="docs/assets/duckdb-ai-logo.svg" alt="duckdb-ai logo" width="520">
-</p>
+# duckdb-ai: DuckDB AI extension for LLMs in SQL
 
-# duckdb-ai
+Run large language models (LLMs) directly from DuckDB SQL. Summarize and classify
+text, extract structured JSON, generate embeddings for semantic search and RAG,
+and ask questions about tables with text-to-SQL.
+
+Use local models through Ollama, llama.cpp, or an OpenAI-compatible server, or
+connect to OpenAI, Anthropic Claude, Google Gemini, OpenRouter, Databricks,
+Snowflake Cortex, and other hosted providers.
+
+[Documentation](https://leonardovida.github.io/duckdb-ai/docs/) ·
+[Agent guide](docs/agent-guide.md) ·
+[SQL reference](docs/functions.md) ·
+[Provider setup](docs/provider-guides.md) ·
+[Cookbooks](docs/cookbooks/index.md)
 
 [![CI](https://github.com/leonardovida/duckdb-ai/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/leonardovida/duckdb-ai/actions/workflows/MainDistributionPipeline.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Run language models on the data you already have in DuckDB — summarize,
-classify, extract, embed, redact, and generate SQL, all from plain SQL
-functions. No pipeline to a separate application, no data leaving your
-machine unless you choose a hosted provider.
+<img src="docs/assets/duckdb-ai-logo.svg" alt="duckdb-ai: AI functions for DuckDB SQL" width="280">
 
-```sql
-LOAD ai;
+## Start here: agents and integrations
 
-SELECT ai_summarize(
-    'DuckDB is an analytical database built for fast local queries.',
-    provider := 'ollama',
-    model := 'gemma4:e4b'
-);
-```
+- **Package name:** `duckdb-ai`. **DuckDB extension name:** `ai`.
+  **SQL functions:** `ai_*`. **Settings and secret type:** `duckdb_ai`.
+- Install with `INSTALL ai FROM community;`, then `LOAD ai;` in each connection.
+  The same SQL works in the DuckDB CLI and clients that support loading this extension,
+  including Python.
+- Read the [agent guide](docs/agent-guide.md) for version checks, API discovery,
+  credential handling, and verification without model calls.
+- Use the [SQL reference](docs/functions.md) for signatures and result types.
+  Use the [provider guide](docs/provider-guides.md) for endpoints, model IDs, and
+  environment variables. Provider capabilities differ.
+- This README describes the source checkout. Community packages can lag source
+  changes; inspect your installed version before using a newer function.
+  Repository contributors should also read [AGENTS.md](AGENTS.md) and
+  [CONTRIBUTING.md](CONTRIBUTING.md).
 
-One extension covers both ends of the spectrum:
+## Install the DuckDB AI extension
 
-- **Working on your laptop?** Point it at [Ollama](https://ollama.com) or any
-  OpenAI-compatible local server and enrich tables with a free local model —
-  nothing ever leaves your machine.
-- **Running this for a team or company?** Route calls through your own gateway
-  (Azure OpenAI, Databricks, Snowflake Cortex, vLLM, LiteLLM), keep credentials
-  in DuckDB secrets or environment variables, restrict network egress to an
-  allowlist, track per-call tokens and estimated cost in `ai_usage()`, and ship
-  privacy-minimized usage logs to your own collector.
-
-## What You Can Do
-
-- Summarize, translate, redact, classify, and extract text from SQL queries.
-- Generate valid JSON, typed DuckDB columns, or per-row `STRUCT` values from
-  model output, validated against a JSON Schema.
-- Create embeddings (batched automatically per chunk), compare text with cosine
-  similarity with distinct-value deduplication, and rerank candidates.
-- Prepare RAG data with deterministic Unicode-aware chunks, Markdown heading
-  context, page metadata, and optional model enrichment.
-- Register safe external-model profiles that reference credential secrets, with
-  optional guarded endpoint provisioning through a separate control plane.
-- Build an experimental relation-level classifier that uses local embedding
-  centroids and falls back to an LLM only for uncertain rows.
-- Ask questions about local tables and generate read-only DuckDB `SELECT`
-  statements — generated SQL is parser-validated before it runs.
-- Route model calls across local Ollama, hosted providers, and
-  OpenAI-compatible gateways, with per-call, per-session, or secret-based
-  configuration.
-- Store credentials in DuckDB secrets instead of passing API keys through SQL
-  function arguments.
-- Control throughput with concurrency caps, request pacing, token-per-minute
-  budgets, retries with backoff, and opt-in response and prompt caching.
-- Inspect local usage events — including failures, retries, cache hits, and
-  estimated cost — and optionally send privacy-minimized usage logs to your own
-  collector.
-
-## Quick Start
-
-The `ai` extension is published as a [DuckDB community extension](https://duckdb.org/community_extensions/extensions/ai).
-Install and load it from any DuckDB client:
+Install a compatible build from the
+[DuckDB community extension catalog](https://duckdb.org/community_extensions/extensions/ai):
 
 ```sql
 INSTALL ai FROM community;
 LOAD ai;
+
+SELECT extension_name, extension_version, loaded
+FROM duckdb_extensions()
+WHERE extension_name = 'ai';
 ```
 
-To build from source instead (requires a C++ toolchain, CMake, and ninja):
-
-```sh
-GEN=ninja make release
-./build/release/duckdb
-```
-
-Confirm that the extension loaded:
+Check available functions without sending data to a model:
 
 ```sql
-SELECT ai_provider_protocol('openai');
+SELECT function_name, function_type
+FROM duckdb_functions()
+WHERE starts_with(function_name, 'ai_')
+ORDER BY function_name;
 ```
 
-For a local model with [Ollama](https://ollama.com/download), install Ollama
-first. Then start the local Ollama server and download the Gemma model used by
-the example:
+## Run a local LLM with Ollama
+
+Install [Ollama](https://ollama.com/download). Start its server if it is not already
+running; leave it running while you use DuckDB:
 
 ```sh
 ollama serve
-ollama pull gemma4:e4b
 ```
+
+In another terminal, download the example model:
+
+```sh
+ollama pull llama3.2
+```
+
+In DuckDB:
 
 ```sql
 LOAD ai;
 
 SET duckdb_ai_provider = 'ollama';
-SET duckdb_ai_model = 'gemma4:e4b';
+SET duckdb_ai_model = 'llama3.2';
 
-SELECT ai_complete('Write one sentence about DuckDB.');
+SELECT ai_complete('Describe DuckDB in one sentence.');
 ```
 
-For OpenAI, store the API key in a DuckDB secret:
+The generated answer varies. This example calls the local server at
+`http://localhost:11434`; no hosted-provider API key is needed.
+For llama.cpp, vLLM, LM Studio, or LiteLLM, see
+[local and self-hosted provider setup](docs/provider-guides.md#openai-compatible--local-gateway).
+
+## Use OpenAI or another hosted model
+
+Provide `OPENAI_API_KEY` to the DuckDB process through your environment or secret
+manager. Choose a model available to your account, then configure a named DuckDB
+secret without placing the API key in the SQL:
 
 ```sql
 LOAD ai;
@@ -108,540 +102,136 @@ LOAD ai;
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'openai',
-    API_KEY '...',
-    MODEL 'gpt-5.6-luna'
+    MODEL 'gpt-4o-mini'
 );
 
 SELECT ai_complete(
-    'Write one sentence about DuckDB.',
-    secret := 'openai_ai'
-);
-```
-
-`API_KEY` values stored in `TYPE duckdb_ai` secrets are redacted when secrets are
-listed.
-
-## Everyday Examples
-
-The examples below use ordinary table columns. For pasteable end-to-end
-walkthroughs, use the docs cookbooks:
-
-- [Create the sample support tickets table](docs/cookbooks/support-ticket-data.md)
-- [Run production batch enrichment from S3 or Parquet](docs/cookbooks/production-batch-enrichment.md)
-- [Enrich rows from Postgres or MySQL safely](docs/cookbooks/source-database-enrichment.md)
-- [Write audited AI outputs to lakehouse tables](docs/cookbooks/audited-lakehouse-output.md)
-- [Monitor AI usage, failures, and cost](docs/cookbooks/usage-cost-observability.md)
-- [Normalize messy documents into structured records](docs/cookbooks/messy-document-intake.md)
-- [Enrich support tickets with AI text functions](docs/cookbooks/support-ticket-enrichment.md)
-- [Compare support tickets with embeddings](docs/cookbooks/support-ticket-similarity.md)
-- [Store embeddings in Lance for semantic search](docs/cookbooks/lance-semantic-search.md)
-- [Extract typed records from model output](docs/cookbooks/structured-triage-records.md)
-- [Generate read-only SQL over local tables](docs/cookbooks/sql-assistant.md)
-
-Summarize support notes by customer:
-
-```sql
-SELECT
-    customer_id,
-    ai_summarize_agg(subject || ': ' || body ORDER BY created_at) AS summary
-FROM support_tickets
-GROUP BY customer_id;
-```
-
-Classify tickets using their subject and body:
-
-```sql
-SELECT
-    ticket_id,
-    ai_classify(
-        subject || chr(10) || body,
-        'billing, performance, integration, documentation, other'
-    ) AS category
-FROM support_tickets;
-```
-
-Filter rows with a natural-language predicate over multiple text columns:
-
-```sql
-SELECT *
-FROM support_tickets
-WHERE ai_filter(
-    subject || chr(10) || body || chr(10) || internal_note,
-    'mentions urgent production impact or needs engineering follow-up'
-);
-```
-
-Extract compact JSON from a body column:
-
-```sql
-SELECT
-    ticket_id,
-    ai_extract(
-        body,
-        'Return compact JSON with product_area, customer_request, and urgency'
-    ) AS extracted_json
-FROM support_tickets;
-```
-
-Redact internal notes before sharing them:
-
-```sql
--- Run OpenAI Privacy Filter locally, or point BASE_URL at a cloud-hosted wrapper.
-SET duckdb_ai_provider = 'openai_privacy_filter';
-SET duckdb_ai_base_url = 'http://localhost:8080';
-
-SELECT
-    ticket_id,
-    ai_redact(internal_note) AS redacted_internal_note
-FROM support_tickets;
-```
-
-Translate customer-facing text stored in columns:
-
-```sql
-SELECT
-    ticket_id,
-    ai_translate(subject || ': ' || body, 'Dutch') AS dutch_update
-FROM support_tickets
-WHERE language = 'en';
-```
-
-Create embeddings and compare text:
-
-```sql
-SELECT
-    left_ticket.ticket_id AS left_ticket_id,
-    right_ticket.ticket_id AS right_ticket_id,
-    ai_similarity(
-        left_ticket.subject || chr(10) || left_ticket.body,
-        right_ticket.subject || chr(10) || right_ticket.body,
-        provider := 'openai',
-        model := 'text-embedding-3-small'
-    ) AS similarity
-FROM support_tickets AS left_ticket
-JOIN support_tickets AS right_ticket
-    ON left_ticket.ticket_id < right_ticket.ticket_id
-ORDER BY similarity DESC;
-```
-
-Prepare Markdown for retrieval and embedding:
-
-```sql
-SELECT chunk_id, chunk_to_retrieve, chunk_to_embed, heading, page
-FROM ai_prep_search(
-    '# Billing' || chr(10) || 'The invoice was charged twice.',
-    source_id := 'ticket-42',
-    title := 'Duplicate charge',
-    chunk_size := 1000,
-    overlap_percent := 10
-);
-```
-
-Register a reusable model profile without putting credentials in the model
-object:
-
-```sql
-CREATE EXTERNAL MODEL support_model WITH (
-    provider = 'openai',
-    model = 'gpt-4o-mini',
-    credential = 'openai_ai',
-    capabilities = 'completion,json_schema'
-);
-
-SELECT ai_complete('Summarize this ticket.', profile := 'support_model');
-```
-
-Create typed columns from one prompt:
-
-```sql
-SELECT *
-FROM ai_complete_record(
-    'Extract a support triage profile for the query regression ticket.',
-    '{
-      "type": "object",
-      "properties": {
-        "product_area": {"type": "string"},
-        "needs_engineering": {"type": "boolean"},
-        "urgency_score": {"type": "integer"},
-        "recommended_owner": {"type": "string"}
-      },
-      "required": ["product_area", "needs_engineering", "urgency_score"]
-    }',
+    'Describe DuckDB in one sentence.',
     provider := 'openai',
-    model := 'gpt-4o-mini'
+    secret := 'openai_ai',
+    max_tokens := 64
 );
 ```
 
-Generate and run read-only SQL over local tables:
+Hosted calls send input to the selected provider and may incur charges.
+For Claude, Gemini, Databricks, Snowflake, or another endpoint, follow the
+[provider-specific setup guide](docs/provider-guides.md).
 
-```sql
-SELECT summary
-FROM ai_schema_prompt(
-    include_tables := ['main.support_tickets'],
-    sample_rows := 3
-);
+## Choose a SQL function
 
-SELECT ai_sql(
-    'Which high-priority customers have the lowest satisfaction scores?',
-    include_tables := ['main.support_tickets'],
-    sample_rows := 3
-);
-
-SELECT *
-FROM ai_query_data(
-    'Count tickets by priority and customer tier',
-    include_tables := ['main.support_tickets'],
-    sample_rows := 3
-);
-```
-
-`ai_sql` and `ai_query_data` only accept one parser-valid read-only DuckDB
-`SELECT` statement before returning or executing generated SQL.
-
-## Highlighted Functions
-
-These are the main functions most users should start with:
-
-| Function | Use it for |
+| Task | Functions and result |
 | --- | --- |
-| `ai_complete` / `ai_try_complete` | General prompt-to-text completions from SQL, with optional row-level error capture. |
-| `ai_summarize` / `ai_summarize_agg` | Summarizing one text value or a grouped set of rows. |
-| `ai_classify` / `ai_classify_labels` | Assigning one or more labels from a controlled list. |
-| `ai_filter` | Filtering rows with a natural-language predicate. |
-| `ai_extract` | Pulling compact structured facts from text. |
-| `ai_complete_record` | Returning model output as typed DuckDB columns from a JSON Schema. |
-| `ai_extract_record` | Extracting typed `STRUCT` values per input row from a JSON Schema. |
-| `ai_embed` / `ai_similarity` / `ai_rerank` | Creating embeddings, comparing text semantically, and LLM-reranking short candidate sets. |
-| `ai_schema_prompt` | Building deterministic local table context for SQL generation. |
-| `ai_sql` / `ai_query_data` | Generating, validating, and optionally running read-only DuckDB `SELECT` statements. |
-| `ai_usage` | Inspecting recent model calls, latency, token estimates, and status. |
+| Call an LLM | `ai_complete` → text; `ai_try_complete` → `STRUCT(response, error)` |
+| Summarize or translate | `ai_summarize`, `ai_translate` → text |
+| Classify text | `ai_classify` → one label; `ai_classify_labels` → label list |
+| Filter with natural language | `ai_filter` → boolean |
+| Extract structured data | `ai_complete_json` → validated JSON; `ai_extract_record` → a typed `STRUCT` per row |
+| Return typed columns | `ai_complete_record` → table; call it from `FROM` |
+| Embed and rank text | `ai_embed` → `DOUBLE[]`; `ai_similarity` → cosine similarity; `ai_rerank` → an LLM relevance score |
+| Summarize groups | `ai_agg`, `ai_summarize_agg` → text per group |
+| Prepare RAG documents | `ai_generate_chunks`, `ai_prep_search` → chunk tables |
+| Generate SQL | `ai_sql` → SQL text; `ai_query_data` → executes a validated read-only `SELECT` |
+| Inspect usage | `ai_usage()`, `ai_usage_summary()` → tables of calls, tokens, errors, and cost metadata |
 
-## Function Map
+See the [full function reference](docs/functions.md) for JSON Schemas, options,
+redaction, SQL repair, model profiles, and experimental classification.
 
-| Need | Functions |
-| --- | --- |
-| Completion text | `ai_complete`, `ai_try_complete`, `ai_completion_request_json` |
-| Structured output | `ai_complete_json`, `ai_complete_record`, `ai_extract_record` |
-| Text tasks | `ai_summarize`, `ai_sentiment`, `ai_fix_grammar`, `ai_redact`, `ai_translate`, `ai_classify`, `ai_classify_labels`, `ai_extract`, `ai_filter` |
-| Aggregates | `ai_summarize_agg`, `ai_agg` |
-| Embeddings and ranking | `ai_embed`, `ai_embedding_request_json`, `ai_similarity`, `ai_rerank` |
-| SQL assistant | `ai_schema_prompt`, `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` |
-| SQL safety checks | `ai_is_read_only_sql`, `ai_validate_read_only_sql` |
-| Provider metadata | `ai_provider_base_url`, `ai_provider_protocol`, `ai_model_prices` |
-| Usage and secrets | `ai_usage`, `ai_clear_usage`, `ai_clear_cache`, `ai_secrets` |
-| Local utility | `ai_count_tokens`, `ai_recommended_batch_size` |
+## Enrich table rows with AI
 
-The full SQL reference is in [`docs/functions.md`](docs/functions.md).
-End-to-end setup examples for each provider are in
-[`docs/provider-guides.md`](docs/provider-guides.md).
-
-## Providers
-
-### Local or self-hosted providers
-
-| Provider | Use it with | Default base URL / key |
-| --- | --- | --- |
-| `llamacpp` / `llama.cpp` | Local llama.cpp `llama-server` | `http://localhost:8080/v1`; optional `LLAMACPP_API_KEY` |
-| `ollama` | Local Ollama chat and embedding models | `http://localhost:11434`; optional `OLLAMA_API_KEY` |
-| `openai_compatible` / `local` | vLLM, LM Studio, LiteLLM, Ollama `/v1`, or another gateway | Set `BASE_URL`; optional `OPENAI_COMPATIBLE_API_KEY` |
-| `openai_privacy_filter` | OpenAI Privacy Filter PII redaction service | `http://localhost:8080`; optional `OPENAI_PRIVACY_FILTER_API_KEY` |
-
-### Remote providers
-
-| Provider | Use it with | Default base URL / key |
-| --- | --- | --- |
-| `anthropic` / `claude` | Anthropic Claude models | `https://api.anthropic.com/v1`; `ANTHROPIC_API_KEY` |
-| `azure` | Azure OpenAI deployments | Set `BASE_URL` or `AZURE_OPENAI_BASE_URL`; `AZURE_OPENAI_API_KEY` |
-| `bedrock` | Amazon Bedrock OpenAI-compatible endpoints | Set `BASE_URL` or `AWS_REGION`; `AWS_BEDROCK_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK` |
-| `cerebras` | Cerebras Cloud chat models | `https://api.cerebras.ai/v1`; `CEREBRAS_API_KEY` |
-| `cloudflare` / `workers_ai` | Cloudflare Workers AI OpenAI-compatible endpoints | Set `CLOUDFLARE_ACCOUNT_ID` or `BASE_URL`; `CLOUDFLARE_API_KEY` or `CLOUDFLARE_API_TOKEN` |
-| `cohere` | Cohere chat and embedding models through the compatibility API | `https://api.cohere.ai/compatibility/v1`; `COHERE_API_KEY` |
-| `dashscope` / `qwen` | Alibaba Cloud Model Studio / DashScope Qwen models | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; `DASHSCOPE_API_KEY` |
-| `databricks` | Databricks Model Serving and Unity AI Gateway chat endpoints | Set `BASE_URL` or `DATABRICKS_HOST`; `DATABRICKS_TOKEN` |
-| `deepinfra` | DeepInfra hosted open-weight chat and embedding models | `https://api.deepinfra.com/v1/openai`; `DEEPINFRA_API_KEY` |
-| `deepseek` | DeepSeek chat models | `https://api.deepseek.com`; `DEEPSEEK_API_KEY` |
-| `fireworks` | Fireworks AI hosted open-weight chat and embedding models | `https://api.fireworks.ai/inference/v1`; `FIREWORKS_API_KEY` |
-| `gemini` / `gcp` / `google` | Gemini through the OpenAI-compatible endpoint | `GEMINI_API_KEY` |
-| `groq` | GroqCloud low-latency hosted open-weight models | `https://api.groq.com/openai/v1`; `GROQ_API_KEY` |
-| `huggingface` / `hf` | Hugging Face Inference Providers router | `https://router.huggingface.co/v1`; `HF_TOKEN` |
-| `hunyuan` / `tencent_hunyuan` | Tencent TokenHub Hy3 models | `https://tokenhub.tencentmaas.com/v1`; `HUNYUAN_API_KEY` or `TOKENHUB_API_KEY` |
-| `minimax` | MiniMax OpenAI-compatible models | `https://api.minimax.io/v1`; `MINIMAX_API_KEY` |
-| `mistral` | Mistral chat models | `https://api.mistral.ai/v1`; `MISTRAL_API_KEY` |
-| `moonshot` / `kimi` | Moonshot AI / Kimi models | `https://api.moonshot.ai/v1`; `MOONSHOT_API_KEY` or `KIMI_API_KEY` |
-| `nebius` / `nebius_token_factory` | Nebius Token Factory hosted open-weight models | `https://api.tokenfactory.nebius.com/v1`; `NEBIUS_API_KEY` |
-| `nvidia` / `nvidia_nim` | NVIDIA hosted NIM endpoints | `https://integrate.api.nvidia.com/v1`; `NVIDIA_API_KEY` |
-| `openai` | OpenAI chat and embedding models | `https://api.openai.com/v1`; `OPENAI_API_KEY` |
-| `openrouter` | OpenRouter model routing | `https://openrouter.ai/api/v1`; `OPENROUTER_API_KEY` |
-| `perplexity` | Perplexity Sonar chat/search models | `https://api.perplexity.ai`; `PERPLEXITY_API_KEY` |
-| `poe` | Poe OpenAI-compatible model routing | `https://api.poe.com/v1`; `POE_API_KEY` |
-| `qianfan` / `ernie` | Baidu Qianfan ERNIE models | `https://qianfan.baidubce.com/v2`; `QIANFAN_API_KEY` |
-| `sambanova` | SambaNova Cloud hosted open-weight models | `https://api.sambanova.ai/v1`; `SAMBANOVA_API_KEY` |
-| `siliconflow` | SiliconFlow hosted open-weight models | `https://api.siliconflow.com/v1`; `SILICONFLOW_API_KEY` |
-| `snowflake` | Snowflake Cortex REST Chat Completions API | Set `BASE_URL`, `SNOWFLAKE_ACCOUNT_URL`, or `SNOWFLAKE_ACCOUNT`; `SNOWFLAKE_PAT` |
-| `stepfun` / `step` | StepFun OpenAI-compatible models | `https://api.stepfun.com/v1`; `STEPFUN_API_KEY` or `STEP_API_KEY` |
-| `together` | Together AI hosted open-weight chat and embedding models | `https://api.together.xyz/v1`; `TOGETHER_API_KEY` |
-| `vercel` / `vercel_ai_gateway` | Vercel AI Gateway multi-provider routing | `https://ai-gateway.vercel.sh/v1`; `AI_GATEWAY_API_KEY` |
-| `vertex` / `google_vertex` | Google Vertex AI OpenAI-compatible endpoints | Set `BASE_URL` or `GOOGLE_CLOUD_PROJECT`; `VERTEX_AI_ACCESS_TOKEN` or `GOOGLE_CLOUD_ACCESS_TOKEN` |
-| `volcengine` / `doubao` | Volcengine Ark Doubao models | `https://ark.cn-beijing.volces.com/api/v3`; `VOLCENGINE_API_KEY` or `ARK_API_KEY` |
-| `xai` / `grok` | xAI Grok chat models | `https://api.x.ai/v1`; `XAI_API_KEY` |
-| `zai` | Z.ai / BigModel chat models | `https://api.z.ai/api/paas/v4`; `ZAI_API_KEY` |
-
-Provider model catalogs are dynamic. The `model` option is passed through to the
-selected provider instead of being restricted to the documented default, so
-current text/chat model IDs, Fireworks routers and account deployments, and
-provider embedding IDs can be selected without an extension update. The
-extension does not expose provider-specific image, video, or audio generation
-APIs.
-
-You can configure providers three ways:
+After the Ollama setup above, this example creates its own input data:
 
 ```sql
--- Session defaults.
-SET duckdb_ai_provider = 'openai';
-SET duckdb_ai_model = 'gpt-5.6-luna';
-SET duckdb_ai_embedding_model = 'text-embedding-3-small';
-SET duckdb_ai_timeout_seconds = 120;
+CREATE TEMP TABLE tickets AS
+SELECT * FROM (VALUES
+    (1, 'I was charged twice for the same invoice.'),
+    (2, 'My query became slow after importing more data.')
+) AS input(ticket_id, body);
 
--- Per-call overrides.
-SELECT ai_complete(
-    'Summarize this in one sentence.',
-    provider := 'openai',
-    model := 'gpt-4o-mini',
-    temperature := 0.2,
-    max_tokens := 128
-);
-
--- DuckDB secrets.
-CREATE OR REPLACE SECRET local_llm (
-    TYPE duckdb_ai,
-    AI_PROVIDER 'local',
-    BASE_URL 'http://localhost:11434/v1',
-    MODEL 'gemma4:e4b'
-);
-
-SELECT ai_complete('hello', secret := 'local_llm');
+SELECT ticket_id,
+       ai_classify(body, 'billing, performance, other') AS category
+FROM tickets;
 ```
 
-Provider-specific environment variables such as `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`,
-`DATABRICKS_TOKEN`, `SNOWFLAKE_PAT`, and `OPENAI_PRIVACY_FILTER_API_KEY` are
-also supported. Generic overrides include
-`DUCKDB_AI_PROVIDER`, `DUCKDB_AI_MODEL`, `DUCKDB_AI_BASE_URL`, and
-`DUCKDB_AI_API_KEY`.
+Each result is a model-selected label. Start with a small input table before
+scaling to a production dataset.
 
-Use family-specific model settings when different function groups should default
-to different models. These override `duckdb_ai_model`, and per-call `model := ...`
-still overrides both:
+For batch jobs, `ai_try_complete` preserves row-level errors. Materialize its
+result before reading the response and error fields in separate queries.
+See [production batch enrichment](docs/cookbooks/production-batch-enrichment.md)
+and [usage and cost monitoring](docs/cookbooks/usage-cost-observability.md).
 
-```sql
-SET duckdb_ai_completion_model = 'gpt-5.6-luna';
-SET duckdb_ai_task_model = 'gpt-5.6-luna';
-SET duckdb_ai_aggregate_model = 'gpt-5.6-luna';
-SET duckdb_ai_sql_assistant_model = 'gpt-5.6-luna';
-SET duckdb_ai_embedding_model = 'text-embedding-3-small';
+## Supported providers and gateways
+
+The extension supports these provider families; the
+[provider matrix](docs/provider-guides.md#provider-matrix) lists exact identifiers,
+credentials, endpoints, and embedding availability.
+
+- **Local/self-hosted:** Ollama, llama.cpp, OpenAI-compatible gateways, and the
+  repository-defined OpenAI Privacy Filter REST wrapper.
+- **Hosted models:** OpenAI, Anthropic Claude, Google Gemini, Mistral, DeepSeek,
+  xAI, Cohere, Groq, Cerebras, Fireworks AI, Together AI, DeepInfra, Hugging Face,
+  NVIDIA NIM, Nebius Token Factory, SambaNova, and SiliconFlow.
+- **Cloud and routing:** Azure OpenAI, Amazon Bedrock, Google Vertex AI,
+  Cloudflare Workers AI, Databricks Model Serving / Unity AI Gateway,
+  Snowflake Cortex, OpenRouter, Vercel AI Gateway, and Poe.
+- **Additional model platforms:** Alibaba DashScope / Qwen, Moonshot / Kimi,
+  MiniMax, Z.ai / GLM, Tencent Hunyuan, Baidu Qianfan / ERNIE, StepFun,
+  and Volcengine / Doubao.
+
+Model IDs are passed through to the provider. Chat and embedding models are
+selected separately. OpenAI-compatible calls support `request_options` for
+additional provider fields; see the [OpenRouter routing guide](docs/provider-guides.md#openrouter).
+Provider-specific discovery helpers, where available in the installed version,
+may fetch a current catalog over the network. Mock coverage checks protocol
+behavior; it does not prove account access or that every provider/model
+combination supports every feature.
+
+## Data privacy, reliability, and limits
+
+Model functions send their inputs to the configured endpoint. With a loopback
+model server and outbound logging disabled, inference stays local. Redaction
+also sends the original input to its configured provider; choose a local
+endpoint when the original text must remain on your machine.
+
+Credentials come from environment variables or DuckDB secrets. Usage stays
+in memory unless you configure an external log collector; logs omit text by
+default. Cost estimates are optional and are not a replacement for provider
+billing. Retries and response caching are opt-in.
+
+Generated SQL is checked as a single read-only `SELECT`. Review it and apply
+DuckDB access controls before executing it: read-only SQL validation is not
+a sandbox. The extension does not provide image, video, or audio generation
+APIs or execute a model tool-call loop.
+
+Read [security and data flow](docs/security-data-flow.md),
+[runtime controls](docs/runtime-behavior.md), and
+[production best practices](docs/best-practices.md) for egress allowlists,
+timeouts, concurrency, rate limits, caching, and logging.
+
+## Build and test from source
+
+Clone this repository with submodules, then build with a C++ toolchain, CMake,
+Ninja, and libcurl development dependencies:
+
+```sh
+git submodule update --init --recursive
+GEN=ninja make release
+GEN=ninja make test
+python3 test/smoke/mock_provider_smoke.py
 ```
 
-## Structured Output
+Run the built shell with `./build/release/duckdb`.
+The default tests use deterministic fixtures and local HTTP mocks; they do not
+need paid API keys. See [contributor instructions](CONTRIBUTING.md) and the
+provider smoke scripts in `test/smoke/` for deterministic contract checks.
 
-Use `ai_complete_json` when you need valid JSON:
+## Documentation and examples
 
-```sql
-SELECT ai_complete_json(
-    'Return {"name": "...", "summary": "..."} for DuckDB.',
-    provider := 'openai',
-    response_schema := '{
-      "type": "object",
-      "properties": {
-        "name": {"type": "string"},
-        "summary": {"type": "string"}
-      },
-      "required": ["name", "summary"]
-    }'
-);
-```
-
-Use `ai_complete_record` when you want DuckDB columns. Scalar schema properties
-become `VARCHAR`, `BOOLEAN`, `BIGINT`, or `DOUBLE`; supported nested objects and
-arrays become `STRUCT` and `LIST` values.
-
-## Safety And Privacy
-
-- Request-preview functions such as `ai_completion_request_json` and
-  `ai_embedding_request_json` build provider request bodies without making a
-  network call.
-- API keys are resolved from environment variables or DuckDB secrets, not direct
-  SQL arguments.
-- Provider error messages redact the active API key before surfacing errors.
-- Usage logs do not include prompt, input, or response text unless
-  `duckdb_ai_log_include_text` or `DUCKDB_AI_LOG_INCLUDE_TEXT=1` is enabled.
-- `duckdb_ai_allowed_hosts` and `allowed_hosts := ...` can restrict provider
-  egress to a comma-separated host allowlist.
-- Generated SQL is guarded by `ai_validate_read_only_sql`, which only accepts one
-  read-only DuckDB `SELECT`.
-
-By default, provider errors fail the SQL query. For exploratory workflows, use
-`on_error := 'null'` to return `NULL` instead:
-
-```sql
-SELECT ai_complete(
-    'Try this with a best-effort provider call.',
-    provider := 'openai',
-    on_error := 'null'
-);
-```
-
-`fail_on_error := false` is still accepted as a compatibility alias for
-`on_error := 'null'`. Use `ai_try_complete` when you need row-level error text
-instead of a bare `NULL`.
-
-## Usage And Cost Visibility
-
-Completions, embeddings, and local `ai_schema_prompt` calls — including failed
-provider calls — are kept in a local in-process ring buffer with function name,
-query id, provider, latency, token, cache, retry, status, error, and cost
-metadata:
-
-```sql
-SELECT * FROM ai_usage();
-SELECT * FROM ai_clear_usage();
-SELECT * FROM ai_clear_cache();
-```
-
-Cost estimates are opt-in. Either pass prices per call or enable the built-in
-model price catalog:
-
-```sql
-SET duckdb_ai_use_builtin_model_prices = true;
-SELECT * FROM ai_model_prices();
-```
-
-Provider pricing changes often, so treat the built-in catalog as a convenience
-for common models rather than a billing authority.
-
-To send usage events to your own collector:
-
-```sql
-SET duckdb_ai_log_endpoint = 'https://collector.example/ai-usage';
-SET duckdb_ai_log_format = 'generic_json';
-SET duckdb_ai_log_tags = 'warehouse=local,app=duckdb';
-```
-
-Use `otlp_json` when sending logs to an OpenTelemetry collector endpoint.
-
-## Reliability Controls
-
-Retries are disabled by default. Enable them explicitly for transient provider
-errors:
-
-```sql
-SELECT ai_complete(
-    'Summarize this.',
-    connect_timeout_seconds := 5,
-    retry_count := 2,
-    retry_backoff_ms := 1000
-);
-```
-
-For batch workloads, cap provider concurrency and rate:
-
-```sql
-SET duckdb_ai_max_concurrent_requests = 4;
-SET duckdb_ai_min_request_interval_ms = 100;
-SET duckdb_ai_token_limit_per_minute = 200000;
-```
-
-These controls apply per DuckDB database instance to completion and embedding
-calls. The token limit uses the local `ai_count_tokens` estimate plus
-`max_tokens` when present, or a conservative default output estimate otherwise.
-Set `max_tokens` for large jobs so the runtime can pace requests against your
-provider's current tokens-per-minute limit.
-
-Response caching is opt-in and in-memory. Identical in-flight requests are
-coalesced into one provider call, and cached entries can expire with a TTL:
-
-```sql
-SET duckdb_ai_cache = true;
-SET duckdb_ai_cache_ttl_seconds = 3600;
-SET duckdb_ai_cache_max_entries = 1024;
-SELECT ai_complete('Summarize this repeated prompt.');
-SELECT * FROM ai_clear_cache();
-```
-
-Provider-side prompt caching is separate and reduces cost on repeated static
-prefixes (system prompts, schemas). Enable it with `prompt_cache := true` or
-`SET duckdb_ai_prompt_cache = true`; the extension sends the matching cache
-hints for OpenAI, Anthropic, and xAI and reports cached token counts in
-`ai_usage()`. GPT-5.6 requests mark the stable system-message prefix as an
-explicit OpenAI cache breakpoint so changing row prompts do not trigger
-unnecessary cache writes.
-
-Use `ai_recommended_batch_size` with a small provider-limit table to pick a
-starting batch size before running a large enrichment:
-
-```sql
-CREATE OR REPLACE TABLE ai_provider_limits AS
-SELECT
-    'openai' AS provider,
-    'gpt-4o-mini' AS model,
-    200000::BIGINT AS token_limit_per_minute,
-    500::BIGINT AS request_limit_per_minute;
-
-WITH prompt_stats AS (
-    SELECT avg(ai_count_tokens(subject || ': ' || body)) AS input_tokens_per_row
-    FROM support_tickets
-)
-SELECT ai_recommended_batch_size(
-    input_tokens_per_row,
-    200, -- planned max_tokens per row
-    token_limit_per_minute,
-    request_limit_per_minute
-) AS recommended_rows_per_minute
-FROM prompt_stats, ai_provider_limits
-WHERE provider = 'openai' AND model = 'gpt-4o-mini';
-```
-
-For production row enrichment, use `ai_try_complete` when one bad row should not
-fail the full query. It returns a `STRUCT(response VARCHAR, error VARCHAR)`, so
-successful rows and rejected rows can be written separately:
-
-```sql
-CREATE TEMP TABLE ticket_ai_attempts AS
-SELECT
-    ticket_id,
-    ai_try_complete(
-        subject || ': ' || body,
-        provider := 'openai',
-        model := 'gpt-4o-mini',
-        max_tokens := 200,
-        token_limit_per_minute := 200000
-    ) AS result
-FROM support_tickets;
-
-CREATE OR REPLACE TABLE ticket_summaries AS
-SELECT ticket_id, result.response AS summary
-FROM ticket_ai_attempts
-WHERE result.error IS NULL;
-
-CREATE OR REPLACE TABLE ticket_ai_failed_rows AS
-SELECT ticket_id, result.error AS error_reason, current_timestamp AS failed_at
-FROM ticket_ai_attempts
-WHERE result.error IS NOT NULL;
-```
-
-Use the same rejected-row `SELECT` inside `COPY (...) TO 'failed_rows.parquet'`
-or an `s3://...` target when failures should live outside the DuckDB database.
-
-## Learn More
-
-- [`docs/functions.md`](docs/functions.md): complete SQL function reference.
-- [`docs/provider-guides.md`](docs/provider-guides.md): end-to-end examples for
-  every supported provider.
-- [`docs/best-practices.md`](docs/best-practices.md): provider selection,
-  secrets, defaults, privacy, logging, throughput, and cost guidance.
-- [`docs/runtime-behavior.md`](docs/runtime-behavior.md): function stability,
-  runtime state, caching, concurrency, retries, and egress allowlisting.
-- [`docs/security-data-flow.md`](docs/security-data-flow.md): egress controls,
-  per-function data flow, logging defaults, and proxy/TLS notes.
-- [`SECURITY.md`](SECURITY.md): vulnerability reporting policy.
-- [`CHANGELOG.md`](CHANGELOG.md): release notes and compatibility policy.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md): development workflow for contributors.
+- [Agent integration guide](docs/agent-guide.md): discover the installed API and verify calls.
+- [SQL function reference](docs/functions.md): signatures, parameters, examples, and result types.
+- [Provider setup](docs/provider-guides.md): configure local models, hosted APIs, and gateways.
+- [Cookbooks](docs/cookbooks/index.md): Parquet/S3 enrichment, Postgres/MySQL inputs,
+  structured records, document intake, embeddings, semantic search with Lance, and text-to-SQL.
+- [Release notes](CHANGELOG.md) and [published releases](https://github.com/leonardovida/duckdb-ai/releases): check version-specific changes.
+- [Security policy](SECURITY.md): report vulnerabilities.
+- [MIT license](LICENSE).
