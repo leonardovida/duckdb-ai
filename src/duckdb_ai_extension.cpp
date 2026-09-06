@@ -2701,18 +2701,45 @@ unique_ptr<FunctionData> AiRerankBind(ClientContext &context, ScalarFunction &bo
 	return std::move(bind_data);
 }
 
-void ReadEmbeddingInputs(ClientContext &context, const StringVectorReader &input_reader,
-                         const StringVectorReader *model_reader, const StringVectorReader *provider_reader,
-                         const AiCompletionBindData &bind_data, idx_t row, std::string &input,
-                         duckdb_ai::CompletionOptions &options, bool &is_null) {
-	if (!input_reader.Read(row, input)) {
-		is_null = true;
-		return;
+template <class JOB>
+std::vector<JOB> PrepareEmbeddingJobs(ClientContext &context, DataChunk &args, const AiCompletionBindData &bind_data,
+                                      ValidityMask &result_validity) {
+	StringVectorReader input_reader(args, bind_data.prompt_index);
+	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
+	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
+	std::vector<JOB> jobs;
+	jobs.reserve(args.size());
+	std::vector<SecretResolutionCacheEntry> secret_cache;
+	for (idx_t row = 0; row < args.size(); row++) {
+		std::string input;
+		if (!input_reader.Read(row, input)) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+
+		duckdb_ai::CompletionOptions options;
+		if (!ReadRuntimeOptions(context, bind_data.options, bind_data.has_model_arg, model_reader.get(),
+		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+
+		try {
+			ApplyAiProviderSecretCached(context, options, secret_cache);
+			JOB job;
+			job.row = row;
+			job.options = options;
+			job.fail_on_error = options.fail_on_error;
+			job.input = std::move(input);
+			jobs.push_back(std::move(job));
+		} catch (std::exception &) {
+			if (options.fail_on_error) {
+				throw;
+			}
+			result_validity.SetInvalid(row);
+		}
 	}
-	if (!ReadRuntimeOptions(context, bind_data.options, bind_data.has_model_arg, model_reader,
-	                        bind_data.has_provider_arg, provider_reader, row, options)) {
-		is_null = true;
-	}
+	return jobs;
 }
 
 double CosineSimilarity(const std::vector<double> &left, const std::vector<double> &right) {
@@ -3034,39 +3061,7 @@ void AiEmbeddingRequestJsonFunction(DataChunk &args, ExpressionState &state, Vec
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<string_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
-	StringVectorReader input_reader(args, bind_data.prompt_index);
-	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
-	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
-
-	std::vector<ProviderStringJob> jobs;
-	jobs.reserve(args.size());
-	std::vector<SecretResolutionCacheEntry> secret_cache;
-	for (idx_t row = 0; row < args.size(); row++) {
-		std::string input;
-		duckdb_ai::CompletionOptions options;
-		bool is_null = false;
-		ReadEmbeddingInputs(state.GetContext(), input_reader, model_reader.get(), provider_reader.get(), bind_data, row,
-		                    input, options, is_null);
-		if (is_null) {
-			result_validity.SetInvalid(row);
-			continue;
-		}
-
-		try {
-			ApplyAiProviderSecretCached(state.GetContext(), options, secret_cache);
-			ProviderStringJob job;
-			job.row = row;
-			job.options = options;
-			job.fail_on_error = options.fail_on_error;
-			job.input = std::move(input);
-			jobs.push_back(std::move(job));
-		} catch (std::exception &ex) {
-			if (options.fail_on_error) {
-				throw;
-			}
-			result_validity.SetInvalid(row);
-		}
-	}
+	auto jobs = PrepareEmbeddingJobs<ProviderStringJob>(state.GetContext(), args, bind_data, result_validity);
 
 	RunProviderJobs(jobs, [&](ProviderStringJob &job) {
 		job.output = duckdb_ai::BuildEmbeddingRequestJson(job.input, job.options);
@@ -3087,39 +3082,7 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto result_data = FlatVector::GetData<list_entry_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
-	StringVectorReader input_reader(args, bind_data.prompt_index);
-	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
-	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
-
-	std::vector<ProviderEmbeddingJob> jobs;
-	jobs.reserve(args.size());
-	std::vector<SecretResolutionCacheEntry> secret_cache;
-	for (idx_t row = 0; row < args.size(); row++) {
-		std::string input;
-		duckdb_ai::CompletionOptions options;
-		bool is_null = false;
-		ReadEmbeddingInputs(state.GetContext(), input_reader, model_reader.get(), provider_reader.get(), bind_data, row,
-		                    input, options, is_null);
-		if (is_null) {
-			result_validity.SetInvalid(row);
-			continue;
-		}
-
-		try {
-			ApplyAiProviderSecretCached(state.GetContext(), options, secret_cache);
-			ProviderEmbeddingJob job;
-			job.row = row;
-			job.options = options;
-			job.fail_on_error = options.fail_on_error;
-			job.input = std::move(input);
-			jobs.push_back(std::move(job));
-		} catch (std::exception &ex) {
-			if (options.fail_on_error) {
-				throw;
-			}
-			result_validity.SetInvalid(row);
-		}
-	}
+	auto jobs = PrepareEmbeddingJobs<ProviderEmbeddingJob>(state.GetContext(), args, bind_data, result_validity);
 
 	auto can_batch = jobs.size() > 1;
 	for (idx_t i = 1; i < jobs.size() && can_batch; i++) {
