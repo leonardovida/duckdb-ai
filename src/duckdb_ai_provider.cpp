@@ -4278,7 +4278,9 @@ std::string NativeResponseJson(const std::string &body) {
 		}
 		std::string type;
 		YyjsonDirectString(root, "type", type);
-		if (type == "error" || type == "response.failed" || YyjsonObjectGet(root, "error")) {
+		auto event_error = YyjsonObjectGet(root, "error");
+		if (type == "error" || type == "response.failed" ||
+		    (event_error && !duckdb_yyjson::yyjson_is_null(event_error))) {
 			throw IOException("Provider event stream returned an error");
 		}
 		if (type == "message_stop" || type == "response.completed" || type == "response.incomplete") {
@@ -4326,7 +4328,8 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	if (native && (!root || !duckdb_yyjson::yyjson_is_obj(root))) {
 		throw IOException("Provider response must be a JSON object");
 	}
-	if (native && YyjsonObjectGet(root, "error")) {
+	auto response_error = YyjsonObjectGet(root, "error");
+	if (native && response_error && !duckdb_yyjson::yyjson_is_null(response_error)) {
 		throw IOException("Provider returned an error object");
 	}
 	result.text = native ? body : ExtractCompletionText(config, root, response.body);

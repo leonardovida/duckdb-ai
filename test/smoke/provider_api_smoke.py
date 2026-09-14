@@ -35,6 +35,23 @@ def run(duckdb_path):
                     response += "data: [DONE]\r\n\r\n"
             else:
                 response = json.dumps({"echo": body, "choices": [{"message": {"content": "answer"}}]})
+                if self.path.endswith("responses"):
+                    response = json.dumps(
+                        {
+                            "echo": body,
+                            "id": "resp_mock",
+                            "status": "completed",
+                            "error": None,
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "answer"}],
+                                }
+                            ],
+                            "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
+                        }
+                    )
                 if self.path.endswith("embeddings"):
                     response = json.dumps(
                         {
