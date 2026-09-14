@@ -7,6 +7,17 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Added
+
+- MiMo/Xiaomi provider credentials and completion defaults.
+- Native JSON provider calls for text protocols, tool/reasoning state exchange,
+  buffered SSE, embeddings and reranking with explicit service endpoints.
+- Controlled provider-native request options for existing completion functions.
+
+### Changed
+
+- Use Qwen3.8 27B in local examples and document the seven-provider text API focus.
+
 ## 0.4.25 - 2026-09-04
 
 ### Fixed

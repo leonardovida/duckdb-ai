@@ -35,6 +35,8 @@ struct ProviderCapabilities {
 
 //! Per-call completion, embedding, retry, rate-limit, logging, and cost-estimation options.
 struct CompletionOptions {
+	std::string api;
+	std::string request_options;
 	std::string model;
 	std::string provider;
 	std::string secret_name;

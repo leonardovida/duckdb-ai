@@ -8,6 +8,11 @@ Use local models through Ollama, llama.cpp, or an OpenAI-compatible server, or
 connect to OpenAI, Anthropic Claude, Google Gemini, OpenRouter, Databricks,
 Snowflake Cortex, and other hosted providers.
 
+Provider development focuses on DeepSeek, Qwen, GLM/Z.ai, Kimi, MiniMax,
+Tencent HY3/HY4, and Xiaomi MiMo. The [text API coverage guide](docs/provider-guides.md#text-api-coverage)
+documents native JSON requests, reasoning/tool-call exchange, embeddings and
+reranking, including tested scope and provider-specific limitations.
+
 [Documentation](https://leonardovida.github.io/duckdb-ai/docs/) ·
 [Agent guide](docs/agent-guide.md) ·
 [SQL reference](docs/functions.md) ·
@@ -71,7 +76,7 @@ ollama serve
 In another terminal, download the example model:
 
 ```sh
-ollama pull llama3.2
+ollama pull qwen3.8:27b
 ```
 
 In DuckDB:
@@ -80,7 +85,7 @@ In DuckDB:
 LOAD ai;
 
 SET duckdb_ai_provider = 'ollama';
-SET duckdb_ai_model = 'llama3.2';
+SET duckdb_ai_model = 'qwen3.8:27b';
 
 SELECT ai_complete('Describe DuckDB in one sentence.');
 ```

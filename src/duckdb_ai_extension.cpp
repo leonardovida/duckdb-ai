@@ -72,13 +72,14 @@ std::atomic<uint64_t> NEXT_QUERY_ID {1};
 // ABI-specific (std::string layout differs per standard library), so only enforce it on the
 // toolchains where the expected values are known instead of breaking every other build.
 #if defined(__APPLE__)
-static_assert(sizeof(duckdb_ai::CompletionOptions) == 688 || sizeof(duckdb_ai::CompletionOptions) == 808,
+static_assert(sizeof(duckdb_ai::CompletionOptions) == 736 || sizeof(duckdb_ai::CompletionOptions) == 856,
               "Update CompletionOptionsEqual when CompletionOptions fields change");
 #endif
 
 bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duckdb_ai::CompletionOptions &right) {
 	// Request operation IDs intentionally do not affect batching or provider configuration equality.
-	return left.model == right.model && left.provider == right.provider && left.secret_name == right.secret_name &&
+	return left.api == right.api && left.request_options == right.request_options && left.model == right.model &&
+	       left.provider == right.provider && left.secret_name == right.secret_name &&
 	       left.explicit_model == right.explicit_model && left.explicit_provider == right.explicit_provider &&
 	       left.explicit_base_url == right.explicit_base_url && left.system_prompt == right.system_prompt &&
 	       left.base_url == right.base_url && left.api_key == right.api_key &&
@@ -795,7 +796,7 @@ bool TryGetOptionType(const std::string &name, LogicalType &type) {
 	if (name == "model" || name == "provider" || name == "profile" || name == "secret" || name == "secret_name" ||
 	    name == "system_prompt" || name == "base_url" || name == "response_format" || name == "response_schema" ||
 	    name == "json_schema" || name == "allowed_hosts" || name == "log_format" || name == "log_tags" ||
-	    name == "on_error") {
+	    name == "on_error" || name == "api" || name == "request_options") {
 		type = LogicalType::VARCHAR;
 		return true;
 	}
@@ -907,6 +908,15 @@ std::string NormalizeOnErrorValue(const std::string &value, const std::string &f
 bool ApplyCompletionValueOption(duckdb_ai::CompletionOptions &options, const std::string &function_name,
                                 const std::string &name, const Value &value, bool allow_response_options,
                                 bool allow_log_payload_options) {
+	if (name == "api" || name == "request_options") {
+		auto text = OptionStringValue(value, function_name, name);
+		if (name == "api") {
+			options.api = text;
+		} else {
+			options.request_options = text;
+		}
+		return true;
+	}
 	if (name == "model") {
 		options.model = OptionStringValue(value, function_name, name);
 		options.explicit_model = true;
@@ -1556,6 +1566,16 @@ unique_ptr<FunctionData> AiCompletionBindInternal(ClientContext &context, Scalar
 unique_ptr<FunctionData> AiCompleteBind(ClientContext &context, ScalarFunction &bound_function,
                                         vector<unique_ptr<Expression>> &arguments) {
 	return AiCompletionBindInternal(context, bound_function, arguments);
+}
+
+unique_ptr<FunctionData> AiProviderCallBind(ClientContext &context, ScalarFunction &bound_function,
+                                            vector<unique_ptr<Expression>> &arguments) {
+	auto result = AiCompletionBindInternal(context, bound_function, arguments);
+	auto &data = result->Cast<AiCompletionBindData>();
+	if (data.has_model_arg || data.has_provider_arg) {
+		throw BinderException("ai_provider_call accepts named options only after the JSON body");
+	}
+	return result;
 }
 
 unique_ptr<FunctionData> AiCompletionRequestJsonBind(ClientContext &context, ScalarFunction &bound_function,
@@ -5339,6 +5359,8 @@ std::string PromptQueryCacheKey(const std::string &question, const std::string &
 	AppendPromptQueryCacheKeyPart(key, question);
 	AppendPromptQueryCacheKeyPart(key, schema_context);
 	AppendPromptQueryCacheKeyPart(key, options.provider);
+	AppendPromptQueryCacheKeyPart(key, options.api);
+	AppendPromptQueryCacheKeyPart(key, options.request_options);
 	AppendPromptQueryCacheKeyPart(key, options.model);
 	AppendPromptQueryCacheKeyPart(key, options.base_url);
 	AppendPromptQueryCacheKeyPart(key, options.system_prompt);
@@ -7689,8 +7711,12 @@ struct AiFunctionDocumentation {
 };
 
 static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
+    {"ai_provider_call",
+     "Calls a provider with a native JSON request and returns its full JSON response; tools are not executed.",
+     "SELECT ai_provider_call('{\"model\":\"hy3\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}', provider "
+     ":= 'hunyuan');"},
     {"ai_complete", "Calls a completion model and returns the response text.", "SELECT ai_complete('Say hello');",
-     "SELECT ai_complete('Say hello', provider := 'ollama', model := 'llama3.2');"},
+     "SELECT ai_complete('Say hello', provider := 'ollama', model := 'qwen3.8:27b');"},
     {"ai_try_complete",
      "Calls a completion model and returns STRUCT(response, error) so row-level failures can be captured.",
      "SELECT ai_try_complete('Say hello');"},
@@ -7986,6 +8012,8 @@ void RegisterClassifierBuildFunction(ExtensionLoader &loader) {
 void AddCompletionNamedParameters(TableFunction &function, bool include_response_options,
                                   bool include_log_payload_options) {
 	static const char *completion_options[] = {"model",
+	                                           "api",
+	                                           "request_options",
 	                                           "provider",
 	                                           "profile",
 	                                           "secret",
@@ -8356,6 +8384,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ParserExtension::Register(config, ExternalModelParserExtension());
 
 	RegisterCompletionFunction(loader, "ai_complete", AiCompleteBind);
+	RegisterCompletionFunction(loader, "ai_provider_call", AiProviderCallBind);
 	RegisterTryCompletionFunction(loader);
 	RegisterCompletionFunction(loader, "ai_completion_request_json", AiCompletionRequestJsonBind);
 

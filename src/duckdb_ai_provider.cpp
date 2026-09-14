@@ -192,6 +192,9 @@ CompletionOptions ChildOperationOptions(const CompletionOptions &options) {
 
 std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	auto provider = LowerAscii(provider_input);
+	if (provider == "xiaomi" || provider == "xiaomi_mimo") {
+		return "mimo";
+	}
 	if (provider == "claude") {
 		return "anthropic";
 	}
@@ -2919,6 +2922,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"hunyuan", "openai_chat", "hy3", "", "https://tokenhub.tencentmaas.com/v1", "HUNYUAN_API_KEY", true},
 	    {"llamacpp", "openai_chat", "default", "default", "http://localhost:8080/v1", "LLAMACPP_API_KEY", false},
 	    {"minimax", "openai_chat", "MiniMax-M2.7", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
+	    {"mimo", "openai_chat", "mimo-v2.5-pro", "", "https://api.xiaomimimo.com/v1", "MIMO_API_KEY", true},
 	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
 	     "MISTRAL_API_KEY", true},
 	    {"moonshot", "openai_chat", "kimi-k3", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
@@ -3545,6 +3549,26 @@ ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool requ
 	                                           : NormalizeBaseUrlForProvider(config.provider, options.base_url);
 	config.api_key = options.api_key.empty() ? ResolveApiKey(config) : options.api_key;
 	config.model = ResolveModel(config, options.model);
+	if (!options.api.empty() && options.api != "chat") {
+		if (options.function_name != "ai_provider_call") {
+			throw InvalidInputException("api is only supported by ai_provider_call");
+		}
+		if (options.api == "messages") {
+			config.protocol = "anthropic_messages";
+		} else if (options.api == "responses" || options.api == "embeddings" || options.api == "rerank" ||
+		           options.api == "fim") {
+			config.protocol = options.api;
+		} else {
+			throw InvalidInputException("api must be chat, messages, responses, embeddings, rerank, or fim");
+		}
+		// Non-chat services can use different regions, workspace paths, and credentials.
+		// Require the exact public endpoint rather than guessing from a chat base URL.
+		if (options.base_url.empty()) {
+			throw InvalidInputException(
+			    "ai_provider_call with a non-chat api requires an explicit full base_url endpoint");
+		}
+		config.base_url = TrimTrailingSlash(options.base_url);
+	}
 	ValidateResolvedProviderConfig(config, require_api_key);
 	return config;
 }
@@ -3725,7 +3749,8 @@ std::string OllamaFormatJson(const CompletionOptions &options) {
 	return "\"format\":\"json\"";
 }
 
-std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
+std::string BasicRequestPayload(const ProviderConfig &config, const std::string &prompt,
+                                const CompletionOptions &options) {
 	auto escaped_model = JsonEscape(config.model);
 	if (config.protocol == "privacy_filter") {
 		return "{\"text\":\"" + JsonEscape(prompt) + "\",\"model\":\"" + escaped_model + "\"}";
@@ -3790,7 +3815,7 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	}
 	if (options.has_max_tokens) {
 		if (config.provider == "openai" || config.provider == "cloudflare" || config.provider == "minimax" ||
-		    config.provider == "moonshot" || config.provider == "snowflake") {
+		    config.provider == "moonshot" || config.provider == "snowflake" || config.provider == "mimo") {
 			payload += ",\"max_completion_tokens\":" + std::to_string(options.max_tokens);
 		} else {
 			payload += ",\"max_tokens\":" + std::to_string(options.max_tokens);
@@ -3819,6 +3844,65 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 	}
 	payload += "}";
 	return payload;
+}
+
+std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
+	const bool native = options.function_name == "ai_provider_call";
+	if (native && (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
+	               !options.response_schema.empty() || !options.response_format.empty() || options.explicit_model)) {
+		throw InvalidInputException("ai_provider_call takes model and generation options in its JSON body");
+	}
+	if (native && !options.request_options.empty()) {
+		throw InvalidInputException("ai_provider_call takes native options in its JSON body, not request_options");
+	}
+	auto payload = native ? prompt : BasicRequestPayload(config, prompt, options);
+	auto extra = native ? prompt : options.request_options;
+	if (extra.empty()) {
+		return payload;
+	}
+	std::string error;
+	auto doc = ReadYyjsonDocument(extra, error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+	if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+		throw InvalidInputException("Provider request must be a JSON object");
+	}
+	std::unordered_map<std::string, bool> keys;
+	duckdb_yyjson::yyjson_val *key;
+	duckdb_yyjson::yyjson_val *value;
+	size_t index, count;
+	yyjson_obj_foreach(root, index, count, key, value) {
+		auto name = YyjsonString(key);
+		if (!keys.emplace(name, true).second) {
+			throw InvalidInputException("Duplicate provider request field: %s", name);
+		}
+		auto lower_name = LowerAscii(name);
+		if (lower_name == "api_key" || lower_name == "api-key" || lower_name == "x-api-key" ||
+		    lower_name == "authorization" || lower_name == "headers") {
+			throw InvalidInputException("Credentials belong in a DuckDB secret or environment variable");
+		}
+		if (!native &&
+		    (name == "model" || name == "messages" || name == "input" || name == "stream" || name == "temperature" ||
+		     name == "max_tokens" || name == "max_completion_tokens" || name == "response_format" || name == "system" ||
+		     name == "prompt_cache_key" || name == "prompt_cache_options" || name == "output_config" ||
+		     name == "options" || name == "format" || name == "prompt")) {
+			throw InvalidInputException("request_options cannot override extension-owned field: %s", name);
+		}
+	}
+	if (native) {
+		std::string model;
+		if (!YyjsonDirectString(root, "model", model) || model.empty()) {
+			throw InvalidInputException("ai_provider_call requires a non-empty model in its JSON body");
+		}
+		return payload;
+	}
+	if (count == 0) {
+		return payload;
+	}
+	// Keep original JSON bytes, including integer precision and provider-specific objects.
+	auto first = extra.find('{');
+	auto last = extra.rfind('}');
+	payload.pop_back();
+	return payload + "," + extra.substr(first + 1, last - first - 1) + "}";
 }
 
 std::string EmbeddingDefaultModel(const std::string &provider) {
@@ -4032,9 +4116,17 @@ std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config,
 
 std::vector<std::string> RequestHeaders(const ProviderConfig &config, const CompletionOptions &options) {
 	std::vector<std::string> headers {"Content-Type: application/json", "User-Agent: " + ExtensionUserAgent()};
+	if (config.provider == "mimo") {
+		headers.push_back("api-key: " + config.api_key);
+		return headers;
+	}
 	if (config.protocol == "anthropic_messages") {
 		headers.push_back("anthropic-version: 2023-06-01");
-		headers.push_back("x-api-key: " + config.api_key);
+		if (config.provider == "moonshot" || config.provider == "zai") {
+			headers.push_back("Authorization: Bearer " + config.api_key);
+		} else {
+			headers.push_back("x-api-key: " + config.api_key);
+		}
 		return headers;
 	}
 	if (config.provider == "azure") {
@@ -4157,13 +4249,84 @@ std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::y
 	throw IOException("AI provider response did not contain a supported completion text field: %s", body);
 }
 
-CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpResponse &response) {
+std::string NativeResponseJson(const std::string &body) {
 	std::string error;
-	auto doc = ReadYyjsonDocument(response.body, error);
+	auto doc = ReadYyjsonDocument(body, error);
+	if (doc) {
+		return body;
+	}
+	// Buffer SSE for SQL callers; preserve event objects and reasoning/tool deltas.
+	std::istringstream lines(body);
+	std::string line, data, events = "[";
+	bool first = true, done = false;
+	auto flush = [&]() {
+		if (data.empty()) {
+			return;
+		}
+		if (data == "[DONE]") {
+			done = true;
+			data.clear();
+			return;
+		}
+		auto event_doc = ReadYyjsonDocument(data, error);
+		auto root = event_doc ? duckdb_yyjson::yyjson_doc_get_root(event_doc.get()) : nullptr;
+		if (!root || !duckdb_yyjson::yyjson_is_obj(root)) {
+			throw IOException("Invalid JSON in provider event stream");
+		}
+		std::string type;
+		YyjsonDirectString(root, "type", type);
+		if (type == "error" || type == "response.failed" || YyjsonObjectGet(root, "error")) {
+			throw IOException("Provider event stream returned an error");
+		}
+		if (type == "message_stop" || type == "response.completed" || type == "response.incomplete") {
+			done = true;
+		}
+		if (!first) {
+			events += ",";
+		}
+		first = false;
+		events += data;
+		data.clear();
+	};
+	while (std::getline(lines, line)) {
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		if (line.empty()) {
+			flush();
+		} else if (StartsWith(line, "data:")) {
+			auto value = line.substr(5);
+			if (!value.empty() && value.front() == ' ') {
+				value.erase(0, 1);
+			}
+			if (!data.empty()) {
+				data += "\n";
+			}
+			data += value;
+		}
+	}
+	flush();
+	if (!done || first) {
+		throw IOException("Provider event stream ended without a complete response");
+	}
+	return "{\"events\":" + events + "]}";
+}
+
+CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpResponse &response,
+                                       bool native = false) {
+	std::string error;
+	auto body = native ? NativeResponseJson(response.body) : response.body;
+	auto doc = ReadYyjsonDocument(body, error);
 	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
 
 	CompletionResult result;
-	result.text = ExtractCompletionText(config, root, response.body);
+	if (native && (!root || !duckdb_yyjson::yyjson_is_obj(root))) {
+		throw IOException("Provider response must be a JSON object");
+	}
+	if (native && YyjsonObjectGet(root, "error")) {
+		throw IOException("Provider returned an error object");
+	}
+	result.text = native ? body : ExtractCompletionText(config, root, response.body);
 	result.raw_response = response.body;
 	result.http_status = response.status;
 	result.elapsed_ms = response.elapsed_ms;
@@ -4185,7 +4348,7 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 			result.total_tokens = result.prompt_tokens + result.completion_tokens;
 		}
 		YyjsonDirectString(root, "stop_reason", result.finish_reason);
-		if (result.finish_reason == "max_tokens") {
+		if (!native && result.finish_reason == "max_tokens") {
 			throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or "
 			                  "request a shorter response");
 		}
@@ -4206,9 +4369,22 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.total_tokens = YyjsonIntegerOrMissing(usage, "total_tokens");
 	auto prompt_token_details = YyjsonObjectGet(usage, "prompt_tokens_details");
 	result.cached_prompt_tokens = YyjsonIntegerOrMissing(prompt_token_details, "cached_tokens");
+	if (config.provider == "deepseek") {
+		auto cached = YyjsonIntegerOrMissing(usage, "prompt_cache_hit_tokens");
+		if (cached >= 0) {
+			result.cached_prompt_tokens = cached;
+		}
+	}
+	if (config.protocol == "responses") {
+		result.prompt_tokens = YyjsonIntegerOrMissing(usage, "input_tokens");
+		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
+		result.cached_prompt_tokens =
+		    YyjsonIntegerOrMissing(YyjsonObjectGet(usage, "input_tokens_details"), "cached_tokens");
+		YyjsonDirectString(root, "status", result.finish_reason);
+	}
 	auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
 	YyjsonDirectString(first_choice, "finish_reason", result.finish_reason);
-	if (result.finish_reason == "length") {
+	if (!native && result.finish_reason == "length") {
 		throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or request a "
 		                  "shorter response");
 	}
@@ -4977,10 +5153,27 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	}
 	auto request_options = RequestOperationOptions(options);
 	auto config = ResolveProvider(request_options);
-	auto endpoint = RequestEndpoint(config);
+	const bool native = options.function_name == "ai_provider_call";
+	auto endpoint = native && !options.api.empty() && options.api != "chat" ? config.base_url : RequestEndpoint(config);
 	std::string payload;
 	try {
 		payload = RequestPayload(config, prompt, request_options);
+		if (native) {
+			std::string error;
+			auto doc = ReadYyjsonDocument(payload, error);
+			auto root = duckdb_yyjson::yyjson_doc_get_root(doc.get());
+			YyjsonDirectString(root, "model", config.model);
+			for (auto field : {"max_tokens", "max_completion_tokens", "max_output_tokens"}) {
+				int64_t limit;
+				if (YyjsonDirectInteger(root, field, limit) && limit > 0) {
+					request_options.has_max_tokens = true;
+					request_options.max_tokens = std::max(request_options.max_tokens, limit);
+				}
+			}
+			if (request_options.max_tokens > MAX_TOKEN_LIMIT_PER_MINUTE) {
+				throw InvalidInputException("Native output token limit is too large");
+			}
+		}
 		ValidateCompletionRequestLimits(prompt, payload, request_options);
 		EnforceAllowedHost(endpoint, request_options);
 	} catch (std::exception &ex) {
@@ -5006,7 +5199,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	}
 	CompletionResult result;
 	try {
-		result = ParseCompletionResult(config, response);
+		result = ParseCompletionResult(config, response, native);
 	} catch (std::exception &ex) {
 		if (!cache_key.empty()) {
 			// Do not keep responses that cannot be parsed (for example truncated output); a
