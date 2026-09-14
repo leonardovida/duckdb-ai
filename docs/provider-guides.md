@@ -4,6 +4,62 @@ sidebar_position: 3
 
 # Provider guides
 
+## Text API coverage
+
+The primary coverage focus is DeepSeek, Qwen, GLM/Z.ai, Kimi, MiniMax,
+Tencent HY3/HY4 and Xiaomi MiMo. Existing providers remain supported.
+The native JSON interface described in the [function reference](functions.md#native-provider-json)
+preserves reasoning and tools across protocol round trips. All model IDs are
+passed through, including account-specific deployments and dated versions.
+Models do not need a built-in pricing/catalog entry to be called.
+
+The table is a documentation snapshot reviewed on **2026-09-14**, not a live
+account availability check. Native transport is tested with mock HTTP for all
+seven providers. Real inference, model limits, regional availability and pricing
+are **not live-verified**. No new hard-coded prices or limits are inferred from
+model names. Check each linked catalog for current lifecycle and account terms.
+
+| Provider | Chat selection | Other documented text APIs and endpoints | Credentials |
+| --- | --- | --- | --- |
+| DeepSeek | `deepseek`; explicit V4 Flash/Pro model IDs | [Thinking/tools](https://api-docs.deepseek.com/guides/thinking_mode), JSON output; FIM uses a separately selected beta endpoint/model | `DEEPSEEK_API_KEY` |
+| Qwen | `qwen` / `dashscope`; explicit Qwen model ID | [Chat/Responses/embeddings](https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview); Messages at `https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages`; Responses at `https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1/responses` | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` |
+| GLM | `zai`; explicit GLM model ID | [Chat](https://docs.z.ai/api-reference/llm/chat-completion), embeddings; [Messages](https://docs.z.ai/devpack/tool/claude) at `https://api.z.ai/api/anthropic/v1/messages` | `ZAI_API_KEY` |
+| Kimi | `kimi` / `moonshot`; explicit Kimi ID | [Chat/Responses/Messages](https://platform.moonshot.ai/docs/introduction); Messages at `https://api.moonshot.ai/anthropic/v1/messages` | `MOONSHOT_API_KEY` / `KIMI_API_KEY` |
+| MiniMax | `minimax`; explicit MiniMax ID | [Messages](https://platform.minimax.io/docs/api-reference/text-chat-anthropic) at `https://api.minimax.io/anthropic/v1/messages` | `MINIMAX_API_KEY` |
+| Tencent | `hunyuan` / `tencent`; `hy3`, `hy4-preview` | [Chat, Responses, Messages](https://www.tencentcloud.com/document/product/1300/80632); append the respective path to the selected regional host | `HUNYUAN_API_KEY` / `TOKENHUB_API_KEY` |
+| MiMo | `mimo`, `xiaomi`, `xiaomi_mimo`; `mimo-v2.5-pro` default, explicit IDs supported | [Chat](https://mimo.mi.com/docs/en-US/api/chat/openai-api) at `https://api.xiaomimimo.com/v1/chat/completions`; [Messages](https://mimo.mi.com/docs/en-US/api/chat/anthropic-api) at `https://api.xiaomimimo.com/anthropic/v1/messages` | `MIMO_API_KEY` via `api-key` header |
+
+Tencent's documented regional bases are Singapore
+`https://tokenhub-intl.tencentcloudmaas.com/v1`, Guangzhou
+`https://tokenhub.tencentcloudmaas.com/v1`, and US
+`https://tokenhub-us.tencentcloudmaas.tech/v1`. Select the region matching your
+key explicitly. The existing Hunyuan default remains for compatibility.
+HY4 is a preview; activation and model availability are controlled by Tencent.
+
+Qwen native reranking has model-dependent paths and payloads. Use
+[`qwen3-rerank`](https://www.alibabacloud.com/help/en/model-studio/text-rerank-api)
+with the full workspace `/compatible-mode/v1/reranks` endpoint, `api := 'rerank'`,
+and a body containing `model`, `query`, `documents`, and optional `top_n`.
+GTE reranking uses nested `input`/`parameters` and a different endpoint; send its
+documented body unchanged. The existing `ai_rerank` is completion-based scoring,
+not a claim that every provider has a native reranking model. No native embeddings
+or reranking are claimed for providers without a verified public reference.
+
+Reasoning options vary: DeepSeek, GLM and MiMo use `thinking`; Qwen uses
+`enable_thinking` and supports `preserve_thinking` on selected models. Preserve
+returned reasoning state when replying to tool calls. Some Qwen models require
+streaming; use native JSON with `stream:true` and read the buffered event array.
+Use the provider's JSON-object response format when JSON Schema is unsupported,
+then validate the result locally. Coding/subscription keys may require different
+endpoints from general API keys. No automatic account, region or protocol fallback
+is performed. Image, audio, video generation and asynchronous media jobs are out
+of scope for this rollout.
+
+```sql
+SELECT ai_complete('Explain columnar storage.', provider := 'mimo',
+  request_options := '{"thinking":{"type":"disabled"}}', max_tokens := 256);
+```
+
 This page gives one simple end-to-end example for each supported provider.
 Examples assume the extension is installed and loaded:
 
@@ -82,7 +138,7 @@ Use Ollama for local models without a hosted API key.
 
 ```sh
 ollama serve
-ollama pull llama3.2
+ollama pull qwen3.8:27b
 ollama pull nomic-embed-text
 ./build/release/duckdb
 ```
@@ -93,7 +149,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET ollama_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'ollama',
-    MODEL 'llama3.2'
+    MODEL 'qwen3.8:27b'
 );
 
 SELECT ai_complete(
@@ -1242,7 +1298,7 @@ For local Ollama's OpenAI-compatible endpoint:
 
 ```sh
 ollama serve
-ollama pull llama3.2
+ollama pull qwen3.8:27b
 ./build/release/duckdb
 ```
 
@@ -1253,7 +1309,7 @@ CREATE OR REPLACE SECRET local_openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'local',
     BASE_URL 'http://localhost:11434/v1',
-    MODEL 'llama3.2'
+    MODEL 'qwen3.8:27b'
 );
 
 SELECT ai_complete(

@@ -2684,6 +2684,8 @@ def assert_control_plane(output: str):
 
 
 def main():
+    from provider_api_smoke import run as run_provider_api_smoke
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--duckdb",
@@ -2799,6 +2801,7 @@ def main():
         server.shutdown()
         thread.join(timeout=5)
 
+    run_provider_api_smoke(args.duckdb)
     print("mock provider smoke passed")
 
 
