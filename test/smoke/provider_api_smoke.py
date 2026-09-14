@@ -177,6 +177,8 @@ def run(duckdb_path):
         before = len(requests)
         query("deepseek", {"messages": []}, fail=True)
         query("deepseek", {**body, "api_key": "forbidden"}, fail=True)
+        for credential_field in ("apiKey", "access_token", "accessToken", "x-api-key", "client_secret"):
+            query("deepseek", {**body, credential_field: "forbidden"}, fail=True)
         query("deepseek", body, fail=True, extra=", temperature := 0.2")
         assert len(requests) == before
     finally:

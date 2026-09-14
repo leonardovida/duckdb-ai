@@ -3876,8 +3876,12 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 			throw InvalidInputException("Duplicate provider request field: %s", name);
 		}
 		auto lower_name = LowerAscii(name);
-		if (lower_name == "api_key" || lower_name == "api-key" || lower_name == "x-api-key" ||
-		    lower_name == "authorization" || lower_name == "headers") {
+		lower_name.erase(
+		    std::remove_if(lower_name.begin(), lower_name.end(), [](char c) { return c == '_' || c == '-'; }),
+		    lower_name.end());
+		if (lower_name == "apikey" || lower_name == "xapikey" || lower_name == "authorization" ||
+		    lower_name == "headers" || lower_name == "accesstoken" || lower_name == "authtoken" ||
+		    lower_name == "token" || lower_name == "password" || lower_name == "clientsecret") {
 			throw InvalidInputException("Credentials belong in a DuckDB secret or environment variable");
 		}
 		if (!native &&
