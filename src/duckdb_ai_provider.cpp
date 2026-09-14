@@ -3884,7 +3884,7 @@ std::string RequestPayload(const ProviderConfig &config, const std::string &prom
 		    (name == "model" || name == "messages" || name == "input" || name == "stream" || name == "temperature" ||
 		     name == "max_tokens" || name == "max_completion_tokens" || name == "response_format" || name == "system" ||
 		     name == "prompt_cache_key" || name == "prompt_cache_options" || name == "output_config" ||
-		     name == "options" || name == "format" || name == "prompt")) {
+		     name == "options" || name == "format" || name == "prompt" || name == "text")) {
 			throw InvalidInputException("request_options cannot override extension-owned field: %s", name);
 		}
 	}
@@ -4118,6 +4118,9 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config, const Comp
 	std::vector<std::string> headers {"Content-Type: application/json", "User-Agent: " + ExtensionUserAgent()};
 	if (config.provider == "mimo") {
 		headers.push_back("api-key: " + config.api_key);
+		if (config.protocol == "anthropic_messages") {
+			headers.push_back("anthropic-version: 2023-06-01");
+		}
 		return headers;
 	}
 	if (config.protocol == "anthropic_messages") {

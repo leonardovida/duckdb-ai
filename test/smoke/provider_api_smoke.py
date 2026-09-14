@@ -147,6 +147,7 @@ def run(duckdb_path):
                 assert headers.get("x-api-key") == "mock-key"
         assert query("mimo", body, "messages")["echo"] == body
         assert requests[-1][1].get("api-key") == "mock-key"
+        assert requests[-1][1].get("anthropic-version") == "2023-06-01"
         events = query("deepseek", {**body, "stream": True})["events"]
         assert events[0]["choices"][0]["delta"]["reasoning_content"] == "reason"
         query("deepseek", {**body, "stream": True, "model": "truncated"}, fail=True)

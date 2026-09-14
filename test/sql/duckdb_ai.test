@@ -545,6 +545,11 @@ SELECT ai_completion_request_json('hello', request_options := '{"model":"other"}
 cannot override extension-owned
 
 statement error
+SELECT ai_completion_request_json('original', provider := 'openai_privacy_filter', request_options := '{"text":"different"}');
+----
+cannot override extension-owned
+
+statement error
 SELECT ai_completion_request_json('hello', request_options := '{"thinking":true,"thinking":false}');
 ----
 Duplicate provider request field

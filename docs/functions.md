@@ -4,64 +4,6 @@ sidebar_position: 2
 
 # SQL function reference
 
-## Native provider JSON
-
-`ai_provider_call(request_json, provider := ..., secret := ..., api := 'chat',
-base_url := ...)` returns a `VARCHAR` containing the full provider JSON response.
-It uses existing secret/environment resolution, retries, timeouts, response-size
-limits, host allowlists and opt-in caching. It never executes tools.
-
-The body must be a JSON object with a non-empty `model`. Put generation options,
-tools, conversation history and reasoning state in that body. Do not also pass
-SQL model, temperature, token-limit, system or response-format options. Duplicate
-top-level fields and credential fields are rejected. Credentials belong in
-DuckDB secrets or environment variables.
-
-`api` accepts `chat`, `messages`, `responses`, `embeddings`, `rerank` and `fim`.
-For non-chat APIs, set `base_url` (or secret BASE_URL) to the **complete endpoint**;
-no path is appended. This supports regional and workspace-specific endpoints.
-The service determines which models support each API. The extension does not
-convert protocols or supply capabilities a provider does not offer.
-
-```sql
-SELECT ai_provider_call(
-  '{"model":"hy4-preview","input":"Explain vector search.","max_output_tokens":512}',
-  provider := 'hunyuan', api := 'responses',
-  base_url := 'https://tokenhub-intl.tencentcloudmaas.com/v1/responses'
-);
-```
-
-Result shape: the complete non-streaming JSON object, including tool calls,
-reasoning, usage and finish/status fields. Refused, truncated and tool-only
-responses remain inspectable; callers must check those fields. HTTP errors and
-top-level error objects raise errors. `fail_on_error := false` returns NULL.
-
-Requests with `"stream":true` buffer SSE and return
-`{"events":[...provider event objects...]}` after completion. SQL rows are not
-delivered incrementally. Missing terminators, invalid event JSON and error events
-fail. Token usage for streaming remains in the event objects and may be absent
-from summary usage counters. Native embedding/rerank results retain provider
-indices; native calls do not automatically batch or reorder them. Use `ai_embed`
-for the existing automatic embedding batching behavior.
-
-For tool round trips, supply definitions and message history, extract returned
-tool calls, perform approved work in the caller, and send tool results with the
-original call IDs and reasoning/signature fields. Raw JSON is preserved, including
-large integer values. No tool is executed by this extension.
-
-Plain completion functions additionally accept `request_options := '{...}'` for
-provider-native fields such as `thinking`, `enable_thinking`, `reasoning_effort`,
-`preserve_thinking` and `top_p`. Overrides of extension-owned model/input, stream,
-temperature, token-limit, response-format and cache fields are rejected.
-
-```sql
-SELECT ai_complete('Explain the proof.', provider := 'deepseek',
-  request_options := '{"thinking":{"type":"enabled"},"reasoning_effort":"high"}');
-```
-
-Use `ai_provider_call` for tools and reasoning-only responses. `ai_complete`
-continues to return final text. See [provider coverage](provider-guides.md#text-api-coverage).
-
 This page documents the public SQL surface registered by the `ai`
 extension. The layout follows the DuckDB function reference style: a compact
 overview table first, then each function with description, example, and result
@@ -128,6 +70,64 @@ FROM ai_usage();
 | `ai_endpoint_status(operation_id)` | Table | Returns the current normalized endpoint operation status. |
 | `ai_deprovision_endpoint(profile)` | Table | Explicitly submits asynchronous endpoint deprovisioning. |
 | `ai_model_prices()` | Table | Returns the built-in provider/model pricing catalog. |
+
+## Native provider JSON
+
+`ai_provider_call(request_json, provider := ..., secret := ..., api := 'chat',
+base_url := ...)` returns a `VARCHAR` containing the full provider JSON response.
+It uses existing secret/environment resolution, retries, timeouts, response-size
+limits, host allowlists and opt-in caching. It never executes tools.
+
+The body must be a JSON object with a non-empty `model`. Put generation options,
+tools, conversation history and reasoning state in that body. Do not also pass
+SQL model, temperature, token-limit, system or response-format options. Duplicate
+top-level fields and credential fields are rejected. Credentials belong in
+DuckDB secrets or environment variables.
+
+`api` accepts `chat`, `messages`, `responses`, `embeddings`, `rerank` and `fim`.
+For non-chat APIs, set `base_url` (or secret BASE_URL) to the **complete endpoint**;
+no path is appended. This supports regional and workspace-specific endpoints.
+The service determines which models support each API. The extension does not
+convert protocols or supply capabilities a provider does not offer.
+
+```sql
+SELECT ai_provider_call(
+  '{"model":"hy4-preview","input":"Explain vector search.","max_output_tokens":512}',
+  provider := 'hunyuan', api := 'responses',
+  base_url := 'https://tokenhub-intl.tencentcloudmaas.com/v1/responses'
+);
+```
+
+Result shape: the complete non-streaming JSON object, including tool calls,
+reasoning, usage and finish/status fields. Refused, truncated and tool-only
+responses remain inspectable; callers must check those fields. HTTP errors and
+top-level error objects raise errors. `fail_on_error := false` returns NULL.
+
+Requests with `"stream":true` buffer SSE and return
+`{"events":[...provider event objects...]}` after completion. SQL rows are not
+delivered incrementally. Missing terminators, invalid event JSON and error events
+fail. Token usage for streaming remains in the event objects and may be absent
+from summary usage counters. Native embedding/rerank results retain provider
+indices; native calls do not automatically batch or reorder them. Use `ai_embed`
+for the existing automatic embedding batching behavior.
+
+For tool round trips, supply definitions and message history, extract returned
+tool calls, perform approved work in the caller, and send tool results with the
+original call IDs and reasoning/signature fields. Raw JSON is preserved, including
+large integer values. No tool is executed by this extension.
+
+Plain completion functions additionally accept `request_options := '{...}'` for
+provider-native fields such as `thinking`, `enable_thinking`, `reasoning_effort`,
+`preserve_thinking` and `top_p`. Overrides of extension-owned model/input, stream,
+temperature, token-limit, response-format and cache fields are rejected.
+
+```sql
+SELECT ai_complete('Explain the proof.', provider := 'deepseek',
+  request_options := '{"thinking":{"type":"enabled"},"reasoning_effort":"high"}');
+```
+
+Use `ai_provider_call` for tools and reasoning-only responses. `ai_complete`
+continues to return final text. See [provider coverage](provider-guides.md#text-api-coverage).
 
 ## Completion functions
 
