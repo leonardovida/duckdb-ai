@@ -164,6 +164,8 @@ For batch jobs, `ai_try_complete` preserves row-level errors. Materialize its
 result before reading the response and error fields in separate queries.
 See [production batch enrichment](docs/cookbooks/production-batch-enrichment.md)
 and [usage and cost monitoring](docs/cookbooks/usage-cost-observability.md).
+For local jobs that need to survive process restarts, try the source-checkout
+[resumable enrichment example](docs/cookbooks/resumable-enrichment.md).
 
 ## Supported providers and gateways
 

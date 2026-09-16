@@ -16,6 +16,9 @@ duckdb-ai with DuckDB storage, file, and database extensions.
 
 ## Production workflows
 
+- [Resume a local enrichment job](resumable-enrichment.md): checkpoint bounded
+  batches in DuckDB and retry failed rows without repeating saved successes.
+
 - [Run production batch enrichment from S3 or Parquet](production-batch-enrichment.md):
   read bounded object-storage inputs, capture row-level failures, and persist
   outputs.
