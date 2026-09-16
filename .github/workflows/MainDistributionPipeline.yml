@@ -159,7 +159,9 @@ jobs:
 
       - name: Run mock-provider smoke test
         shell: bash
-        run: python3 test/smoke/mock_provider_smoke.py
+        run: |
+          python3 test/smoke/mock_provider_smoke.py
+          python3 test/smoke/resumable_enrichment_smoke.py
 
       - name: Show ccache stats
         if: always()

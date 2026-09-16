@@ -208,6 +208,12 @@ DuckDB process will run another job:
 SELECT * FROM ai_clear_usage();
 ```
 
+## Resume after a process restart
+
+The temporary tables above live only for the current connection. For a local,
+single-writer job that skips previously successful rows after reopening DuckDB,
+use the [resumable enrichment example](resumable-enrichment.md).
+
 ## Learn more
 
 - [DuckDB S3 API support](https://duckdb.org/docs/current/core_extensions/httpfs/s3api)
