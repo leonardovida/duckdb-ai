@@ -2685,6 +2685,7 @@ def assert_control_plane(output: str):
 
 def main():
     from provider_api_smoke import run as run_provider_api_smoke
+    from jev_provider_smoke import run as run_jev_provider_smoke
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2802,6 +2803,7 @@ def main():
         thread.join(timeout=5)
 
     run_provider_api_smoke(args.duckdb)
+    run_jev_provider_smoke(args.duckdb)
     print("mock provider smoke passed")
 
 

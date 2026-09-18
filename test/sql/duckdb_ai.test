@@ -1425,3 +1425,16 @@ WHERE function_name LIKE 'ai\_%' ESCAPE '\'
   AND description IS NOT NULL;
 ----
 true
+
+# Jev is a decision provider with server-resolved model aliases.
+query II
+SELECT ai_provider_base_url('jev'), ai_provider_protocol('typesafe');
+----
+https://api.typesafe.ai/v1	typesafe_jev
+
+query I
+SELECT count(*) FROM ai_model_prices()
+WHERE provider = 'typesafe' AND model IN ('jev-latest', 'jev-preview', 'jev-1.13.0')
+  AND input_token_price_per_million = 0.042 AND output_token_price_per_million = 0;
+----
+3

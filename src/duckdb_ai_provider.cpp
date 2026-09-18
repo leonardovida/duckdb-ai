@@ -192,6 +192,9 @@ CompletionOptions ChildOperationOptions(const CompletionOptions &options) {
 
 std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	auto provider = LowerAscii(provider_input);
+	if (provider == "jev") {
+		return "typesafe";
+	}
 	if (provider == "xiaomi" || provider == "xiaomi_mimo") {
 		return "mimo";
 	}
@@ -885,6 +888,12 @@ bool HasEstimatedCost(double estimated_cost_usd) {
 
 const std::vector<ModelPrice> &BuiltinModelPrices() {
 	static const std::vector<ModelPrice> prices {
+	    {"typesafe", "jev-latest", "completion", 0.042, 0.00, "https://docs.typesafe.ai/models.md",
+	     "Jev input tokens only", "2026-09-18"},
+	    {"typesafe", "jev-preview", "completion", 0.042, 0.00, "https://docs.typesafe.ai/models.md",
+	     "Jev input tokens only", "2026-09-18"},
+	    {"typesafe", "jev-1.13.0", "completion", 0.042, 0.00, "https://docs.typesafe.ai/models.md",
+	     "Jev input tokens only", "2026-09-18"},
 	    {"openai", "gpt-5.6", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
 	     "standard text token pricing; alias routes to gpt-5.6-sol", "2026-08-26"},
 	    {"openai", "gpt-5.6-sol", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
@@ -2895,6 +2904,7 @@ std::string ProviderSpecificEnvPrefix(const std::string &provider) {
 
 const std::vector<ProviderSpec> &ProviderCatalog() {
 	static const std::vector<ProviderSpec> providers {
+	    {"typesafe", "typesafe_jev", "jev-latest", "", "https://api.typesafe.ai/v1", "TYPESAFE_API_KEY", true},
 	    {"ollama", "ollama_chat", "llama3.2", "nomic-embed-text", "http://localhost:11434", "OLLAMA_API_KEY", false},
 	    {"openai", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "https://api.openai.com/v1",
 	     "OPENAI_API_KEY", true},
@@ -3574,6 +3584,15 @@ ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool requ
 }
 
 std::string RequestEndpoint(const ProviderConfig &config) {
+	if (config.protocol == "typesafe_jev") {
+		if (EndsWith(config.base_url, "/systemone")) {
+			return config.base_url;
+		}
+		if (EndsWith(config.base_url, "/v1")) {
+			return config.base_url + "/systemone";
+		}
+		return config.base_url + "/v1/systemone";
+	}
 	if (config.protocol == "privacy_filter") {
 		if (EndsWith(config.base_url, "/redact")) {
 			return config.base_url;
@@ -3847,9 +3866,21 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 }
 
 std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
-	const bool native = options.function_name == "ai_provider_call";
-	if (native && (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
-	               !options.response_schema.empty() || !options.response_format.empty() || options.explicit_model)) {
+	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
+	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
+	    options.function_name != "ai_classify" && options.function_name != "ai_filter") {
+		throw InvalidInputException(
+		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, and ai_filter");
+	}
+	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
+	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
+	     !options.response_schema.empty() || !options.response_format.empty())) {
+		throw InvalidInputException("TypeSafe Jev does not support generation options; use classification instructions "
+		                            "or native question instructions instead");
+	}
+	if (options.function_name == "ai_provider_call" &&
+	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
+	     !options.response_schema.empty() || !options.response_format.empty() || options.explicit_model)) {
 		throw InvalidInputException("ai_provider_call takes model and generation options in its JSON body");
 	}
 	if (native && !options.request_options.empty()) {
@@ -4321,6 +4352,78 @@ std::string NativeResponseJson(const std::string &body) {
 	return "{\"events\":" + events + "]}";
 }
 
+bool ValidateJevProbabilityObject(duckdb_yyjson::yyjson_val *object) {
+	if (!object || !duckdb_yyjson::yyjson_is_obj(object)) {
+		return false;
+	}
+	duckdb_yyjson::yyjson_val *key;
+	duckdb_yyjson::yyjson_val *value;
+	size_t index, count;
+	bool saw_probability = false;
+	yyjson_obj_foreach(object, index, count, key, value) {
+		saw_probability = true;
+		double probability;
+		if (!duckdb_yyjson::yyjson_is_num(value) ||
+		    !YyjsonDirectDouble(object, YyjsonString(key).c_str(), probability) || !std::isfinite(probability) ||
+		    probability < 0 || probability > 1) {
+			return false;
+		}
+	}
+	return saw_probability;
+}
+
+bool ValidateJevResponse(duckdb_yyjson::yyjson_val *root) {
+	std::string model;
+	if (!YyjsonDirectString(root, "model", model) || model.empty()) {
+		return false;
+	}
+	auto answers = YyjsonObjectGet(root, "answers");
+	if (!answers || !duckdb_yyjson::yyjson_is_obj(answers)) {
+		return false;
+	}
+	duckdb_yyjson::yyjson_val *key;
+	duckdb_yyjson::yyjson_val *answer;
+	size_t index, count;
+	bool saw_answer = false;
+	yyjson_obj_foreach(answers, index, count, key, answer) {
+		saw_answer = true;
+		if (!answer || !duckdb_yyjson::yyjson_is_obj(answer)) {
+			return false;
+		}
+		std::string type;
+		if (!YyjsonDirectString(answer, "type", type)) {
+			return false;
+		}
+		if (type == "noul") {
+			double value;
+			if (!YyjsonDirectDouble(answer, "noul", value) || !std::isfinite(value) || value < 0 || value > 1) {
+				return false;
+			}
+		} else if (type == "choice") {
+			std::string choice;
+			if (!YyjsonDirectString(answer, "choice", choice) || choice.empty() ||
+			    !ValidateJevProbabilityObject(YyjsonObjectGet(answer, "probabilities"))) {
+				return false;
+			}
+			double confidence;
+			if (YyjsonObjectGet(answer, "confidence") &&
+			    (!YyjsonDirectDouble(answer, "confidence", confidence) || !std::isfinite(confidence) ||
+			     confidence < 0 || confidence > 1)) {
+				return false;
+			}
+		} else if (type == "score") {
+			double score;
+			if (!YyjsonDirectDouble(answer, "score", score) || !std::isfinite(score) || score < 0 || score > 9 ||
+			    !ValidateJevProbabilityObject(YyjsonObjectGet(answer, "probabilities"))) {
+				return false;
+			}
+		} else {
+			return false;
+		}
+	}
+	return saw_answer;
+}
+
 CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpResponse &response,
                                        bool native = false) {
 	std::string error;
@@ -4331,6 +4434,9 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	CompletionResult result;
 	if (native && (!root || !duckdb_yyjson::yyjson_is_obj(root))) {
 		throw IOException("Provider response must be a JSON object");
+	}
+	if (native && config.protocol == "typesafe_jev" && !ValidateJevResponse(root)) {
+		throw IOException("TypeSafe Jev response must contain valid model and answers");
 	}
 	auto response_error = YyjsonObjectGet(root, "error");
 	if (native && response_error && !duckdb_yyjson::yyjson_is_null(response_error)) {
@@ -4347,6 +4453,15 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.total_tokens = -1;
 	result.cached_prompt_tokens = -1;
 	result.cache_creation_prompt_tokens = -1;
+	if (config.protocol == "typesafe_jev") {
+		auto usage = YyjsonObjectGet(root, "usage");
+		result.prompt_tokens = YyjsonIntegerOrMissing(usage, "input_tokens");
+		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
+		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
+			result.total_tokens = result.prompt_tokens + result.completion_tokens;
+		}
+		return result;
+	}
 
 	if (config.protocol == "anthropic_messages") {
 		auto usage = YyjsonObjectGet(root, "usage");
@@ -5008,6 +5123,28 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 
 } // namespace
 
+bool ParseJevAnswer(const std::string &response, const std::string &question_key, const std::string &answer_type,
+                    std::string &choice, double &probability) {
+	std::string error;
+	auto doc = ReadYyjsonDocument(response, error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+	auto answers = YyjsonObjectGet(root, "answers");
+	auto answer = YyjsonObjectGet(answers, question_key.c_str());
+	std::string actual_type;
+	if (!answer || !duckdb_yyjson::yyjson_is_obj(answer) || !YyjsonDirectString(answer, "type", actual_type) ||
+	    actual_type != answer_type) {
+		return false;
+	}
+	if (answer_type == "choice") {
+		return YyjsonDirectString(answer, "choice", choice);
+	}
+	if (answer_type == "noul") {
+		return YyjsonDirectDouble(answer, "noul", probability) && std::isfinite(probability) && probability >= 0 &&
+		       probability <= 1;
+	}
+	return false;
+}
+
 std::string NormalizeProviderName(const std::string &provider) {
 	return NormalizeProviderNameInternal(provider);
 }
@@ -5163,7 +5300,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	}
 	auto request_options = RequestOperationOptions(options);
 	auto config = ResolveProvider(request_options);
-	const bool native = options.function_name == "ai_provider_call";
+	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
 	auto endpoint = native && !options.api.empty() && options.api != "chat" ? config.base_url : RequestEndpoint(config);
 	std::string payload;
 	try {

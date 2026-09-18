@@ -117,6 +117,10 @@ struct CompletionResult {
 	std::string finish_reason;
 };
 
+//! Parse one answer from a native TypeSafe Jev response.
+bool ParseJevAnswer(const std::string &response, const std::string &question_key, const std::string &answer_type,
+                    std::string &choice, double &probability);
+
 //! Parsed result from an embedding provider response.
 struct EmbeddingResult {
 	std::vector<double> values;

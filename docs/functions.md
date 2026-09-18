@@ -87,6 +87,11 @@ DuckDB secrets or environment variables.
 `api` accepts `chat`, `messages`, `responses`, `embeddings`, `rerank` and `fim`.
 For non-chat APIs, set `base_url` (or secret BASE_URL) to the **complete endpoint**;
 no path is appended. This supports regional and workspace-specific endpoints.
+TypeSafe Jev uses its native `/systemone` endpoint automatically with
+`provider := 'typesafe'` (alias `jev`), without an `api` override. Its body contains
+`model`, `state`, and `questions`, and its response preserves `answers` and usage.
+See the [Jev cookbook](cookbooks/jev-decisions.md) for several decisions in one call.
+
 The service determines which models support each API. The extension does not
 convert protocols or supply capabilities a provider does not offer.
 
@@ -431,6 +436,11 @@ examples without changing the return type. Configured labels must be non-empty
 and unique. The returned value is validated against the configured set and
 canonicalized to its original spelling.
 
+With `provider := 'typesafe'` (alias `jev`), this sends a native Jev Choice
+question rather than generating a label as text. Jev accepts at most 255 options.
+Use `ai_provider_call` when you also need the probability distribution or want to
+bundle several questions against the same input.
+
 Example:
 
 ```sql
@@ -532,7 +542,11 @@ Result: `VARCHAR`
 #### `ai_filter(text, predicate[, model[, provider]])`
 
 Description: Evaluates whether `text` matches a natural-language predicate. The
-model output must parse as true or false.
+model output must parse as true or false. With `provider := 'typesafe'` (alias
+`jev`), this sends a native Noul question and returns `true` for a probability
+of at least `0.5`. Invalid or out-of-range probabilities raise an error. Use
+`ai_provider_call` to retain the probability and apply a workload-specific
+threshold in SQL.
 
 Example:
 

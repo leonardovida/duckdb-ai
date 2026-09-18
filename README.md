@@ -178,6 +178,9 @@ credentials, endpoints, and embedding availability.
 - **Hosted models:** OpenAI, Anthropic Claude, Google Gemini, Mistral, DeepSeek,
   xAI, Cohere, Groq, Cerebras, Fireworks AI, Together AI, DeepInfra, Hugging Face,
   NVIDIA NIM, Nebius Token Factory, SambaNova, and SiliconFlow.
+- **Structured decisions:** TypeSafe Jev for native choices, scores, and yes/no
+  probabilities. See the [Jev cookbook](docs/cookbooks/jev-decisions.md) for
+  multi-question evaluation in one request.
 - **Cloud and routing:** Azure OpenAI, Amazon Bedrock, Google Vertex AI,
   Cloudflare Workers AI, Databricks Model Serving / Unity AI Gateway,
   Snowflake Cortex, OpenRouter, Vercel AI Gateway, and Poe.
