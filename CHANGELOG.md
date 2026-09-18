@@ -7,19 +7,41 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.5.0 - 2026-09-18
+
 ### Added
 
 - TypeSafe Jev evaluation provider with native multi-question requests,
-  `ai_classify` and `ai_filter` adapters, and structured decision examples for ticket triage, reranking, and entity matching.
+  `ai_classify` and `ai_filter` adapters, model pricing, and examples for ticket
+  triage, reranking, entity matching, and model routing. [#97](https://github.com/leonardovida/duckdb-ai/pull/97)
+- Native JSON provider calls for reasoning and tool-state exchange, buffered SSE,
+  embeddings, and reranking through explicit service endpoints. Added guarded
+  provider-native completion options and MiMo/Xiaomi credentials and defaults.
+  [#94](https://github.com/leonardovida/duckdb-ai/pull/94)
+- Resumable local enrichment with durable checkpoints, selective retries, and
+  prompt/configuration invalidation. [#95](https://github.com/leonardovida/duckdb-ai/pull/95)
 
-- MiMo/Xiaomi provider credentials and completion defaults.
-- Native JSON provider calls for text protocols, tool/reasoning state exchange,
-  buffered SSE, embeddings and reranking with explicit service endpoints.
-- Controlled provider-native request options for existing completion functions.
+### Fixed
+
+- Escape multiline text and control characters in JSON requests and reject
+  malformed Jev decisions and unsupported generation options.
+  [#97](https://github.com/leonardovida/duckdb-ai/pull/97)
 
 ### Changed
 
-- Use Qwen3.8 27B in local examples and document the seven-provider text API focus.
+- Share embedding-job preparation without changing SQL behavior.
+  [#90](https://github.com/leonardovida/duckdb-ai/pull/90)
+- Clarify agent-first setup, document native text API coverage, and use Qwen3.8
+  27B in local examples. [#91](https://github.com/leonardovida/duckdb-ai/pull/91)
+  [#94](https://github.com/leonardovida/duckdb-ai/pull/94)
+- Patch documentation dependencies for SVGO, SWC HTML, YAML merge-budget, and
+  Joi prototype-handling advisories. [#92](https://github.com/leonardovida/duckdb-ai/pull/92)
+  [#93](https://github.com/leonardovida/duckdb-ai/pull/93)
+  [#96](https://github.com/leonardovida/duckdb-ai/pull/96)
+
+No breaking SQL API changes are expected. Jev is a decision model and does not
+support generated text or embeddings. Native tool calls are never executed by the
+extension. Jev latency and prediction quality have not been measured live.
 
 ## 0.4.25 - 2026-09-04
 
