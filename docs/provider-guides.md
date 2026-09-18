@@ -125,12 +125,95 @@ LIMIT 1;
 | `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-2.5-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
 | `volcengine` / `doubao` | OpenAI-compatible chat | `doubao-seed-2-1-pro-260628` | `VOLCENGINE_API_KEY`, `ARK_API_KEY`, or `DOUBAO_API_KEY` | Defaults to `https://ark.cn-beijing.volces.com/api/v3`. |
 | `xai` / `grok` | OpenAI-compatible chat | `grok-4.6` | `XAI_API_KEY` | Defaults to `https://api.x.ai/v1`. |
+| `typesafe` / `jev` | TypeSafe System One evaluation | `jev-latest` | `TYPESAFE_API_KEY` | Defaults to `https://api.typesafe.ai/v1` and calls `/systemone`. |
 | `openai_privacy_filter` | Dedicated redaction endpoint | `openai/privacy-filter` | Optional `OPENAI_PRIVACY_FILTER_API_KEY` | Defaults to `http://localhost:8080` and calls `POST /redact`. |
 | `openai_compatible` / `local` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | Optional `OPENAI_COMPATIBLE_API_KEY` | Requires `BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL`. |
 | `llamacpp` / `llama.cpp` | OpenAI-compatible chat and embeddings | `default` (llama-server answers with its loaded model) | Optional `LLAMACPP_API_KEY` (`llama-server --api-key`) | Defaults to `http://localhost:8080/v1`. Embeddings need `llama-server --embeddings`. |
 
 For guidance on choosing providers, credentials, logging, cost, throughput, and
 PII workflows, see [Best practices](best-practices.md).
+
+## TypeSafe Jev
+
+Jev evaluates state against typed questions and returns probabilities, choices,
+and rubric scores. It does not generate text or embeddings. Use `typesafe` (or
+its alias `jev`) for the direct TypeSafe API. The supported entry points are
+`ai_provider_call`, `ai_classify`, and `ai_filter`. Use a native Score question
+through `ai_provider_call` for rubric scoring. Other AI task functions, including
+`ai_score`, require a completion provider. Generation options such as
+`temperature`, `max_tokens`, and `system_prompt` are rejected. Put task guidance
+in classification `instructions` or in native question instructions.
+
+```sh
+export TYPESAFE_API_KEY='...'
+./build/release/duckdb
+```
+
+```sql
+LOAD ai;
+CREATE OR REPLACE SECRET typesafe_ai (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'typesafe',
+    MODEL 'jev-latest'
+);
+
+SELECT ai_classify(
+    'I was charged twice.', ['billing', 'technical', 'other'],
+    secret := 'typesafe_ai'
+) AS department;
+
+SELECT ai_filter(
+    'Our production imports are blocked.',
+    'Does the text describe blocked production work?',
+    secret := 'typesafe_ai'
+) AS production_blocked;
+```
+
+Classification sends a native Choice question. Filtering sends a Noul question
+and returns `true` when its probability is at least `0.5`. For explicit thresholds,
+confidence, or several decisions about the same state, use `ai_provider_call`:
+
+```sql
+SELECT ai_provider_call(
+    '{
+      "model": "jev-1.13.0",
+      "state": "I was charged twice. Please refund the duplicate.",
+      "questions": {
+        "refund_requested": {
+          "type": "noul",
+          "instructions": "Does the text explicitly request a refund?"
+        },
+        "department": {
+          "type": "choice",
+          "instructions": "Which team should handle this?",
+          "criteria": {
+            "billing": "Payments and refunds",
+            "other": "Other requests"
+          }
+        }
+      }
+    }',
+    secret := 'typesafe_ai'
+);
+```
+
+Native requests specify `model` in the body, even when a secret contains a model.
+The result preserves the complete response, including `answers`, per-option
+probabilities, confidence, the resolved model version, and usage. The extension
+appends `/systemone` to the base URL automatically.
+
+As checked on September 18, 2026, TypeSafe lists `jev-1.13.0` with aliases
+`jev-latest` and `jev-preview`, at $0.042 per million input tokens and free output
+tokens. Pin the version when tuning decision thresholds. Choice supports up to
+255 options, and Score accepts 2 to 10 ordered levels. A Score uses the level
+indices, so a three-level rubric produces values from 0 to 2.
+
+The extension's mock tests check HTTP contracts, not Jev's live latency or
+prediction quality. Follow the [multi-question cookbook](cookbooks/jev-decisions.md)
+to reduce repeated state and calls. See TypeSafe's
+[API reference](https://docs.typesafe.ai/api),
+[models and limits](https://docs.typesafe.ai/models), and
+[known limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13).
 
 ## Ollama
 

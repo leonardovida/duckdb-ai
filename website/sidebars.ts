@@ -35,6 +35,7 @@ const sidebars: SidebarsConfig = {
         'cookbooks/support-ticket-similarity',
         'cookbooks/lance-semantic-search',
         'cookbooks/structured-triage-records',
+        'cookbooks/jev-decisions',
         'cookbooks/sql-assistant',
       ],
     },

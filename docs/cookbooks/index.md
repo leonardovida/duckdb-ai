@@ -34,6 +34,9 @@ duckdb-ai with DuckDB storage, file, and database extensions.
 
 ## Try common workflows
 
+- [Evaluate several decisions in one Jev request](jev-decisions.md): bundle
+  classification, probabilities, and rubric scores, then apply rules in SQL.
+
 - [Enrich support tickets with AI text functions](support-ticket-enrichment.md):
   summarize, classify, filter, extract, redact, and translate table columns.
 - [Compare support tickets with embeddings](support-ticket-similarity.md): rank

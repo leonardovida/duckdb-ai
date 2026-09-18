@@ -3728,6 +3728,49 @@ std::vector<std::string> ClassificationLabelsFromParameter(const std::string &pa
 	return labels;
 }
 
+bool ValidateClassificationLabelSet(const std::vector<std::string> &labels, std::string &error);
+std::string JsonEscapeSqlText(const std::string &input);
+
+std::string QuoteJevString(const std::string &input) {
+	return "\"" + JsonEscapeSqlText(input) + "\"";
+}
+
+std::string BuildJevChoiceRequest(const std::string &input, const std::string &parameter,
+                                  const AiTaskBindData &bind_data, const std::string &model) {
+	auto labels = ClassificationLabelsFromParameter(parameter);
+	std::string error;
+	if (!ValidateClassificationLabelSet(labels, error)) {
+		throw InvalidInputException("ai_classify %s", error);
+	}
+	if (labels.size() > 255) {
+		throw InvalidInputException("ai_classify TypeSafe Jev choice criteria supports at most 255 labels");
+	}
+	std::string criteria = "{";
+	for (idx_t i = 0; i < labels.size(); i++) {
+		if (i > 0) {
+			criteria += ",";
+		}
+		criteria += QuoteJevString(labels[i]) + ":null";
+	}
+	criteria += "}";
+	std::string instructions = "Choose exactly one label from the supplied criteria.";
+	auto guidance = BuildClassificationGuidance(bind_data);
+	if (!guidance.empty()) {
+		instructions += guidance;
+	}
+	return "{\"model\":" + QuoteJevString(model) + ",\"state\":" + QuoteJevString(input) +
+	       ",\"questions\":{\"classification\":{\"type\":\"choice\",\"instructions\":" + QuoteJevString(instructions) +
+	       ",\"criteria\":" + criteria + "}}}";
+}
+
+std::string BuildJevFilterRequest(const std::string &input, const std::string &predicate, const std::string &model) {
+	return "{\"model\":" + QuoteJevString(model) + ",\"state\":" + QuoteJevString(input) +
+	       ",\"questions\":{\"filter\":{\"type\":\"noul\",\"instructions\":" +
+	       QuoteJevString("Return true when the text satisfies this predicate: " + predicate) +
+	       ",\"criteria\":{\"true\":" + QuoteJevString(predicate) +
+	       ",\"false\":\"The text does not satisfy the predicate.\"}}}}";
+}
+
 bool ValidateClassificationLabelSet(const std::vector<std::string> &labels, std::string &error) {
 	if (labels.empty()) {
 		error = "classification labels must not be empty";
@@ -4267,6 +4310,24 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 
 	RunProviderJobs(jobs, [&](ProviderStringJob &job) {
+		if (bind_data.task == AiTaskKind::CLASSIFY &&
+		    duckdb_ai::ResolveProvider(job.options).protocol == "typesafe_jev") {
+			auto config = duckdb_ai::ResolveProvider(job.options);
+			std::string choice;
+			double probability = 0;
+			auto response = duckdb_ai::Complete(
+			    BuildJevChoiceRequest(job.input, job.parameter, bind_data, config.model), job.options);
+			if (!duckdb_ai::ParseJevAnswer(response.text, "classification", "choice", choice, probability)) {
+				throw InvalidInputException("ai_classify expected a valid TypeSafe Jev choice answer");
+			}
+			std::string canonical;
+			std::string error;
+			if (!CanonicalClassificationLabel(job.parameter, choice, canonical, error)) {
+				throw InvalidInputException("ai_classify %s", error);
+			}
+			job.output = std::move(canonical);
+			return;
+		}
 		if (bind_data.task == AiTaskKind::REDACT &&
 		    duckdb_ai::ResolveProvider(job.options).protocol == "privacy_filter") {
 			job.output = duckdb_ai::Redact(job.input, job.options).text;
@@ -4418,7 +4479,14 @@ std::string JsonEscapeSqlText(const std::string &input) {
 			output += "\\t";
 			break;
 		default:
-			output.push_back(c);
+			if (static_cast<unsigned char>(c) < 0x20) {
+				static const char hex[] = "0123456789abcdef";
+				output += "\\u00";
+				output += hex[(static_cast<unsigned char>(c) >> 4) & 0xf];
+				output += hex[static_cast<unsigned char>(c) & 0xf];
+			} else {
+				output.push_back(c);
+			}
 			break;
 		}
 	}
@@ -4943,6 +5011,18 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 
 	RunProviderJobs(jobs, [&](ProviderBoolJob &job) {
+		if (duckdb_ai::ResolveProvider(job.options).protocol == "typesafe_jev") {
+			auto config = duckdb_ai::ResolveProvider(job.options);
+			double probability = 0;
+			std::string choice;
+			auto response =
+			    duckdb_ai::Complete(BuildJevFilterRequest(job.input, job.parameter, config.model), job.options);
+			if (!duckdb_ai::ParseJevAnswer(response.text, "filter", "noul", choice, probability)) {
+				throw InvalidInputException("ai_filter expected a valid TypeSafe Jev noul answer");
+			}
+			job.output = probability >= 0.5;
+			return;
+		}
 		AppendSystemPrompt(job.options, BuildTaskSystemPrompt(bind_data.task, job.parameter));
 		auto prompt = BuildTaskUserPrompt(bind_data.task, job.input, job.parameter);
 		auto output = duckdb_ai::Complete(prompt, job.options).text;

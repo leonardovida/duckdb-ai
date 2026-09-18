@@ -9,6 +9,9 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Added
 
+- TypeSafe Jev evaluation provider with native multi-question requests,
+  `ai_classify` and `ai_filter` adapters, and structured decision examples for ticket triage, reranking, and entity matching.
+
 - MiMo/Xiaomi provider credentials and completion defaults.
 - Native JSON provider calls for text protocols, tool/reasoning state exchange,
   buffered SSE, embeddings and reranking with explicit service endpoints.
