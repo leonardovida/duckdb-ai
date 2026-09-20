@@ -3667,6 +3667,16 @@ void ValidateResponseSchema(const CompletionOptions &options) {
 	}
 }
 
+// Called only after a supplied response schema has been handled by the provider.
+bool JsonObjectFormatWithoutSchema(const CompletionOptions &options) {
+	auto format = NormalizeResponseFormat(options);
+	if (format == "json_schema") {
+		throw InvalidInputException(
+		    "AI option \"response_schema\" must be provided when response_format is json_schema");
+	}
+	return format == "json_object";
+}
+
 std::string OpenAIResponseFormatJson(const CompletionOptions &options) {
 	ValidateResponseSchema(options);
 	if (!options.response_schema.empty()) {
@@ -3674,13 +3684,8 @@ std::string OpenAIResponseFormatJson(const CompletionOptions &options) {
 		       "\"schema\":" +
 		       options.response_schema + ",\"strict\":true}}";
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
@@ -3690,13 +3695,8 @@ std::string CohereResponseFormatJson(const CompletionOptions &options) {
 	if (!options.response_schema.empty()) {
 		return "\"response_format\":{\"type\":\"json_object\",\"schema\":" + options.response_schema + "}";
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
@@ -3706,13 +3706,8 @@ std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
 	if (!options.response_schema.empty()) {
 		return "\"response_format\":{\"type\":\"json_schema\",\"schema\":" + options.response_schema + "}";
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
@@ -3757,13 +3752,8 @@ std::string OllamaFormatJson(const CompletionOptions &options) {
 	if (!options.response_schema.empty()) {
 		return "\"format\":" + options.response_schema;
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"format\":\"json\"";
 }

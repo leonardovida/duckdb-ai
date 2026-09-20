@@ -514,6 +514,23 @@ SELECT contains(ai_completion_request_json('json please', 'llama3', 'ollama', re
 ----
 true
 
+# Shared no-schema format rules must retain provider-specific payloads.
+foreach provider openai cohere llamacpp ollama
+
+query III
+SELECT ai_completion_request_json('format', 'test-model', '${provider}') = ai_completion_request_json('format', 'test-model', '${provider}', response_format := 'text'),
+       contains(ai_completion_request_json('format', 'test-model', '${provider}', response_format := 'json_object'), CASE WHEN '${provider}' = 'ollama' THEN '"format":"json"' ELSE '"response_format":{"type":"json_object"}' END),
+       ai_completion_request_json('format', 'test-model', '${provider}', response_schema := '{"type":"object"}') = ai_completion_request_json('format', 'test-model', '${provider}', response_schema := '{"type":"object"}', response_format := 'text');
+----
+true	true	true
+
+statement error
+SELECT ai_completion_request_json('format', provider := '${provider}', response_format := 'json_schema');
+----
+AI option "response_schema" must be provided when response_format is json_schema
+
+endloop
+
 query I
 SELECT ai_completion_request_json('redact email alice@example.com', provider := 'openai_privacy_filter');
 ----
