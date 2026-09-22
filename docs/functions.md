@@ -21,6 +21,7 @@ FROM ai_usage();
 | Function | Type | Description |
 | --- | --- | --- |
 | `ai_complete(prompt[, model[, provider]])` | Scalar | Calls a completion model and returns text. |
+| `ai_jev(text, questions[, ...])` | Scalar | Returns a typed STRUCT of Jev decisions, batching up to 32 rows per request. |
 | `ai_provider_call(request_json, provider := ...)` | Scalar | Sends a native JSON body and returns full JSON or buffered SSE events. |
 | `ai_try_complete(prompt[, model[, provider]])` | Scalar | Calls a completion model and returns `STRUCT(response, error)` for row-level failure capture. |
 | `ai_complete_json(prompt[, model[, provider]])` | Scalar | Calls a completion model and validates the response as a JSON object or array. |
@@ -135,6 +136,76 @@ Use `ai_provider_call` for tools and reasoning-only responses. `ai_complete`
 continues to return final text. See [provider coverage](provider-guides.md#text-api-coverage).
 
 ## Completion functions
+
+#### `ai_jev(text, questions[, ...])`
+
+Description: Evaluates named Jev decisions and returns a typed `STRUCT`. No JSON
+extension or response parsing is needed. The provider is always TypeSafe. Use
+`TYPESAFE_API_KEY` or a `TYPE duckdb_ai` secret. Criteria and options must be
+constant so the result's field types are known when the query is planned.
+
+Example:
+
+```sql
+SELECT ai_jev('Production imports are blocked.', {
+    team: MAP {'technical': 'Bugs and outages', 'other': 'Other issues'},
+    severity: ['Routine', 'Degraded', 'Blocked'],
+    urgent: MAP {'true': 'Needs immediate action', 'false': 'Can wait'}
+}, model := 'jev-1.13.0', batch_size := 32) AS decision;
+```
+
+Result shape:
+
+```text
+STRUCT(team VARCHAR, team_confidence DOUBLE,
+       severity DOUBLE, severity_confidence DOUBLE, urgent DOUBLE)
+```
+
+| Criteria for each field | Meaning | Result |
+| --- | --- | --- |
+| `MAP {'label': 'description', ...}` | Choice among 1 to 255 unique, nonempty labels | `VARCHAR` plus `<field>_confidence DOUBLE` |
+| `['lowest level', ..., 'highest level']` | Score over 2 to 10 ordered levels | `DOUBLE` from 0 to number of levels minus 1, plus confidence |
+| `MAP {'true': 'yes criterion', 'false': 'no criterion'}` | Noul, probability of yes | `DOUBLE` from 0 to 1 |
+
+Map keys and descriptions and list entries must be non-null strings. Only a map
+with exactly the lowercase keys `true` and `false` is a Noul; other maps are
+Choices. Descriptions define the task. Question field names are SQL names and are
+not used as model instructions. Field names, including generated confidence
+names, must be unique ignoring ASCII case. Confidence is NULL if omitted by the
+provider. NULL text yields a NULL struct with no request.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `model` | Secret or TypeSafe environment/default resolution | Set an explicit Jev version to stabilize the model selection. |
+| `secret` | Provider-scoped secret lookup | Existing `duckdb_ai` secret name. |
+| `base_url` | Secret or TypeSafe environment/default resolution | Existing provider endpoint override. |
+| `batch_size` | `32` | Maximum non-null rows per request, from 1 to 32. |
+| `max_request_bytes` | `48000` | Serialized UTF-8 JSON body cap, from 1024 to 1000000. Splits batches, never truncates data. |
+| `on_error` | Existing runtime policy, normally `fail` | `fail` aborts the query, `null` returns NULL for affected rows. `capture` is unsupported. |
+
+Transport options `timeout_seconds`, `retry_count`, `retry_backoff_ms`,
+`max_concurrent_requests`, `min_request_interval_ms`, `token_limit_per_minute`,
+`allowed_hosts` and `cache` use their existing meanings in
+[Named options](#named-options). Other named options are rejected. The function
+inherits common runtime transport settings but ignores generic SQL model,
+provider, endpoint and generation defaults. Its model and endpoint come from
+explicit arguments, TypeSafe secrets or the existing provider environment
+resolution (including generic `DUCKDB_AI_*` fallbacks).
+
+Batching is confined to each DuckDB execution chunk. Each input row creates one
+question per field, and answers are mapped by generated keys rather than order.
+Invalid choices, scores, probabilities and mismatched or missing answers fail
+the affected batch. With `on_error := 'null'`, all rows in that batch are NULL.
+A row too large for `max_request_bytes` fails or becomes NULL on its own, according
+to the error policy. The byte cap does not guarantee a fit within model token
+limits. Retries repeat a complete batch. `ai_usage()` records one `ai_jev` event
+per request operation, with usage counted once rather than once per row.
+
+Save results with `CREATE TABLE ... AS SELECT ...` before reading multiple fields
+or exporting them. See [typed Jev decisions](cookbooks/jev-decisions.md) for a
+complete table-to-Parquet workflow. This function does not generate arbitrary
+text or extract open-ended strings. Use `ai_provider_call` for raw distributions,
+resolved model metadata, custom instructions and shared state.
 
 #### `ai_complete(prompt[, model[, provider]])`
 
@@ -438,7 +509,8 @@ canonicalized to its original spelling.
 
 With `provider := 'typesafe'` (alias `jev`), this sends a native Jev Choice
 question rather than generating a label as text. Jev accepts at most 255 options.
-Use `ai_provider_call` when you also need the probability distribution or want to
+Use `ai_jev` for typed decisions with row batching. Use `ai_provider_call` when
+you also need the probability distribution or want to
 bundle several questions against the same input.
 
 Example:
@@ -970,7 +1042,7 @@ status, error, and estimated cost.
 #### `ai_usage_summary()`
 
 Description: Groups the retained usage buffer by `query_id`. `calls` counts
-per-input events, while `batch_count` counts distinct provider request operation
+per-input events (one event per request for `ai_jev`), while `batch_count` counts distinct provider request operation
 IDs, so packed embedding execution is visible without losing row-level token and
 error details. The result also includes retries, cache hits, total tokens,
 elapsed time, estimated cost, retained events, and counters for usage or log

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -233,8 +234,10 @@ std::string BuildRequestJson(const std::string &prompt, const std::string &model
 std::string BuildRequestJson(const std::string &prompt, const CompletionOptions &options);
 //! Execute a completion request and parse the provider response.
 CompletionResult Complete(const std::string &prompt, const std::string &model, const std::string &provider);
-//! Execute a completion request from a full option set.
-CompletionResult Complete(const std::string &prompt, const CompletionOptions &options);
+//! Execute a completion request, validating typed results before success accounting.
+//! Validator failures evict the response cache and record a failed usage event.
+CompletionResult Complete(const std::string &prompt, const CompletionOptions &options,
+                          const std::function<void(const CompletionResult &)> &validate_result = {});
 //! Execute a dedicated PII redaction request from a full option set.
 CompletionResult Redact(const std::string &text, const CompletionOptions &options);
 //! Build an embedding request payload without making a network call.
