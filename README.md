@@ -179,8 +179,9 @@ credentials, endpoints, and embedding availability.
   xAI, Cohere, Groq, Cerebras, Fireworks AI, Together AI, DeepInfra, Hugging Face,
   NVIDIA NIM, Nebius Token Factory, SambaNova, and SiliconFlow.
 - **Structured decisions:** TypeSafe Jev for native choices, scores, and yes/no
-  probabilities. See the [Jev cookbook](docs/cookbooks/jev-decisions.md) for
-  multi-question evaluation in one request.
+  probabilities. `ai_jev` returns typed SQL fields and batches up to 32 rows per
+  request. See the [Jev cookbook](docs/cookbooks/jev-decisions.md) for queries
+  you can filter, aggregate and export without parsing JSON.
 - **Cloud and routing:** Azure OpenAI, Amazon Bedrock, Google Vertex AI,
   Cloudflare Workers AI, Databricks Model Serving / Unity AI Gateway,
   Snowflake Cortex, OpenRouter, Vercel AI Gateway, and Poe.

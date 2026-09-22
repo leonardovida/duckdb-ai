@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Added
+
+- `ai_jev` returns named choices, rubric scores, probabilities and confidence as
+  typed SQL fields, with automatic batches of up to 32 rows and bounded request
+  bodies. Includes a runnable table-to-Parquet cookbook and deterministic HTTP
+  coverage. Existing Jev entry points retain their behavior.
+
 ## 0.5.0 - 2026-09-18
 
 ### Added

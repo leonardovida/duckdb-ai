@@ -138,8 +138,9 @@ PII workflows, see [Best practices](best-practices.md).
 Jev evaluates state against typed questions and returns probabilities, choices,
 and rubric scores. It does not generate text or embeddings. Use `typesafe` (or
 its alias `jev`) for the direct TypeSafe API. The supported entry points are
-`ai_provider_call`, `ai_classify`, and `ai_filter`. Use a native Score question
-through `ai_provider_call` for rubric scoring. Other AI task functions, including
+`ai_jev`, `ai_provider_call`, `ai_classify`, and `ai_filter`. Use `ai_jev` for
+typed choices, rubric scores and probabilities with automatic row batching.
+Other AI task functions, including
 `ai_score`, require a completion provider. Generation options such as
 `temperature`, `max_tokens`, and `system_prompt` are rejected. Put task guidance
 in classification `instructions` or in native question instructions.
@@ -170,8 +171,22 @@ SELECT ai_filter(
 ```
 
 Classification sends a native Choice question. Filtering sends a Noul question
-and returns `true` when its probability is at least `0.5`. For explicit thresholds,
-confidence, or several decisions about the same state, use `ai_provider_call`:
+and returns `true` when its probability is at least `0.5`. Both keep one request
+per row. For typed multi-question results and batches of up to 32 rows, use:
+
+```sql
+SELECT ai_jev('I was charged twice. Please refund me.', {
+    department: MAP {'billing': 'Payments and refunds', 'other': 'Other requests'},
+    refund_requested: MAP {'true': 'Asks for money back', 'false': 'Does not ask for money back'}
+}, secret := 'typesafe_ai') AS decision;
+```
+
+Use `decision.department` and `decision.refund_requested` downstream. Follow the
+[typed Jev cookbook](cookbooks/jev-decisions.md) to save results before filtering
+or exporting them. `ai_jev` does not require DuckDB's JSON extension.
+
+For full probability distributions or custom instructions and shared state,
+use `ai_provider_call`:
 
 ```sql
 SELECT ai_provider_call(
@@ -209,7 +224,7 @@ tokens. Pin the version when tuning decision thresholds. Choice supports up to
 indices, so a three-level rubric produces values from 0 to 2.
 
 The extension's mock tests check HTTP contracts, not Jev's live latency or
-prediction quality. Follow the [multi-question cookbook](cookbooks/jev-decisions.md)
+prediction quality. Follow the [typed Jev cookbook](cookbooks/jev-decisions.md)
 to reduce repeated state and calls. See TypeSafe's
 [API reference](https://docs.typesafe.ai/api),
 [models and limits](https://docs.typesafe.ai/models), and

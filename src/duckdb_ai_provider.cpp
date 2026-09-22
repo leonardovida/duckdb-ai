@@ -3858,9 +3858,10 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
 	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
 	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
-	    options.function_name != "ai_classify" && options.function_name != "ai_filter") {
+	    options.function_name != "ai_classify" && options.function_name != "ai_filter" &&
+	    options.function_name != "ai_jev") {
 		throw InvalidInputException(
-		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, and ai_filter");
+		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, ai_filter, and ai_jev");
 	}
 	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
 	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
