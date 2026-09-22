@@ -1541,3 +1541,12 @@ statement error
 SELECT ai_jev('text', {category: MAP {'a': 'A'}}, batch_size := i) FROM range(2) t(i);
 ----
 constant
+
+# NULL structs must also project NULL fields, not default child-vector values.
+query III
+WITH decisions AS MATERIALIZED (
+  SELECT ai_jev(NULL, {team: MAP {'a':'A'}, rating: ['low','high']}) AS answer
+)
+SELECT answer IS NULL, answer.team IS NULL, answer.rating IS NULL FROM decisions;
+----
+true	true	true

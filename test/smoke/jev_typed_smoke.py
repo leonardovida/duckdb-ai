@@ -63,17 +63,20 @@ def run(duckdb_path):
                 else:
                     answers[key] = {'type': kind, 'noul': 0.75 if index % 2 else 0.25}
             first_key = next(iter(body['questions']))
-            if mode == 'missing':
+            answer_mode = mode
+            if mode.endswith('_once'):
+                answer_mode = mode.removesuffix('_once') if len(requests) == 1 else 'normal'
+            if answer_mode == 'missing':
                 answers.pop(first_key)
-            elif mode == 'wrong_type':
+            elif answer_mode == 'wrong_type':
                 answers[first_key] = {'type': 'noul', 'noul': 0.5}
-            elif mode == 'bad_choice':
+            elif answer_mode == 'bad_choice':
                 answers[first_key]['choice'] = 'undeclared'
-            elif mode == 'bad_score':
+            elif answer_mode == 'bad_score':
                 next(answer for answer in answers.values() if answer['type'] == 'score')['score'] = 8.0
-            elif mode == 'bad_confidence':
+            elif answer_mode == 'bad_confidence':
                 answers[first_key]['confidence'] = 1.2
-            elif mode == 'no_confidence':
+            elif answer_mode == 'no_confidence':
                 for answer in answers.values():
                     answer.pop('confidence', None)
             data = json.dumps(
@@ -83,7 +86,7 @@ def run(duckdb_path):
                     'usage': {'input_tokens': 100, 'output_tokens': 20},
                 }
             ).encode()
-            if mode == 'duplicate':
+            if answer_mode == 'duplicate':
                 text = data.decode()
                 field = json.dumps(first_key) + ': ' + json.dumps(answers[first_key])
                 data = text.replace('"answers": {', '"answers": {' + field + ', ', 1).encode()
@@ -127,6 +130,9 @@ def run(duckdb_path):
         rows = query("CREATE TEMP TABLE got AS " + sql + "; SELECT i, a.*, a IS NULL AS is_null FROM got;", **kwargs)
         if rows is None:
             return None
+        for row in rows:
+            if row['is_null']:
+                assert all(value is None for key, value in row.items() if key not in ('i', 'is_null')), row
         return [
             {
                 'i': row['i'],
@@ -198,6 +204,36 @@ def run(duckdb_path):
         ):
             decisions(select(2), error=error)
             assert all(r['a'] is None for r in decisions(select(2, ", on_error := 'null'")))
+        # A 2xx response can still violate the typed contract. It must be evicted
+        # and recorded as an error before an identical call can use the cache.
+        for mode in ('missing_once', 'bad_choice_once', 'bad_score_once', 'duplicate_once'):
+            requests.clear()
+            call = f"ai_jev('0:cache', {SPEC}, cache := true, on_error := 'null', retry_count := 0)"
+            rows = query(
+                f"""
+CREATE TEMP TABLE first_result AS SELECT {call} AS a;
+CREATE TEMP TABLE second_result AS SELECT {call} AS a;
+CREATE TEMP TABLE third_result AS SELECT {call} AS a;
+SELECT (SELECT a IS NULL FROM first_result) AS rejected,
+       (SELECT a.department FROM second_result) AS recovered,
+       (SELECT a.department FROM third_result) AS cached,
+       count(*) FILTER (WHERE status='error') AS errors,
+       count(*) FILTER (WHERE status='ok') AS successes,
+       count(*) FILTER (WHERE cache_hit) AS cache_hits
+FROM ai_usage() WHERE function_name='ai_jev';
+"""
+            )
+            assert rows == [
+                {
+                    'rejected': True,
+                    'recovered': 'billing',
+                    'cached': 'billing',
+                    'errors': 1,
+                    'successes': 2,
+                    'cache_hits': 1,
+                }
+            ], rows
+            assert len(requests) == 2, requests
         mode = 'partial_error'
         requests.clear()
         rows = decisions(select(65, ", on_error := 'null'"))

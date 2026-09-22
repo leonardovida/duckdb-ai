@@ -5285,7 +5285,8 @@ CompletionResult Complete(const std::string &prompt, const std::string &model, c
 	return Complete(prompt, options);
 }
 
-CompletionResult Complete(const std::string &prompt, const CompletionOptions &options) {
+CompletionResult Complete(const std::string &prompt, const CompletionOptions &options,
+                          const std::function<void(const CompletionResult &)> &validate_result) {
 	if (prompt.empty()) {
 		throw InvalidInputException("ai_complete prompt must not be empty");
 	}
@@ -5338,6 +5339,9 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	CompletionResult result;
 	try {
 		result = ParseCompletionResult(config, response, native);
+		if (validate_result) {
+			validate_result(result);
+		}
 	} catch (std::exception &ex) {
 		if (!cache_key.empty()) {
 			// Do not keep responses that cannot be parsed (for example truncated output); a

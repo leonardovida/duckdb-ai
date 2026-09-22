@@ -6658,13 +6658,12 @@ std::string JevRowQuestions(const std::string &input, idx_t row, const std::vect
 void JevFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &data = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<JevBindData>();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &validity = FlatVector::Validity(result);
 	StringVectorReader inputs(args, 0);
 	bool any_input = false;
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input;
 		if (!inputs.Read(row, input)) {
-			validity.SetInvalid(row);
+			result.SetValue(row, Value(data.result_type));
 		} else {
 			any_input = true;
 		}
@@ -6684,7 +6683,7 @@ void JevFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			throw;
 		}
 		for (idx_t row = 0; row < args.size(); row++) {
-			validity.SetInvalid(row);
+			result.SetValue(row, Value(data.result_type));
 		}
 		return;
 	}
@@ -6710,7 +6709,7 @@ void JevFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			if (options.fail_on_error) {
 				throw InvalidInputException("ai_jev row exceeds max_request_bytes; shorten the input or criteria");
 			}
-			validity.SetInvalid(row);
+			result.SetValue(row, Value(data.result_type));
 			continue;
 		}
 		if (batch.rows.size() >= data.batch_size ||
@@ -6727,60 +6726,63 @@ void JevFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 	finish();
 	RunProviderJobs(jobs, [&](JevBatchJob &job) {
-		auto response = duckdb_ai::Complete(job.input, job.options);
-		auto doc = ParseSqlJson(response.text);
-		auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
-		auto answers = root ? duckdb_yyjson::yyjson_obj_get(root, "answers") : nullptr;
-		if (!answers || !duckdb_yyjson::yyjson_is_obj(answers)) {
-			throw IOException("ai_jev response is missing answers");
-		}
-		std::set<std::string> answer_keys;
-		duckdb_yyjson::yyjson_val *answer_key;
-		duckdb_yyjson::yyjson_val *answer_value;
-		size_t answer_index, answer_count;
-		yyjson_obj_foreach(answers, answer_index, answer_count, answer_key, answer_value) {
-			std::string key(duckdb_yyjson::yyjson_get_str(answer_key), duckdb_yyjson::yyjson_get_len(answer_key));
-			if (!answer_keys.insert(key).second) {
-				throw IOException("ai_jev response contains duplicate answer keys");
+		duckdb_ai::Complete(job.input, job.options, [&](const duckdb_ai::CompletionResult &response) {
+			auto doc = ParseSqlJson(response.text);
+			auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+			auto answers = root ? duckdb_yyjson::yyjson_obj_get(root, "answers") : nullptr;
+			if (!answers || !duckdb_yyjson::yyjson_is_obj(answers)) {
+				throw IOException("ai_jev response is missing answers");
 			}
-		}
-		for (auto row : job.rows) {
-			vector<Value> fields;
-			for (idx_t i = 0; i < data.questions.size(); i++) {
-				auto &question = data.questions[i];
-				auto key = "r" + std::to_string(row) + "q" + std::to_string(i);
-				auto answer = duckdb_yyjson::yyjson_obj_get(answers, key.c_str());
-				if (SqlJsonString(answer, "type") != question.kind) {
-					throw IOException("ai_jev missing or mismatched answer: %s", key);
+			std::set<std::string> answer_keys;
+			duckdb_yyjson::yyjson_val *answer_key;
+			duckdb_yyjson::yyjson_val *answer_value;
+			size_t answer_index, answer_count;
+			yyjson_obj_foreach(answers, answer_index, answer_count, answer_key, answer_value) {
+				std::string key(duckdb_yyjson::yyjson_get_str(answer_key), duckdb_yyjson::yyjson_get_len(answer_key));
+				if (!answer_keys.insert(key).second) {
+					throw IOException("ai_jev response contains duplicate answer keys");
 				}
-				if (question.kind == "choice") {
-					auto choice = SqlJsonString(answer, "choice");
-					if (std::find(question.labels.begin(), question.labels.end(), choice) == question.labels.end()) {
-						throw IOException("ai_jev answer is outside the declared choices: %s", key);
+			}
+			for (auto row : job.rows) {
+				vector<Value> fields;
+				for (idx_t i = 0; i < data.questions.size(); i++) {
+					auto &question = data.questions[i];
+					auto key = "r" + std::to_string(row) + "q" + std::to_string(i);
+					auto answer = duckdb_yyjson::yyjson_obj_get(answers, key.c_str());
+					if (SqlJsonString(answer, "type") != question.kind) {
+						throw IOException("ai_jev missing or mismatched answer: %s", key);
 					}
-					fields.emplace_back(choice);
-				} else {
-					double value;
-					double maximum = question.kind == "noul" ? 1 : static_cast<double>(question.labels.size() - 1);
-					if (!SqlJsonDouble(answer, question.kind.c_str(), value) || value < 0 || value > maximum) {
-						throw IOException("ai_jev answer is outside the declared scale: %s", key);
-					}
-					fields.push_back(Value::DOUBLE(value));
-				}
-				if (question.kind != "noul") {
-					double confidence;
-					auto confidence_json = duckdb_yyjson::yyjson_obj_get(answer, "confidence");
-					if (!confidence_json) {
-						fields.emplace_back(LogicalType::DOUBLE);
-					} else if (!SqlJsonDouble(answer, "confidence", confidence) || confidence < 0 || confidence > 1) {
-						throw IOException("ai_jev invalid confidence: %s", key);
+					if (question.kind == "choice") {
+						auto choice = SqlJsonString(answer, "choice");
+						if (std::find(question.labels.begin(), question.labels.end(), choice) ==
+						    question.labels.end()) {
+							throw IOException("ai_jev answer is outside the declared choices: %s", key);
+						}
+						fields.emplace_back(choice);
 					} else {
-						fields.push_back(Value::DOUBLE(confidence));
+						double value;
+						double maximum = question.kind == "noul" ? 1 : static_cast<double>(question.labels.size() - 1);
+						if (!SqlJsonDouble(answer, question.kind.c_str(), value) || value < 0 || value > maximum) {
+							throw IOException("ai_jev answer is outside the declared scale: %s", key);
+						}
+						fields.push_back(Value::DOUBLE(value));
+					}
+					if (question.kind != "noul") {
+						double confidence;
+						auto confidence_json = duckdb_yyjson::yyjson_obj_get(answer, "confidence");
+						if (!confidence_json) {
+							fields.emplace_back(LogicalType::DOUBLE);
+						} else if (!SqlJsonDouble(answer, "confidence", confidence) || confidence < 0 ||
+						           confidence > 1) {
+							throw IOException("ai_jev invalid confidence: %s", key);
+						} else {
+							fields.push_back(Value::DOUBLE(confidence));
+						}
 					}
 				}
+				job.values.push_back(Value::STRUCT(data.result_type, std::move(fields)));
 			}
-			job.values.push_back(Value::STRUCT(data.result_type, std::move(fields)));
-		}
+		});
 	});
 	for (auto &job : jobs) {
 		if (job.exception && job.fail_on_error) {
@@ -6788,7 +6790,7 @@ void JevFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		}
 		for (idx_t i = 0; i < job.rows.size(); i++) {
 			if (!job.completed) {
-				validity.SetInvalid(job.rows[i]);
+				result.SetValue(job.rows[i], Value(data.result_type));
 			} else {
 				result.SetValue(job.rows[i], job.values[i]);
 			}
