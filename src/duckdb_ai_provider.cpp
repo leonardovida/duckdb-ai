@@ -4285,7 +4285,6 @@ std::string NativeResponseJson(const std::string &body) {
 		return body;
 	}
 	// Buffer SSE for SQL callers; preserve event objects and reasoning/tool deltas.
-	std::istringstream lines(body);
 	std::string line, data, events = "[";
 	bool first = true, done = false;
 	auto flush = [&]() {
@@ -4319,10 +4318,10 @@ std::string NativeResponseJson(const std::string &body) {
 		events += data;
 		data.clear();
 	};
-	while (std::getline(lines, line)) {
-		if (!line.empty() && line.back() == '\r') {
-			line.pop_back();
-		}
+	size_t position = 0;
+	while (position < body.size()) {
+		auto end = body.find_first_of("\r\n", position);
+		line = body.substr(position, end - position);
 		if (line.empty()) {
 			flush();
 		} else if (StartsWith(line, "data:")) {
@@ -4334,6 +4333,13 @@ std::string NativeResponseJson(const std::string &body) {
 				data += "\n";
 			}
 			data += value;
+		}
+		if (end == std::string::npos) {
+			break;
+		}
+		position = end + 1;
+		if (body[end] == '\r' && position < body.size() && body[position] == '\n') {
+			position++;
 		}
 	}
 	flush();

@@ -75,6 +75,8 @@ def run(duckdb_path):
                     response = '{"error":{"message":"application error"}}'
                 elif body.get("model") == "invalid-json":
                     response = '<html>upstream unavailable</html>'
+            if body.get("model") == "cr-stream":
+                response = response.replace("\r\n", "\r").replace("\n", "\r")
             encoded = response.encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(encoded)))
@@ -167,6 +169,7 @@ def run(duckdb_path):
         assert requests[-1][1].get("anthropic-version") == "2023-06-01"
         events = query("deepseek", {**body, "stream": True})["events"]
         assert events[0]["choices"][0]["delta"]["reasoning_content"] == "reason"
+        assert len(query("deepseek", {**body, "stream": True, "model": "cr-stream"})["events"]) == 1
         query("deepseek", {**body, "stream": True, "model": "truncated"}, fail=True)
         for api in ("messages", "responses"):
             assert query("hunyuan", {**api_bodies[api], "stream": True}, api)["events"]
