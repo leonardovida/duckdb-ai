@@ -514,6 +514,23 @@ SELECT contains(ai_completion_request_json('json please', 'llama3', 'ollama', re
 ----
 true
 
+# Shared no-schema format rules must retain provider-specific payloads.
+foreach provider openai cohere llamacpp ollama
+
+query III
+SELECT ai_completion_request_json('format', 'test-model', '${provider}') = ai_completion_request_json('format', 'test-model', '${provider}', response_format := 'text'),
+       contains(ai_completion_request_json('format', 'test-model', '${provider}', response_format := 'json_object'), CASE WHEN '${provider}' = 'ollama' THEN '"format":"json"' ELSE '"response_format":{"type":"json_object"}' END),
+       ai_completion_request_json('format', 'test-model', '${provider}', response_schema := '{"type":"object"}') = ai_completion_request_json('format', 'test-model', '${provider}', response_schema := '{"type":"object"}', response_format := 'text');
+----
+true	true	true
+
+statement error
+SELECT ai_completion_request_json('format', provider := '${provider}', response_format := 'json_schema');
+----
+AI option "response_schema" must be provided when response_format is json_schema
+
+endloop
+
 query I
 SELECT ai_completion_request_json('redact email alice@example.com', provider := 'openai_privacy_filter');
 ----
@@ -1438,3 +1455,98 @@ WHERE provider = 'typesafe' AND model IN ('jev-latest', 'jev-preview', 'jev-1.13
   AND input_token_price_per_million = 0.042 AND output_token_price_per_million = 0;
 ----
 3
+
+# Jev typed criteria bind locally, without credentials or provider calls.
+query T
+SELECT typeof(ai_jev(NULL, {team: MAP {'billing':'Payments', 'other':'Other'}, severity:['low','high'], urgent:MAP {'true':'Urgent','false':'Can wait'}}));
+----
+STRUCT(team VARCHAR, team_confidence DOUBLE, severity DOUBLE, severity_confidence DOUBLE, urgent DOUBLE)
+
+query I
+SELECT ai_jev(NULL, {team: MAP {'a':'A'}}, batch_size := 32) IS NULL;
+----
+true
+
+statement error
+SELECT ai_jev('text', {rating: ['one']});
+----
+2 to 10 levels
+
+statement error
+SELECT ai_jev('text', {rating: range(11)::VARCHAR[]});
+----
+2 to 10 levels
+
+statement error
+SELECT ai_jev('text', {rating: ['one', NULL]});
+----
+must not be NULL
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': NULL::VARCHAR}});
+----
+must not be NULL
+
+statement error
+SELECT ai_jev('text', {category: MAP {'': 'Empty label'}});
+----
+unique and nonempty
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': 'A'}, category_confidence: ['low','high']});
+----
+field names must be unique
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': 'A'}, CATEGORY_CONFIDENCE: ['low','high']});
+----
+field names must be unique
+
+statement error
+SELECT ai_jev('text', {category: 42});
+----
+MAP(VARCHAR, VARCHAR) or VARCHAR[]
+
+statement error
+SELECT ai_jev('text', {category: NULL});
+----
+must not be NULL
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': 'A'}}, batch_size := 33);
+----
+batch_size must be between 1 and 32
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': 'A'}}, max_request_bytes := 1);
+----
+max_request_bytes must be between 1024 and 1000000
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': 'A'}}, on_error := 'capture');
+----
+on_error must be fail or null
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': 'A'}}, temperature := 0.1);
+----
+Unsupported ai_jev option
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': x}}) FROM (VALUES ('description')) t(x);
+----
+constant STRUCT
+
+statement error
+SELECT ai_jev('text', {category: MAP {'a': 'A'}}, batch_size := i) FROM range(2) t(i);
+----
+constant
+
+# NULL structs must also project NULL fields, not default child-vector values.
+query III
+WITH decisions AS MATERIALIZED (
+  SELECT ai_jev(NULL, {team: MAP {'a':'A'}, rating: ['low','high']}) AS answer
+)
+SELECT answer IS NULL, answer.team IS NULL, answer.rating IS NULL FROM decisions;
+----
+true	true	true

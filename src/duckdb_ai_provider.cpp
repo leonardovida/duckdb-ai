@@ -3667,6 +3667,16 @@ void ValidateResponseSchema(const CompletionOptions &options) {
 	}
 }
 
+// Called only after a supplied response schema has been handled by the provider.
+bool JsonObjectFormatWithoutSchema(const CompletionOptions &options) {
+	auto format = NormalizeResponseFormat(options);
+	if (format == "json_schema") {
+		throw InvalidInputException(
+		    "AI option \"response_schema\" must be provided when response_format is json_schema");
+	}
+	return format == "json_object";
+}
+
 std::string OpenAIResponseFormatJson(const CompletionOptions &options) {
 	ValidateResponseSchema(options);
 	if (!options.response_schema.empty()) {
@@ -3674,13 +3684,8 @@ std::string OpenAIResponseFormatJson(const CompletionOptions &options) {
 		       "\"schema\":" +
 		       options.response_schema + ",\"strict\":true}}";
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
@@ -3690,13 +3695,8 @@ std::string CohereResponseFormatJson(const CompletionOptions &options) {
 	if (!options.response_schema.empty()) {
 		return "\"response_format\":{\"type\":\"json_object\",\"schema\":" + options.response_schema + "}";
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
@@ -3706,13 +3706,8 @@ std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
 	if (!options.response_schema.empty()) {
 		return "\"response_format\":{\"type\":\"json_schema\",\"schema\":" + options.response_schema + "}";
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"response_format\":{\"type\":\"json_object\"}";
 }
@@ -3757,13 +3752,8 @@ std::string OllamaFormatJson(const CompletionOptions &options) {
 	if (!options.response_schema.empty()) {
 		return "\"format\":" + options.response_schema;
 	}
-	auto format = NormalizeResponseFormat(options);
-	if (format.empty() || format == "text") {
+	if (!JsonObjectFormatWithoutSchema(options)) {
 		return "";
-	}
-	if (format == "json_schema") {
-		throw InvalidInputException(
-		    "AI option \"response_schema\" must be provided when response_format is json_schema");
 	}
 	return "\"format\":\"json\"";
 }
@@ -3868,9 +3858,10 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
 	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
 	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
-	    options.function_name != "ai_classify" && options.function_name != "ai_filter") {
+	    options.function_name != "ai_classify" && options.function_name != "ai_filter" &&
+	    options.function_name != "ai_jev") {
 		throw InvalidInputException(
-		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, and ai_filter");
+		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, ai_filter, and ai_jev");
 	}
 	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
 	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
@@ -5300,7 +5291,8 @@ CompletionResult Complete(const std::string &prompt, const std::string &model, c
 	return Complete(prompt, options);
 }
 
-CompletionResult Complete(const std::string &prompt, const CompletionOptions &options) {
+CompletionResult Complete(const std::string &prompt, const CompletionOptions &options,
+                          const std::function<void(const CompletionResult &)> &validate_result) {
 	if (prompt.empty()) {
 		throw InvalidInputException("ai_complete prompt must not be empty");
 	}
@@ -5353,6 +5345,9 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	CompletionResult result;
 	try {
 		result = ParseCompletionResult(config, response, native);
+		if (validate_result) {
+			validate_result(result);
+		}
 	} catch (std::exception &ex) {
 		if (!cache_key.empty()) {
 			// Do not keep responses that cannot be parsed (for example truncated output); a
@@ -5685,27 +5680,14 @@ int64_t EffectiveMaxConcurrentRequests(const CompletionOptions &options) {
 	return MaxConcurrentRequests(options);
 }
 
-std::vector<UsageEvent> UsageEvents() {
-	std::lock_guard<std::mutex> lock(fallback_runtime_state.usage_mutex);
-	return fallback_runtime_state.usage_events;
-}
+namespace {
 
-std::vector<UsageEvent> UsageEvents(ClientContext &context) {
-	auto &state = RuntimeState(context);
+std::vector<UsageEvent> SnapshotUsageEvents(ProviderRuntimeState &state) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
 	return state.usage_events;
 }
 
-UsageBufferStats UsageStats() {
-	std::unique_lock<std::mutex> usage_lock(fallback_runtime_state.usage_mutex, std::defer_lock);
-	std::unique_lock<std::mutex> log_lock(fallback_runtime_state.usage_log_mutex, std::defer_lock);
-	std::lock(usage_lock, log_lock);
-	return {fallback_runtime_state.usage_events.size(), fallback_runtime_state.dropped_usage_events,
-	        fallback_runtime_state.usage_log_queue.size(), fallback_runtime_state.dropped_usage_log_events};
-}
-
-UsageBufferStats UsageStats(ClientContext &context) {
-	auto &state = RuntimeState(context);
+UsageBufferStats SnapshotUsageStats(ProviderRuntimeState &state) {
 	std::unique_lock<std::mutex> usage_lock(state.usage_mutex, std::defer_lock);
 	std::unique_lock<std::mutex> log_lock(state.usage_log_mutex, std::defer_lock);
 	std::lock(usage_lock, log_lock);
@@ -5713,32 +5695,51 @@ UsageBufferStats UsageStats(ClientContext &context) {
 	        state.dropped_usage_log_events};
 }
 
-void ClearUsageEvents() {
-	std::lock_guard<std::mutex> lock(fallback_runtime_state.usage_mutex);
-	fallback_runtime_state.usage_events.clear();
-	fallback_runtime_state.dropped_usage_events = 0;
-}
-
-void ClearUsageEvents(ClientContext &context) {
-	auto &state = RuntimeState(context);
+void ResetUsageEvents(ProviderRuntimeState &state) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
 	state.usage_events.clear();
 	state.dropped_usage_events = 0;
 }
 
-void ClearResponseCache() {
-	std::lock_guard<std::mutex> lock(fallback_runtime_state.response_cache_mutex);
-	fallback_runtime_state.response_cache.clear();
-	fallback_runtime_state.response_cache_order.clear();
-	fallback_runtime_state.response_cache_bytes = 0;
-}
-
-void ClearResponseCache(ClientContext &context) {
-	auto &state = RuntimeState(context);
+void ResetResponseCache(ProviderRuntimeState &state) {
 	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
 	state.response_cache.clear();
 	state.response_cache_order.clear();
 	state.response_cache_bytes = 0;
+}
+
+} // namespace
+
+std::vector<UsageEvent> UsageEvents() {
+	return SnapshotUsageEvents(fallback_runtime_state);
+}
+
+std::vector<UsageEvent> UsageEvents(ClientContext &context) {
+	return SnapshotUsageEvents(RuntimeState(context));
+}
+
+UsageBufferStats UsageStats() {
+	return SnapshotUsageStats(fallback_runtime_state);
+}
+
+UsageBufferStats UsageStats(ClientContext &context) {
+	return SnapshotUsageStats(RuntimeState(context));
+}
+
+void ClearUsageEvents() {
+	ResetUsageEvents(fallback_runtime_state);
+}
+
+void ClearUsageEvents(ClientContext &context) {
+	ResetUsageEvents(RuntimeState(context));
+}
+
+void ClearResponseCache() {
+	ResetResponseCache(fallback_runtime_state);
+}
+
+void ClearResponseCache(ClientContext &context) {
+	ResetResponseCache(RuntimeState(context));
 }
 
 std::vector<ModelPrice> ModelPrices() {
