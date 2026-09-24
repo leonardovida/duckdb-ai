@@ -162,6 +162,7 @@ jobs:
         run: |
           python3 test/smoke/mock_provider_smoke.py
           python3 test/smoke/resumable_enrichment_smoke.py
+          python3 test/smoke/jev_batch_evaluation_smoke.py
 
       - name: Show ccache stats
         if: always()

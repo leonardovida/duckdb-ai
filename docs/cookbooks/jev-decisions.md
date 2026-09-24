@@ -146,6 +146,70 @@ retries and token usage. Batching reduces initial HTTP requests, but does not
 guarantee proportional cost or latency improvements. Data and criteria are
 repeated per question, particularly when asking several decisions per row.
 
+## Evaluate batch size on labeled data
+
+Before choosing a batch size for a job, compare predictions on a representative
+sample with human-reviewed labels. Use the source-checkout example
+`examples/jev_batch_evaluation.py` for a single Choice decision. It compares
+batch sizes 1, 8, 16 and 32 using the same rows, criteria and explicit model.
+It does not evaluate Score or Noul decisions. In particular, a criteria map
+containing exactly `true` and `false` is rejected because it selects Noul mode.
+
+Create `tickets.csv` with unique, non-empty identifiers, text and expected labels:
+
+```csv
+id,text,label
+1,I was charged twice. Please refund the duplicate.,billing
+2,Production imports are blocked with no workaround.,technical
+```
+
+Create `criteria.json` with the allowed labels and their descriptions:
+
+```json
+{
+  "billing": "Payments, duplicate charges, invoices, refunds",
+  "technical": "Bugs, outages, data imports, integrations"
+}
+```
+
+Use a build containing `ai_jev` and configure `TYPESAFE_API_KEY` as above.
+The example requires explicit live-call opt-in because it sends the sample
+four times and may incur charges:
+
+```sh
+python3 examples/jev_batch_evaluation.py \
+  --duckdb ./build/release/duckdb \
+  --input tickets.csv \
+  --criteria criteria.json \
+  --model jev-1.13.0 \
+  --allow-live > evaluation.json
+```
+
+The report retains predictions by identifier for inspection. Accuracy counts
+missing predictions as incorrect. Agreement compares each run with batch size
+1 among rows where both runs returned a prediction. Coverage counts show
+how many rows each run answered. A missing prediction never counts as agreement.
+Inspect coverage before interpreting agreement, since it excludes missing pairs. Two rows are enough to check the
+workflow, but use a representative sample larger than 32 rows to compare all
+four batch sizes.
+
+The example runs each batch size in a fresh DuckDB process with one thread
+and one provider request at a time, response caching disabled and no retries. It uses `on_error := 'null'` so a
+failed request remains visible as missing predictions. Input is limited to
+1,000 labeled rows to keep request operations within the usage buffer.
+Request bodies can still split at the byte limit, so configured batch size is
+an upper bound on rows per request.
+
+Token usage is provider-reported. Totals remain unknown when an operation fails
+or omits usage, with event counts indicating coverage. Missing usage is not
+evidence of zero cost.
+Wall time includes local process and SQL
+overhead, so it is not isolated API latency. A single run does not establish a
+speedup or prediction stability. Repeat comparisons and inspect disagreements
+before adopting a batch size. Provider-side caching, service load and model
+changes can affect results. The local mock test establishes the evaluator's
+request accounting and metrics, not Jev's live quality or costs.
+
 ## Choose the appropriate interface
 
 - Use `ai_jev` for typed choices, scores and yes/no probabilities across rows.

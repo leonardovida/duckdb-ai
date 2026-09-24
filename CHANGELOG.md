@@ -9,6 +9,9 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Added
 
+- A labeled-data Jev batch evaluation example compares batch sizes 1, 8, 16 and
+  32 with row-level predictions, accuracy, agreement and request usage.
+
 - `ai_jev` returns named choices, rubric scores, probabilities and confidence as
   typed SQL fields, with automatic batches of up to 32 rows and bounded request
   bodies. Includes a runnable table-to-Parquet cookbook and deterministic HTTP
