@@ -7,6 +7,13 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+## 0.5.1 - 2026-09-24
+
+### Fixed
+
+- Accept CR-only line endings in native provider SSE responses, alongside LF
+  and CRLF framing. [#102](https://github.com/leonardovida/duckdb-ai/pull/102)
+
 ## 0.5.0 - 2026-09-18
 
 ### Added
