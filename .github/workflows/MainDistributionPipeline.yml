@@ -1,18 +1,49 @@
 #
 # Fast CI for the DuckDB AI extension.
 #
-# Pull requests run formatting, clang-tidy, release build, SQLLogicTests, and
-# the deterministic mock-provider smoke test. The heavier DuckDB extension
-# distribution build remains available manually through workflow dispatch when
-# release artifacts are needed.
+# Code and test changes run formatting, clang-tidy, release build, SQLLogicTests,
+# and deterministic provider smokes. The Jev cookbook is included because its
+# SQL is executed by the mock smoke suite. Distribution builds remain manual.
 #
 name: CI
 
 on:
   pull_request:
+    paths:
+      - '.github/workflows/MainDistributionPipeline.yml'
+      - '.clang-format'
+      - '.clang-tidy'
+      - '.gitmodules'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+      - 'extension_config.cmake'
+      - 'vcpkg.json'
+      - 'duckdb'
+      - 'extension-ci-tools'
+      - 'src/**'
+      - 'test/**'
+      - 'examples/**'
+      - 'scripts/**'
+      - 'docs/cookbooks/jev-decisions.md'
   push:
     branches:
       - main
+    paths:
+      - '.github/workflows/MainDistributionPipeline.yml'
+      - '.clang-format'
+      - '.clang-tidy'
+      - '.gitmodules'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+      - 'extension_config.cmake'
+      - 'vcpkg.json'
+      - 'duckdb'
+      - 'extension-ci-tools'
+      - 'src/**'
+      - 'test/**'
+      - 'examples/**'
+      - 'scripts/**'
+      - 'docs/cookbooks/jev-decisions.md'
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
@@ -152,10 +183,6 @@ jobs:
       - name: Run SQLLogicTests
         shell: bash
         run: make test
-
-      - name: Run TLS trust-store smoke test
-        shell: bash
-        run: python3 test/smoke/mock_provider_smoke.py --tls-only
 
       - name: Run mock-provider smoke test
         shell: bash
