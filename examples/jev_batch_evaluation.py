@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import subprocess
 import sys
@@ -26,7 +27,7 @@ def load_input(path, criteria):
     raw = path.read_bytes()
     rows = []
     seen = set()
-    with io.StringIO(raw.decode("utf-8"), newline="") as stream:
+    with io.StringIO(raw.decode("utf-8-sig"), newline="") as stream:
         reader = csv.DictReader(stream)
         if reader.fieldnames != ["id", "text", "label"]:
             fail("input CSV must have exactly id,text,label columns")
@@ -113,7 +114,14 @@ def parse_json_stream(stdout):
     return values
 
 
-def run_batch(duckdb, input_path, criteria, model, batch_size):
+def safe_diagnostic(detail):
+    for name, value in sorted(os.environ.items(), key=lambda item: len(item[1]), reverse=True):
+        if value and any(word in name.upper() for word in ("KEY", "TOKEN", "SECRET", "PASSWORD")):
+            detail = detail.replace(value, "[redacted]")
+    return next((line.strip()[:500] for line in detail.splitlines() if line.strip()), "no diagnostic available")
+
+
+def run_batch(duckdb, input_path, criteria, model, batch_size, expected_rows, timeout_seconds):
     map_sql = criteria_sql(criteria)
     source = sql_string(str(input_path))
     query = f"""
@@ -126,13 +134,14 @@ SELECT row_number() OVER () AS input_order, id::VARCHAR AS id, text::VARCHAR AS 
               model := {sql_string(model)}, batch_size := {batch_size},
               cache := false, retry_count := 0, max_concurrent_requests := 1,
               on_error := 'null') AS decision
-FROM read_csv_auto({source}, header=true, columns={{id: 'VARCHAR', text: 'VARCHAR', label: 'VARCHAR'}});
+FROM read_csv({source}, auto_detect=false, header=true, delim=',', quote='"', escape='"', columns={{id: 'VARCHAR', text: 'VARCHAR', label: 'VARCHAR'}});
 SELECT id, text, label, decision.prediction AS prediction,
        decision IS NULL AS failed
 FROM evaluated ORDER BY input_order;
 WITH usage AS (SELECT * FROM ai_usage() WHERE function_name = 'ai_jev')
 SELECT COALESCE((SELECT sum(batch_count) FROM ai_usage_summary() WHERE provider = 'typesafe'), 0)::BIGINT
            AS request_operations,
+       COALESCE((SELECT max(dropped_events) FROM ai_usage_summary()), 0)::BIGINT AS dropped_events,
        count(*)::BIGINT AS usage_events,
        count(*) FILTER (WHERE status = 'ok' AND prompt_tokens >= 0)::BIGINT AS prompt_token_events,
        count(*) FILTER (WHERE status = 'ok' AND completion_tokens >= 0)::BIGINT AS completion_token_events,
@@ -155,16 +164,25 @@ FROM usage;
         text=True,
         capture_output=True,
         env=child_env(),
-        timeout=300,
+        timeout=timeout_seconds,
     )
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
     if result.returncode:
-        raise RuntimeError("DuckDB evaluation failed")
+        raise RuntimeError("DuckDB evaluation failed: " + safe_diagnostic(result.stderr))
     values = parse_json_stream(result.stdout)
     if len(values) != 2:
         raise RuntimeError("DuckDB evaluation returned an unexpected result shape")
     rows, usage_rows = values
+    observed_rows = [{field: row.get(field) for field in ("id", "text", "label")} for row in rows]
+    if observed_rows != expected_rows:
+        raise RuntimeError("DuckDB parsed the input differently from the validator")
     usage = usage_rows[0] if usage_rows else {}
+    if not usage.get("usage_events") or not usage.get("request_operations"):
+        raise RuntimeError("no provider requests were recorded; check TYPESAFE_API_KEY and request size")
+    if usage.get("dropped_events", 0):
+        usage["tokens_complete"] = False
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            usage[field] = None
     predictions = []
     for row in rows:
         predictions.append(
@@ -198,6 +216,7 @@ FROM usage;
             "total_tokens": usage.get("total_tokens"),
             "failures": usage.get("failures"),
             "usage_events": usage.get("usage_events"),
+            "dropped_events": usage.get("dropped_events"),
             "prompt_token_events": usage.get("prompt_token_events"),
             "completion_token_events": usage.get("completion_token_events"),
             "total_token_events": usage.get("total_token_events"),
@@ -232,8 +251,13 @@ def main(argv=None):
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--criteria", required=True, type=Path)
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--timeout-seconds", type=float, default=3600, help="timeout for each batch-size run (default: 3600)"
+    )
     parser.add_argument("--allow-live", action="store_true", help="explicitly permit provider calls")
     args = parser.parse_args(argv)
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
+        parser.error("--timeout-seconds must be a finite positive number")
     if not args.allow_live:
         parser.error("refusing provider calls without --allow-live")
     if not args.model.strip():
@@ -242,29 +266,40 @@ def main(argv=None):
         parser.error(f"DuckDB executable not found: {args.duckdb}")
     criteria, criteria_sha256 = load_criteria(args.criteria)
     rows, input_sha256 = load_input(args.input, criteria)
-    with tempfile.TemporaryDirectory(prefix="duckdb-ai-jev-eval-") as directory:
-        # read_csv_auto needs a stable absolute path while each batch uses a fresh process.
-        input_path = Path(directory) / "input.csv"
-        with input_path.open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=["id", "text", "label"])
-            writer.writeheader()
-            writer.writerows(rows)
-        results = []
-        for batch_size in BATCH_SIZES:
-            results.append(run_batch(args.duckdb.resolve(), input_path, criteria, args.model, batch_size))
-    baseline = results[0]
-    for result in results:
-        result["agreement_to_batch_1"] = agreement(baseline, result)
-    output = {
+    results = []
+    report = {
         "model": args.model,
         "input_sha256": input_sha256,
         "criteria_sha256": criteria_sha256,
         "row_cap": MAX_ROWS,
         "rows": len(rows),
         "batch_sizes": list(BATCH_SIZES),
+        "timeout_seconds": args.timeout_seconds,
+        "complete": False,
         "runs": results,
     }
-    json.dump(output, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    with tempfile.TemporaryDirectory(prefix="duckdb-ai-jev-eval-") as directory:
+        # Use a fixed CSV dialect and verify every returned row against this snapshot.
+        input_path = Path(directory) / "input.csv"
+        with input_path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=["id", "text", "label"])
+            writer.writeheader()
+            writer.writerows(rows)
+        for batch_size in BATCH_SIZES:
+            try:
+                result = run_batch(
+                    args.duckdb.resolve(), input_path, criteria, args.model, batch_size, rows, args.timeout_seconds
+                )
+                result["agreement_to_batch_1"] = agreement(results[0] if results else result, result)
+                results.append(result)
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                detail = "DuckDB evaluation timed out" if isinstance(error, subprocess.TimeoutExpired) else str(error)
+                report["error"] = safe_diagnostic(detail)
+                json.dump(report, sys.stdout, ensure_ascii=False)
+                sys.stdout.write("\n")
+                raise RuntimeError(report["error"]) from None
+    report["complete"] = True
+    json.dump(report, sys.stdout, ensure_ascii=False, separators=(",", ":"))
     sys.stdout.write("\n")
 
 

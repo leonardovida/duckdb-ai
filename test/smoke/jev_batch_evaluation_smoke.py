@@ -5,20 +5,41 @@ import csv
 import sys
 import json
 import os
+import runpy
 import subprocess
 import argparse
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 
 def run(duckdb_override=None):
     root = Path(__file__).resolve().parents[2]
     duckdb = Path(duckdb_override) if duckdb_override else root / "build/release/duckdb"
     script = root / "examples/jev_batch_evaluation.py"
+    evaluator = runpy.run_path(str(script))
+    expected = [{"id": "1", "text": "source", "label": "a"}]
+    result = subprocess.CompletedProcess([], 1, stdout="", stderr="Binder Error: invalid key smoke-secret-value")
+    with patch.dict(os.environ, TYPESAFE_API_KEY="smoke-secret-value"), patch("subprocess.run", return_value=result):
+        try:
+            evaluator["run_batch"](duckdb, Path("unused.csv"), {"a": "first"}, "jev", 1, expected, 2)
+            raise AssertionError("DuckDB errors must fail")
+        except RuntimeError as error:
+            assert "Binder Error" in str(error) and "smoke-secret-value" not in str(error)
+    result = subprocess.CompletedProcess([], 0, stdout="[]\n[{}]", stderr="")
+    with patch("subprocess.run", return_value=result):
+        try:
+            evaluator["run_batch"](duckdb, Path("unused.csv"), {"a": "first"}, "jev", 1, expected, 2)
+            raise AssertionError("Changed input rows must fail")
+        except RuntimeError as error:
+            assert "parsed the input differently" in str(error)
+
     requests = []
     logs = []
+    slow_batches = False
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -33,6 +54,8 @@ def run(duckdb_override=None):
                 return
             requests.append(body)
             questions = body["questions"]
+            if slow_batches and len(questions) > 1:
+                time.sleep(3)
             records = [question["instructions"]["record"] for question in questions.values()]
             if any(record.startswith("row-10 ") for record in records):
                 self.send_response(503)
@@ -64,13 +87,16 @@ def run(duckdb_override=None):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            try:
+                self.wfile.write(payload)
+            except BrokenPipeError:
+                pass  # The timeout test deliberately closes the client connection.
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}"
-    env = os.environ.copy()
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("DUCKDB_AI_", "TYPESAFE_"))}
     env.update(
         TYPESAFE_API_KEY="smoke-secret-must-not-be-printed",
         TYPESAFE_BASE_URL=endpoint + "/v1",
@@ -78,7 +104,7 @@ def run(duckdb_override=None):
         DUCKDB_AI_LOG_INCLUDE_TEXT="1",
     )
 
-    def invoke(input_path, criteria_path, allow_live=True, model="jev-1.13.0"):
+    def invoke(input_path, criteria_path, allow_live=True, model="jev-1.13.0", timeout_seconds=None, credentials=True):
         command = [
             sys.executable,
             str(script),
@@ -93,7 +119,12 @@ def run(duckdb_override=None):
         ]
         if allow_live:
             command.append("--allow-live")
-        return subprocess.run(command, text=True, capture_output=True, env=env, timeout=120)
+        if timeout_seconds is not None:
+            command.extend(["--timeout-seconds", str(timeout_seconds)])
+        child_env = env.copy()
+        if not credentials:
+            child_env.pop("TYPESAFE_API_KEY")
+        return subprocess.run(command, text=True, capture_output=True, env=child_env, timeout=120)
 
     try:
         with tempfile.TemporaryDirectory() as directory:
@@ -119,8 +150,10 @@ def run(duckdb_override=None):
             completed = invoke(input_path, criteria_path)
             assert completed.returncode == 0, completed.stdout + completed.stderr
             assert "smoke-secret" not in completed.stdout
+            assert "smoke-secret" not in completed.stderr
             assert not logs, "inherited usage log endpoint must be disabled"
             report = json.loads(completed.stdout)
+            assert report["complete"] is True
             assert report["row_cap"] == 1000 and report["rows"] == 33
             assert report["model"] == "jev-1.13.0"
             assert len(report["input_sha256"]) == 64 and len(report["criteria_sha256"]) == 64
@@ -200,6 +233,37 @@ def run(duckdb_override=None):
             assert invalid.returncode != 0 and not requests
             invalid = invoke(input_path, criteria_path, model="   ")
             assert invalid.returncode != 0 and not requests
+            for timeout in (0, -1, "nan", "inf"):
+                invalid = invoke(input_path, criteria_path, timeout_seconds=timeout)
+                assert invalid.returncode != 0 and not requests
+
+            missing = invoke(input_path, criteria_path, credentials=False)
+            assert missing.returncode != 0 and not requests, missing.stdout + missing.stderr
+            assert "no provider requests" in missing.stderr.lower()
+            assert json.loads(missing.stdout)["complete"] is False
+
+            quoted = directory / "quoted.csv"
+            quoted_text = 'row-2 café, "doubled quotes"; | backslash \\"\nnext line'
+            with quoted.open("w", newline="", encoding="utf-8-sig") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(["id", "text", "label"])
+                writer.writerow(["quoted", quoted_text, "a'b"])
+            roundtrip = invoke(quoted, criteria_path)
+            assert roundtrip.returncode == 0, roundtrip.stdout + roundtrip.stderr
+            for result in json.loads(roundtrip.stdout)["runs"]:
+                assert result["rows"][0]["text"] == quoted_text
+                assert result["usage"]["dropped_events"] == 0
+
+            short = directory / "timeout.csv"
+            short.write_text("id,text,label\n0,row-0,a'b\n1,row-1,b\n", encoding="utf-8")
+            slow_batches = True
+            timed_out = invoke(short, criteria_path, timeout_seconds=2)
+            slow_batches = False
+            assert timed_out.returncode != 0 and "timed out" in timed_out.stderr.lower(), timed_out.stderr
+            partial = json.loads(timed_out.stdout)
+            assert partial["complete"] is False
+            assert [result["batch_size"] for result in partial["runs"]] == [1]
+            assert partial["runs"][0]["metrics"]["accuracy"] == 1.0
         print("jev batch evaluation smoke passed: validation, opt-in, request counts, failures, agreement")
     finally:
         server.shutdown()

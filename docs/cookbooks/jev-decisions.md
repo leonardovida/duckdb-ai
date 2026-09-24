@@ -182,29 +182,38 @@ python3 examples/jev_batch_evaluation.py \
   --input tickets.csv \
   --criteria criteria.json \
   --model jev-1.13.0 \
+  --timeout-seconds 3600 \
   --allow-live > evaluation.json
 ```
+
+The timeout applies to each batch-size run and defaults to one hour. Increase
+it for slow endpoints or larger samples. If a later run fails or times out,
+the command exits nonzero and writes the completed comparisons with
+`complete: false` and an error. The interrupted run is not saved, and it may
+already have incurred charges. Successful reports have `complete: true`.
 
 The report retains predictions by identifier for inspection. Accuracy counts
 missing predictions as incorrect. Agreement compares each run with batch size
 1 among rows where both runs returned a prediction. Coverage counts show
 how many rows each run answered. A missing prediction never counts as agreement.
-Inspect coverage before interpreting agreement, since it excludes missing pairs. Two rows are enough to check the
-workflow, but use a representative sample larger than 32 rows to compare all
-four batch sizes.
+Inspect coverage before interpreting agreement, since it excludes missing
+pairs. Two rows are enough to check the workflow, but use a representative
+sample larger than 32 rows to compare all four batch sizes.
 
 The example runs each batch size in a fresh DuckDB process with one thread
 and one provider request at a time, response caching disabled and no retries. It uses `on_error := 'null'` so a
 failed request remains visible as missing predictions. Input is limited to
 1,000 labeled rows to keep request operations within the usage buffer.
 Request bodies can still split at the byte limit, so configured batch size is
-an upper bound on rows per request.
+an upper bound on rows per request. A row that cannot fit by itself is missing
+without a provider request. If no requests are recorded at all, the command
+fails with guidance to check credentials and request size.
 
 Token usage is provider-reported. Totals remain unknown when an operation fails
 or omits usage, with event counts indicating coverage. Missing usage is not
-evidence of zero cost.
-Wall time includes local process and SQL
-overhead, so it is not isolated API latency. A single run does not establish a
+evidence of zero cost. Dropped usage events also make totals incomplete.
+Wall time includes local process and SQL overhead, so it is not isolated API
+latency. A single run does not establish a
 speedup or prediction stability. Repeat comparisons and inspect disagreements
 before adopting a batch size. Provider-side caching, service load and model
 changes can affect results. The local mock test establishes the evaluator's
