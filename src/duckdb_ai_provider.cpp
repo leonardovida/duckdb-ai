@@ -29,6 +29,7 @@
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -346,7 +347,11 @@ bool TryReadEnvInt64(const std::string &name, int64_t &target, int64_t min_value
 		return false;
 	}
 	try {
-		auto value = std::stoll(configured);
+		size_t parsed = 0;
+		auto value = std::stoll(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (value < min_value || value > max_value) {
 			throw InvalidInputException("%s must be between %lld and %lld", name, static_cast<long long>(min_value),
 			                            static_cast<long long>(max_value));
@@ -367,7 +372,11 @@ bool TryReadEnvDouble(const std::string &name, double &target, double min_value,
 		return false;
 	}
 	try {
-		auto value = std::stod(configured);
+		size_t parsed = 0;
+		auto value = std::stod(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (!std::isfinite(value) || value < min_value || value > max_value) {
 			throw InvalidInputException("%s must be between %.0f and %.0f", name, min_value, max_value);
 		}
@@ -1087,7 +1096,11 @@ size_t MaxResponseCacheEntries(const CompletionOptions &options) {
 		return DEFAULT_MAX_RESPONSE_CACHE_ENTRIES;
 	}
 	try {
-		auto value = std::stoll(configured);
+		size_t parsed = 0;
+		auto value = std::stoll(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (value < 0 || value > 1000000) {
 			throw InvalidInputException("DUCKDB_AI_CACHE_MAX_ENTRIES must be between 0 and 1000000");
 		}
@@ -1108,7 +1121,11 @@ int64_t ResponseCacheTtlSeconds(const CompletionOptions &options) {
 		return 0;
 	}
 	try {
-		auto value = std::stoll(configured);
+		size_t parsed = 0;
+		auto value = std::stoll(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (value < 0 || value > 31536000) {
 			throw InvalidInputException("DUCKDB_AI_CACHE_TTL_SECONDS must be between 0 and 31536000");
 		}
@@ -2439,7 +2456,11 @@ int64_t MaxConcurrentRequests(const CompletionOptions &options) {
 		return 0;
 	}
 	try {
-		auto max_concurrent_requests = std::stoll(configured);
+		size_t parsed = 0;
+		auto max_concurrent_requests = std::stoll(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (max_concurrent_requests < 0 || max_concurrent_requests > MAX_PROVIDER_CHUNK_WORKERS) {
 			throw InvalidInputException("DUCKDB_AI_MAX_CONCURRENT_REQUESTS must be between 0 and %lld",
 			                            static_cast<long long>(MAX_PROVIDER_CHUNK_WORKERS));
@@ -2462,7 +2483,11 @@ int64_t MinRequestIntervalMs(const CompletionOptions &options) {
 		return 0;
 	}
 	try {
-		auto min_request_interval_ms = std::stoll(configured);
+		size_t parsed = 0;
+		auto min_request_interval_ms = std::stoll(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (min_request_interval_ms < 0 || min_request_interval_ms > 60000) {
 			throw InvalidInputException("DUCKDB_AI_MIN_REQUEST_INTERVAL_MS must be between 0 and 60000");
 		}
@@ -2483,7 +2508,11 @@ int64_t TokenLimitPerMinute(const CompletionOptions &options) {
 		return 0;
 	}
 	try {
-		auto token_limit_per_minute = std::stoll(configured);
+		size_t parsed = 0;
+		auto token_limit_per_minute = std::stoll(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (token_limit_per_minute < 0 || token_limit_per_minute > MAX_TOKEN_LIMIT_PER_MINUTE) {
 			throw InvalidInputException("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE must be between 0 and %lld",
 			                            static_cast<long long>(MAX_TOKEN_LIMIT_PER_MINUTE));
@@ -4680,7 +4709,11 @@ double LogSampleRate(const CompletionOptions &options) {
 		return 1.0;
 	}
 	try {
-		auto rate = std::stod(configured);
+		size_t parsed = 0;
+		auto rate = std::stod(configured, &parsed);
+		if (parsed != configured.size()) {
+			throw std::invalid_argument("trailing characters");
+		}
 		if (!std::isfinite(rate) || rate < 0 || rate > 1) {
 			throw InvalidInputException("DUCKDB_AI_LOG_SAMPLE_RATE must be between 0 and 1");
 		}

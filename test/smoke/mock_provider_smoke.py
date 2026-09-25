@@ -1132,10 +1132,10 @@ def run_duckdb_strict_log_error(duckdb_path: Path, base_url: str, port: int) -> 
     return result.stdout
 
 
-def run_duckdb_invalid_env_log_sample_rate(duckdb_path: Path) -> str:
+def run_duckdb_invalid_numeric_env(duckdb_path: Path, name: str, value: str) -> str:
     sql = "SELECT ai_completion_request_json('hello', provider := 'openai');"
     env = os.environ.copy()
-    env["DUCKDB_AI_LOG_SAMPLE_RATE"] = "nan"
+    env[name] = value
     result = subprocess.run(
         [str(duckdb_path), "-c", sql],
         cwd=repo_root(),
@@ -1146,7 +1146,7 @@ def run_duckdb_invalid_env_log_sample_rate(duckdb_path: Path) -> str:
         check=False,
     )
     if result.returncode == 0:
-        raise AssertionError(f"duckdb invalid env log sample rate unexpectedly succeeded\n{result.stdout}")
+        raise AssertionError(f"duckdb invalid {name}={value} unexpectedly succeeded\n{result.stdout}")
     return result.stdout
 
 
@@ -1495,15 +1495,6 @@ def assert_strict_log_error(output: str):
     if MockProviderHandler.log_requests:
         raise AssertionError(
             f"strict log allowlist should block before log request: {MockProviderHandler.log_requests}"
-        )
-
-
-def assert_invalid_env_log_sample_rate(output: str):
-    if "DUCKDB_AI_LOG_SAMPLE_RATE must be between 0 and 1" not in output:
-        raise AssertionError(f"invalid env log sample rate error missing expected message\n{output}")
-    if MockProviderHandler.completion_requests:
-        raise AssertionError(
-            f"invalid env log sample rate should fail before provider request: {MockProviderHandler.completion_requests}"
         )
 
 
@@ -2788,8 +2779,16 @@ def main():
         strict_log_error_output = run_duckdb_strict_log_error(args.duckdb, f"http://127.0.0.1:{port}", port)
         assert_strict_log_error(strict_log_error_output)
         MockProviderHandler.reset()
-        invalid_env_log_sample_rate_output = run_duckdb_invalid_env_log_sample_rate(args.duckdb)
-        assert_invalid_env_log_sample_rate(invalid_env_log_sample_rate_output)
+        for name, value, expected_error in (
+            ("DUCKDB_AI_LOG_SAMPLE_RATE", "nan", "DUCKDB_AI_LOG_SAMPLE_RATE must be between 0 and 1"),
+            ("DUCKDB_AI_LOG_SAMPLE_RATE", "0junk", "DUCKDB_AI_LOG_SAMPLE_RATE must be a number between 0 and 1"),
+            ("DUCKDB_AI_RETRY_COUNT", "0junk", "DUCKDB_AI_RETRY_COUNT must be an integer between 0 and 10"),
+        ):
+            output = run_duckdb_invalid_numeric_env(args.duckdb, name, value)
+            if expected_error not in output:
+                raise AssertionError(f"invalid numeric env error missing {expected_error}\n{output}")
+            if MockProviderHandler.completion_requests:
+                raise AssertionError(f"invalid numeric env should fail before provider request: {name}")
         MockProviderHandler.reset()
         invalid_url_scheme_output = run_duckdb_invalid_url_scheme(args.duckdb)
         assert_invalid_url_scheme(invalid_url_scheme_output)
