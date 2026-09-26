@@ -4238,20 +4238,8 @@ std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::y
 				return value;
 			}
 		} else if (config.protocol == "anthropic_messages") {
-			auto content = YyjsonObjectGet(root, "content");
-			if (duckdb_yyjson::yyjson_is_arr(content)) {
-				duckdb_yyjson::yyjson_val *entry;
-				size_t index;
-				size_t max;
-				yyjson_arr_foreach(content, index, max, entry) {
-					std::string type;
-					if (YyjsonDirectString(entry, "type", type) && type != "text") {
-						continue;
-					}
-					if (YyjsonDirectString(entry, "text", value)) {
-						return value;
-					}
-				}
+			if (ExtractMessageContentText(root, value)) {
+				return value;
 			}
 		} else if (config.protocol == "ollama_chat") {
 			auto message = YyjsonObjectGet(root, "message");
