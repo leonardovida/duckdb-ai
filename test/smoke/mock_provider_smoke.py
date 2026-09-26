@@ -766,7 +766,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         }
     )
     result = subprocess.run(
-        [str(duckdb_path), "-c", sql],
+        [str(duckdb_path), "-cmd", ".maxrows 200", "-c", sql],
         cwd=repo_root(),
         env=env,
         text=True,
@@ -777,6 +777,46 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
     if result.returncode != 0:
         raise AssertionError(f"duckdb exited with {result.returncode}\n{result.stdout}")
     return result.stdout
+
+
+def run_duckdb_schema_pattern_properties(duckdb_path: Path, base_url: str):
+    sql = f"""
+        SET duckdb_ai_provider = 'openai';
+        SET duckdb_ai_model = 'mock-model';
+        SET duckdb_ai_base_url = '{base_url}';
+        SELECT CASE WHEN
+            ai_complete_json(
+                'return constrained schema JSON',
+                response_schema := '{{"type":"object","properties":{{"score":{{"type":"number"}}}},"patternProperties":{{"^su":{{"type":"string"}},"ary$":{{"minLength":4}},"^t":{{"type":"array"}}}},"additionalProperties":false}}'
+            ) IS NOT NULL AND
+            ai_complete_json(
+                'return constrained schema JSON',
+                response_schema := '{{"type":"object","properties":{{"score":{{"type":"number"}}}},"patternProperties":{{"^su":{{"type":"string"}}}},"additionalProperties":false}}',
+                fail_on_error := false
+            ) IS NULL AND
+            ai_complete_json(
+                'return constrained schema JSON',
+                response_schema := '{{"type":"object","properties":{{"score":{{"type":"number"}}}},"patternProperties":{{"^su":{{"type":"number"}},"^t":{{"type":"array"}}}},"additionalProperties":false}}',
+                fail_on_error := false
+            ) IS NULL AND
+            ai_complete_json(
+                'return constrained schema JSON',
+                response_schema := '{{"type":"object","properties":{{"summary":{{}},"score":{{}},"tags":{{}}}},"patternProperties":{{"[":{{}}}},"additionalProperties":false}}',
+                fail_on_error := false
+            ) IS NULL
+        THEN 'pattern_properties_ok' ELSE 'pattern_properties_failed' END;
+    """
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env={**os.environ, "OPENAI_API_KEY": "test-key"},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0 or "pattern_properties_ok" not in result.stdout:
+        raise AssertionError(f"schema patternProperties smoke failed\n{result.stdout}")
 
 
 def run_duckdb_embedding_indexes(duckdb_path: Path, base_url: str) -> str:
@@ -2709,6 +2749,8 @@ def main():
         MockProviderHandler.reset()
         output = run_duckdb(args.duckdb, f"http://127.0.0.1:{port}")
         assert_smoke_result(output)
+        MockProviderHandler.reset()
+        run_duckdb_schema_pattern_properties(args.duckdb, f"http://127.0.0.1:{port}")
         MockProviderHandler.reset()
         embedding_index_output = run_duckdb_embedding_indexes(args.duckdb, f"http://127.0.0.1:{port}")
         assert_embedding_indexes(embedding_index_output)

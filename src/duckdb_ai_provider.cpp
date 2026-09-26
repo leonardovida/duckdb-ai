@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -2044,6 +2045,8 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	if (value.type == JsonValueType::OBJECT) {
 		auto properties_schema = ObjectField(schema, "properties");
 		auto pattern_properties_schema = ObjectField(schema, "patternProperties");
+		auto additional_schema = ObjectField(schema, "additionalProperties");
+		std::set<std::string> matched_pattern_properties;
 		auto required_schema = ObjectField(schema, "required");
 		int64_t property_limit;
 		if (SchemaNonNegativeIntegerField(schema, "minProperties", property_limit) &&
@@ -2101,6 +2104,9 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 						}
 						continue;
 					}
+					if (additional_schema) {
+						matched_pattern_properties.insert(property.first);
+					}
 					if (!ValidateJsonValueAgainstSchema(property.second, pattern_schema.second,
 					                                    JsonPathChild(path, property.first), error)) {
 						return false;
@@ -2126,29 +2132,12 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 				}
 			}
 		}
-		auto additional_schema = ObjectField(schema, "additionalProperties");
 		if (additional_schema) {
 			for (auto &property : value.object_value) {
 				auto declared =
 				    properties_schema && properties_schema->type == JsonValueType::OBJECT &&
 				    properties_schema->object_value.find(property.first) != properties_schema->object_value.end();
-				if (!declared && pattern_properties_schema &&
-				    pattern_properties_schema->type == JsonValueType::OBJECT) {
-					for (auto &pattern_schema : pattern_properties_schema->object_value) {
-						std::string pattern_error;
-						if (!RegexMatches(property.first, pattern_schema.first, JsonPathChild(path, property.first),
-						                  pattern_error)) {
-							if (!pattern_error.empty()) {
-								error = pattern_error;
-								return false;
-							}
-							continue;
-						}
-						declared = true;
-						break;
-					}
-				}
-				if (declared) {
+				if (declared || matched_pattern_properties.find(property.first) != matched_pattern_properties.end()) {
 					continue;
 				}
 				if (additional_schema->type == JsonValueType::BOOLEAN && !additional_schema->boolean_value) {
