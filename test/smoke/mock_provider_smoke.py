@@ -281,7 +281,11 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             self.claude_versions.append(self.headers.get("anthropic-version"))
             self.claude_requests.append(json.loads(body))
             payload = {
-                "content": [{"type": "text", "text": "mock claude completion"}],
+                "content": [
+                    {"type": "text", "text": "mock claude "},
+                    {"type": "thinking", "thinking": "internal reasoning"},
+                    {"type": "text", "text": "completion"},
+                ],
                 "usage": {
                     "input_tokens": 9,
                     "output_tokens": 4,
