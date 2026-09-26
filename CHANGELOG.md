@@ -17,6 +17,11 @@ include SQL API changes and patch versions should preserve the SQL API.
   bodies. Includes a runnable table-to-Parquet cookbook and deterministic HTTP
   coverage. Existing Jev entry points retain their behavior.
 
+### Fixed
+
+- Preserve every Anthropic Messages text block in completion results, including
+  responses with interleaved thinking blocks.
+
 ## 0.5.1 - 2026-09-24
 
 ### Fixed
