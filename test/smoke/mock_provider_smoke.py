@@ -192,6 +192,13 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "total_tokens": 10,
                 },
             }
+            if request.get("model") in {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}:
+                payload["usage"] = {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "total_tokens": 105,
+                    "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
+                }
             if prompt == "databricks typed content":
                 payload["choices"][0]["message"]["content"] = [
                     {
@@ -291,6 +298,13 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "output_tokens": 4,
                 },
             }
+            if self.claude_requests[-1].get("model") in {"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"}:
+                payload["usage"] = {
+                    "input_tokens": 70,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 10,
+                    "output_tokens": 5,
+                }
             self._send_json(payload)
             return
 
@@ -1437,6 +1451,67 @@ def assert_openai_pricing(output: str):
     models = [request.get("model") for request in MockProviderHandler.completion_requests]
     if models != ["gpt-5.6-sol", "gpt-5.6"]:
         raise AssertionError(f"unexpected OpenAI pricing models: {MockProviderHandler.completion_requests}")
+
+
+def run_duckdb_new_model_pricing(duckdb_path: Path, base_url: str) -> str:
+    models = (
+        ("openai", "gpt-6-astra"),
+        ("openai", "gpt-6.1-sol"),
+        ("openai", "gpt-6-sol"),
+        ("openai", "gpt-6-luna"),
+        ("anthropic", "claude-fable-5-1"),
+        ("anthropic", "claude-opus-5-5"),
+        ("anthropic", "claude-sonnet-5-5"),
+    )
+    calls = "\n".join(
+        f"SELECT ai_complete('new model pricing', provider := '{provider}', model := '{model}', "
+        f"base_url := '{base_url}', system_prompt := 'stable prefix', prompt_cache := true, "
+        "temperature := 0.2, use_builtin_model_prices := true);"
+        for provider, model in models
+    )
+    sql = f"""
+        {calls}
+        SELECT count(*) = 7 AND bool_and(status = 'ok') AND bool_and(total_tokens = 105) AND
+               bool_and(cache_creation_prompt_tokens = 10) AND
+               bool_and(abs(estimated_cost_usd - CASE model
+                   WHEN 'gpt-6-astra' THEN 0.001095
+                   WHEN 'gpt-6.1-sol' THEN 0.000217
+                   WHEN 'gpt-6-sol' THEN 0.000219
+                   WHEN 'gpt-6-luna' THEN 0.00001095
+                   WHEN 'claude-fable-5-1' THEN 0.001080
+                   WHEN 'claude-opus-5-5' THEN 0.000434
+                   WHEN 'claude-sonnet-5-5' THEN 0.000219
+               END) < 0.000000000001) AS pricing_matches
+        FROM ai_usage();
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "openai-test-key"
+    env["ANTHROPIC_API_KEY"] = "anthropic-test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"new model pricing smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_new_model_pricing(output: str):
+    if "pricing_matches" not in output or "true" not in output:
+        raise AssertionError(f"new model pricing did not match catalog: {output}")
+    if len(MockProviderHandler.completion_requests) != 4 or len(MockProviderHandler.claude_requests) != 3:
+        raise AssertionError("expected one mock request for each new text completion model")
+    for request in MockProviderHandler.completion_requests:
+        if "temperature" in request or request.get("prompt_cache_options") != {"mode": "explicit"}:
+            raise AssertionError(f"unsupported GPT-6 request options: {request}")
+    for request in MockProviderHandler.claude_requests:
+        if "temperature" in request or request.get("system", [{}])[0].get("cache_control") != {"type": "ephemeral"}:
+            raise AssertionError(f"unsupported Claude request options: {request}")
 
 
 def run_duckdb_xai_prompt_cache_header(duckdb_path: Path, base_url: str) -> str:
@@ -2812,6 +2887,9 @@ def main():
         MockProviderHandler.reset()
         openai_pricing_output = run_duckdb_openai_pricing(args.duckdb, f"http://127.0.0.1:{port}")
         assert_openai_pricing(openai_pricing_output)
+        MockProviderHandler.reset()
+        new_model_pricing_output = run_duckdb_new_model_pricing(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_new_model_pricing(new_model_pricing_output)
         MockProviderHandler.reset()
         xai_header_output = run_duckdb_xai_prompt_cache_header(args.duckdb, f"http://127.0.0.1:{port}")
         assert_xai_prompt_cache_header(xai_header_output)
