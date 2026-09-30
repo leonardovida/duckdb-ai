@@ -4999,6 +4999,32 @@ std::string EmbeddingDimensionError(const EmbeddingResult &result, const Provide
 	                          static_cast<long long>(capabilities.embedding_dimensions));
 }
 
+//! Scalar responses and cached batch rows share validation and rejected-response cleanup.
+//! Preserve exception messages for parse failures and plain diagnostic text for dimension failures.
+EmbeddingResult ParseValidatedEmbeddingResult(const ProviderConfig &config, const std::string &input,
+                                              const HttpResponse &response, const CompletionOptions &options,
+                                              const ProviderCapabilities &capabilities, const std::string &cache_key) {
+	auto record_failure = [&](const std::string &error) {
+		if (!cache_key.empty()) {
+			RemoveCachedResponse(RuntimeState(options), cache_key);
+		}
+		RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+	};
+	EmbeddingResult result;
+	try {
+		result = ParseEmbeddingResult(config, response);
+	} catch (std::exception &ex) {
+		record_failure(ex.what());
+		throw;
+	}
+	auto dimension_error = EmbeddingDimensionError(result, capabilities);
+	if (!dimension_error.empty()) {
+		record_failure(dimension_error);
+		throw InvalidInputException("%s", dimension_error);
+	}
+	return result;
+}
+
 void ValidateCompletionRequestLimits(const std::string &prompt, const std::string &payload,
                                      const CompletionOptions &options) {
 	auto capabilities = GetProviderCapabilities(options, false);
@@ -5476,25 +5502,7 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, error, response.retries);
 		throw IOException("%s", error);
 	}
-	EmbeddingResult result;
-	try {
-		result = ParseEmbeddingResult(config, response);
-	} catch (std::exception &ex) {
-		if (!cache_key.empty()) {
-			RemoveCachedResponse(RuntimeState(request_options), cache_key);
-		}
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, ex.what(), response.retries);
-		throw;
-	}
-	auto dimension_error = EmbeddingDimensionError(result, capabilities);
-	if (!dimension_error.empty()) {
-		if (!cache_key.empty()) {
-			RemoveCachedResponse(RuntimeState(request_options), cache_key);
-		}
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, dimension_error,
-		                                response.retries);
-		throw InvalidInputException("%s", dimension_error);
-	}
+	auto result = ParseValidatedEmbeddingResult(config, input, response, request_options, capabilities, cache_key);
 	RecordEmbeddingUsageEvent(config, input, result, request_options);
 	MaybePostEmbeddingLog(config, input, result, request_options);
 	return result;
@@ -5537,21 +5545,8 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 			auto cache_key = ResponseCacheKey("embedding", config, endpoint, EmbeddingPayload(config, inputs[i]));
 			HttpResponse cached_response;
 			if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
-				try {
-					results[i] = ParseEmbeddingResult(config, cached_response);
-				} catch (std::exception &ex) {
-					RemoveCachedResponse(runtime_state, cache_key);
-					RecordFailedEmbeddingUsageEvent(config, inputs[i], options, cached_response.status, ex.what(),
-					                                cached_response.retries);
-					throw;
-				}
-				auto dimension_error = EmbeddingDimensionError(results[i], capabilities);
-				if (!dimension_error.empty()) {
-					RemoveCachedResponse(runtime_state, cache_key);
-					RecordFailedEmbeddingUsageEvent(config, inputs[i], options, cached_response.status, dimension_error,
-					                                cached_response.retries);
-					throw InvalidInputException("%s", dimension_error);
-				}
+				results[i] =
+				    ParseValidatedEmbeddingResult(config, inputs[i], cached_response, options, capabilities, cache_key);
 				auto cache_options = ChildOperationOptions(options);
 				RecordEmbeddingUsageEvent(config, inputs[i], results[i], cache_options);
 				MaybePostEmbeddingLog(config, inputs[i], results[i], cache_options);
