@@ -2414,6 +2414,118 @@ def assert_adaptive_batches(output: str):
         )
 
 
+def run_duckdb_embedding_validation(duckdb_path: Path):
+    requests = []
+    env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
+    env["OPENAI_API_KEY"] = "test-key"
+
+    class Handler(MockProviderHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            inputs = request["input"]
+            inputs = inputs if isinstance(inputs, list) else [inputs]
+            requests.append(inputs)
+            values = [[] if value == "empty validation" else [0.25, -0.5, 1.25] for value in inputs]
+            if self.path == "/api/embed":
+                payload = {"embeddings": values}
+            else:
+                payload = {"data": [{"embedding": value, "index": i} for i, value in enumerate(values)]}
+            payload["usage"] = {"prompt_tokens": 5, "total_tokens": 7}
+            self._send_json(payload)
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for provider in ("openai", "ollama"):
+            requests.clear()
+            profile = f"""
+                CREATE OR REPLACE EXTERNAL MODEL validation_embedding WITH (
+                    provider = '{provider}', model = 'mock-embedding',
+                    location = 'http://127.0.0.1:{server.server_port}', model_type = 'embedding',
+                    options = '{{"embedding_dimensions":DIMENSIONS}}'
+                );
+            """
+            sql = f"""
+                SET duckdb_ai_retry_count = 0;
+                CREATE TEMP TABLE checks(name VARCHAR, passed BOOLEAN);
+                {profile.replace('DIMENSIONS', '4')}
+                INSERT INTO checks SELECT 'scalar dimension rejection',
+                    ai_embed('scalar validation', profile := 'validation_embedding', cache := true,
+                             fail_on_error := false) IS NULL;
+                INSERT INTO checks SELECT 'parse before dimension rejection',
+                    ai_embed('empty validation', profile := 'validation_embedding', cache := true,
+                             fail_on_error := false) IS NULL;
+                INSERT INTO checks SELECT 'parse rejection refetch',
+                    ai_embed('empty validation', profile := 'validation_embedding', cache := true,
+                             fail_on_error := false) IS NULL;
+                INSERT INTO checks SELECT 'scalar failure diagnostics',
+                    count(*) = 3 AND count(*) FILTER (WHERE error =
+                        'AI embedding provider returned 3 dimensions; external model expects 4') = 1
+                    AND count(*) FILTER (WHERE error LIKE '%contained an empty embedding:%') = 2
+                    FROM ai_usage() WHERE status = 'error';
+                {profile.replace('DIMENSIONS', '3')}
+                INSERT INTO checks SELECT 'scalar refetch',
+                    ai_embed('scalar validation', profile := 'validation_embedding', cache := true)[1] = 0.25;
+                INSERT INTO checks SELECT 'batch seed',
+                    sum(ai_embed('batch validation ' || i::VARCHAR,
+                                 profile := 'validation_embedding', cache := true)[1]) = 0.5 FROM range(2) t(i);
+                INSERT INTO checks SELECT 'batch cache replay',
+                    sum(ai_embed('batch validation ' || i::VARCHAR,
+                                 profile := 'validation_embedding', cache := true)[1]) = 0.5 FROM range(2) t(i);
+                INSERT INTO checks SELECT 'cached token attribution',
+                    count(*) = 2 AND list(prompt_tokens ORDER BY event_id) = [3, 2]
+                    AND list(total_tokens ORDER BY event_id) = [4, 3]
+                    AND bool_and(estimated_cost_usd = 0)
+                    FROM ai_usage() WHERE cache_hit;
+                {profile.replace('DIMENSIONS', '4')}
+                INSERT INTO checks SELECT 'cached batch dimension rejection',
+                    count(ai_embed('batch validation ' || i::VARCHAR,
+                                   profile := 'validation_embedding', cache := true,
+                                   fail_on_error := false)) = 0 FROM range(2) t(i);
+                INSERT INTO checks SELECT 'one cached batch failure event',
+                    count(*) = 4 AND count(*) FILTER (WHERE error =
+                        'AI embedding provider returned 3 dimensions; external model expects 4') = 2
+                    FROM ai_usage() WHERE status = 'error';
+                {profile.replace('DIMENSIONS', '3')}
+                INSERT INTO checks SELECT 'evicted batch row refetch',
+                    sum(ai_embed('batch validation ' || i::VARCHAR,
+                                 profile := 'validation_embedding', cache := true)[1]) = 0.5 FROM range(2) t(i);
+                SELECT * FROM checks ORDER BY name;
+            """
+            result = subprocess.run(
+                [str(duckdb_path), "-json", "-c", sql],
+                cwd=repo_root(),
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise AssertionError(f"{provider} embedding validation failed\n{result.stdout}\n{result.stderr}")
+            # External-model DDL also emits JSON results. Inspect the final SELECT.
+            output = result.stdout.lstrip()
+            decoder = json.JSONDecoder()
+            while output:
+                checks, offset = decoder.raw_decode(output)
+                output = output[offset:].lstrip()
+            if len(checks) != 11 or any(check["passed"] is not True for check in checks):
+                raise AssertionError(f"{provider} embedding validation checks failed: {checks}")
+            if requests != [
+                ["scalar validation"],
+                ["empty validation"],
+                ["empty validation"],
+                ["scalar validation"],
+                ["batch validation 0", "batch validation 1"],
+                ["batch validation 0"],
+            ]:
+                raise AssertionError(f"{provider} embedding cache eviction/refetch changed: {requests}")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
 def run_duckdb_embedding_usage_distribution(duckdb_path: Path, base_url: str) -> str:
     sql = f"""
         SELECT * FROM ai_clear_usage();
@@ -2846,6 +2958,7 @@ def main():
         adaptive_batch_output = run_duckdb_adaptive_batches(args.duckdb, f"http://127.0.0.1:{port}")
         assert_adaptive_batches(adaptive_batch_output)
         MockProviderHandler.reset()
+        run_duckdb_embedding_validation(args.duckdb)
         usage_distribution_output = run_duckdb_embedding_usage_distribution(args.duckdb, f"http://127.0.0.1:{port}")
         assert_embedding_usage_distribution(usage_distribution_output)
         MockProviderHandler.reset()
