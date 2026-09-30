@@ -5,27 +5,63 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
-## Unreleased
+## 0.6.0 - 2026-09-30
 
 ### Added
 
-- Built-in pricing and request compatibility for GPT-6 Astra, GPT-6.1 Sol,
-  GPT-6 Sol, GPT-6 Luna, Claude Fable 5.1, Claude Opus 5.5 and Claude Sonnet 5.5.
+- `ai_jev(text, questions)` returns named choices, rubric scores, probabilities
+  and confidence as typed SQL fields. It batches up to 32 rows per request,
+  preserves row identity, and keeps existing Jev entry points unchanged.
+  [#101](https://github.com/leonardovida/duckdb-ai/pull/101)
 
 - A labeled-data Jev batch evaluation example compares batch sizes 1, 8, 16 and
-  32 with row-level predictions, accuracy, agreement and request usage.
+  32 with row-level predictions, accuracy, agreement coverage, request
+  operations and token usage. [#104](https://github.com/leonardovida/duckdb-ai/pull/104)
 
-- `ai_jev` returns named choices, rubric scores, probabilities and confidence as
-  typed SQL fields, with automatic batches of up to 32 rows and bounded request
-  bodies. Includes a runnable table-to-Parquet cookbook and deterministic HTTP
-  coverage. Existing Jev entry points retain their behavior.
+- Built-in pricing and request compatibility now cover GPT-6 Astra, GPT-6.1
+  Sol, GPT-6 Sol, GPT-6 Luna, Claude Fable 5.1, Claude Opus 5.5 and Claude
+  Sonnet 5.5. [#112](https://github.com/leonardovida/duckdb-ai/pull/112)
 
 ### Fixed
 
-- Account for provider cache reads and writes in token totals and cost estimates,
-  including the model-specific cache rates of the new OpenAI and Claude models.
-- Omit unsupported sampling parameters for the new reasoning models while
-  retaining GPT-6 Sol and Luna temperature settings with reasoning disabled.
+- Numeric `DUCKDB_AI_*` environment settings now reject valid prefixes followed
+  by trailing text, so values such as `0junk` cannot silently change retry,
+  cache, concurrency, token-limit or logging behavior.
+  [#106](https://github.com/leonardovida/duckdb-ai/pull/106)
+
+- Provider cache reads and writes now contribute to token totals and cost
+  estimates using model-specific rates. Unsupported sampling parameters are
+  omitted for the new reasoning models while GPT-6 Sol and Luna retain their
+  temperature behavior with reasoning disabled.
+  [#112](https://github.com/leonardovida/duckdb-ai/pull/112)
+
+### Changed
+
+- Added shared provider response-format validation for no-schema requests while
+  preserving provider-specific JSON and schema-first behavior.
+  [#99](https://github.com/leonardovida/duckdb-ai/pull/99)
+
+- Consolidated usage snapshots, usage statistics, usage clearing and response
+  cache clearing around shared database-scoped runtime state operations.
+  [#100](https://github.com/leonardovida/duckdb-ai/pull/100)
+
+- Reused successful `patternProperties` matches when validating
+  `additionalProperties`, keeping validation order and SQL behavior stable.
+  [#110](https://github.com/leonardovida/duckdb-ai/pull/110)
+
+- Shared scalar and cached batch embedding validation and rejected-response
+  cleanup while preserving diagnostics, cache identity and bulk-request
+  behavior. [#111](https://github.com/leonardovida/duckdb-ai/pull/111)
+
+### Maintenance
+
+- CI now runs code, test, example, build, documentation and website checks only
+  for the paths they cover, while retaining manual and scheduled runs.
+  [#105](https://github.com/leonardovida/duckdb-ai/pull/105)
+
+- Patched the documentation dependency versions for vulnerable `colord` and
+  `image-size` releases through the existing npm overrides.
+  [#107](https://github.com/leonardovida/duckdb-ai/pull/107)
 
 ## 0.5.2 - 2026-09-26
 
