@@ -307,6 +307,19 @@ SELECT ai_embed(
 )[1] AS first_embedding_value;
 ```
 
+For text completions, set `model := 'gpt-6-astra'`, `gpt-6.1-sol`,
+`gpt-6-sol`, or `gpt-6-luna` to use the GPT-6 family. The existing default
+remains `gpt-5.6-luna`. These models support this extension's Chat Completions
+requests without tools. GPT-6 reasoning requests omit the `temperature` option.
+GPT-6 Sol and Luna preserve it when
+`request_options := '{"reasoning_effort":"none"}'` disables reasoning.
+Use `request_options` for provider-native controls such as `reasoning_effort`.
+With `prompt_cache := true` and a stable system prompt, the extension uses an
+explicit cache breakpoint for GPT-6. Built-in cost estimates use standard text
+token rates for requests up to 272K input tokens; long-context, regional,
+Batch/Flex/Fast, and hosted-tool charges require separate accounting. See
+[`ai_model_prices()`](functions.md#ai_model_prices) for the catalog rates.
+
 ## Azure OpenAI
 
 Use your Azure OpenAI resource URL and deployment name. The extension appends
@@ -385,6 +398,15 @@ SELECT ai_complete_json(
 For `response_schema := ...`, the extension sends Anthropic's
 `output_config.format` JSON Schema request shape. Claude is configured for
 completion calls; embeddings are not configured for this provider.
+
+For current text models, set `model := 'claude-fable-5-1'`,
+`claude-opus-5-5`, or `claude-sonnet-5-5`. The existing default remains
+`claude-haiku-4-5`. These newer models reject non-default sampling parameters,
+so the extension omits `temperature` for them. Fable 5.1 and Opus 5.5 always
+use adaptive thinking. Increase `max_tokens` when the requested answer needs
+room for both thinking and visible text. Built-in estimates use standard text
+rates and model-specific cache-read prices; long-context and other service
+charges require separate accounting.
 
 ## Gemini
 

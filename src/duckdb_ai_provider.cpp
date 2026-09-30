@@ -904,6 +904,16 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "Jev input tokens only", "2026-09-18"},
 	    {"typesafe", "jev-1.13.0", "completion", 0.042, 0.00, "https://docs.typesafe.ai/models.md",
 	     "Jev input tokens only", "2026-09-18"},
+	    {"openai", "gpt-6-astra", "completion", 10.00, 50.00,
+	     "https://developers.openai.com/api/docs/models/gpt-6-astra", "standard text pricing up to 272K input tokens",
+	     "2026-09-30"},
+	    {"openai", "gpt-6.1-sol", "completion", 2.00, 10.00,
+	     "https://developers.openai.com/api/docs/models/gpt-6.1-sol", "standard text pricing up to 272K input tokens",
+	     "2026-09-30"},
+	    {"openai", "gpt-6-sol", "completion", 2.00, 10.00, "https://developers.openai.com/api/docs/models/gpt-6-sol",
+	     "standard text pricing up to 272K input tokens", "2026-09-30"},
+	    {"openai", "gpt-6-luna", "completion", 0.10, 0.50, "https://developers.openai.com/api/docs/models/gpt-6-luna",
+	     "standard text pricing up to 272K input tokens", "2026-09-30"},
 	    {"openai", "gpt-5.6", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
 	     "standard text token pricing; alias routes to gpt-5.6-sol", "2026-08-26"},
 	    {"openai", "gpt-5.6-sol", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
@@ -923,6 +933,12 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	    {"openai", "text-embedding-3-small", "embedding", 0.02, -1,
 	     "https://developers.openai.com/api/docs/models/text-embedding-3-small", "embedding input tokens only",
 	     "2026-06-30"},
+	    {"anthropic", "claude-fable-5-1", "completion", 10.00, 50.00,
+	     "https://platform.claude.com/docs/en/models/fable-5-1/overview", "standard text token pricing", "2026-09-30"},
+	    {"anthropic", "claude-opus-5-5", "completion", 4.00, 20.00,
+	     "https://platform.claude.com/docs/en/models/opus-5-5/overview", "standard text token pricing", "2026-09-30"},
+	    {"anthropic", "claude-sonnet-5-5", "completion", 2.00, 10.00,
+	     "https://platform.claude.com/docs/en/models/sonnet-5-5/overview", "standard text token pricing", "2026-09-30"},
 	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
 	    {"anthropic", "claude-sonnet-5", "completion", 2.00, 10.00,
@@ -3735,6 +3751,29 @@ bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
 	                                       config.model == "gemini-3.5-flash-lite");
 }
 
+bool OpenAIOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
+	if (config.provider != "openai" || (config.model != "gpt-6-astra" && config.model != "gpt-6.1-sol" &&
+	                                    config.model != "gpt-6-sol" && config.model != "gpt-6-luna")) {
+		return false;
+	}
+	if (config.model == "gpt-6-sol" || config.model == "gpt-6-luna") {
+		std::string error;
+		auto doc = ReadYyjsonDocument(options.request_options, error);
+		auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+		std::string effort;
+		if (YyjsonDirectString(root, "reasoning_effort", effort) && effort == "none") {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool AnthropicOmitsSamplingParameters(const ProviderConfig &config) {
+	return config.protocol == "anthropic_messages" &&
+	       (config.model == "claude-fable-5-1" || config.model == "claude-opus-5-5" ||
+	        config.model == "claude-sonnet-5-5" || config.model == "claude-sonnet-5");
+}
+
 bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
 	if (config.provider != "databricks") {
 		return false;
@@ -3743,8 +3782,9 @@ bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
 	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5");
 }
 
-bool ProviderOmitsSamplingParameters(const ProviderConfig &config) {
-	return GeminiOmitsSamplingParameters(config) || DatabricksOmitsSamplingParameters(config);
+bool ProviderOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
+	return GeminiOmitsSamplingParameters(config) || DatabricksOmitsSamplingParameters(config) ||
+	       OpenAIOmitsSamplingParameters(config, options) || AnthropicOmitsSamplingParameters(config);
 }
 
 void ValidateProviderResponseFormat(const ProviderConfig &config, const CompletionOptions &options) {
@@ -3762,7 +3802,8 @@ void ValidateProviderResponseFormat(const ProviderConfig &config, const Completi
 bool OpenAIUsesExplicitPromptCache(const ProviderConfig &config, const CompletionOptions &options) {
 	auto model = LowerAscii(config.model);
 	return config.provider == "openai" && PromptCacheEnabled(options) && !options.system_prompt.empty() &&
-	       (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-"));
+	       (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-") || StartsWith(model, "gpt-6-") ||
+	        StartsWith(model, "gpt-6.1-"));
 }
 
 std::string OllamaFormatJson(const CompletionOptions &options) {
@@ -3799,7 +3840,7 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 				payload += ",\"system\":\"" + JsonEscape(options.system_prompt) + "\"";
 			}
 		}
-		if (options.has_temperature) {
+		if (options.has_temperature && !ProviderOmitsSamplingParameters(config, options)) {
 			payload += ",\"temperature\":" + JsonDouble(options.temperature);
 		}
 		if (!options.response_schema.empty()) {
@@ -3837,7 +3878,7 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 	auto explicit_openai_prompt_cache = OpenAIUsesExplicitPromptCache(config, options);
 	auto payload = "{\"model\":\"" + escaped_model +
 	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt, explicit_openai_prompt_cache);
-	if (options.has_temperature && !ProviderOmitsSamplingParameters(config)) {
+	if (options.has_temperature && !ProviderOmitsSamplingParameters(config, options)) {
 		payload += ",\"temperature\":" + JsonDouble(options.temperature);
 	}
 	if (options.has_max_tokens) {
@@ -4473,7 +4514,9 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 		result.cached_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_read_input_tokens");
 		result.cache_creation_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_creation_input_tokens");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
-			result.total_tokens = result.prompt_tokens + result.completion_tokens;
+			result.total_tokens = result.prompt_tokens + result.completion_tokens +
+			                      std::max<int64_t>(0, result.cached_prompt_tokens) +
+			                      std::max<int64_t>(0, result.cache_creation_prompt_tokens);
 		}
 		YyjsonDirectString(root, "stop_reason", result.finish_reason);
 		if (!native && result.finish_reason == "max_tokens") {
@@ -4497,6 +4540,7 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.total_tokens = YyjsonIntegerOrMissing(usage, "total_tokens");
 	auto prompt_token_details = YyjsonObjectGet(usage, "prompt_tokens_details");
 	result.cached_prompt_tokens = YyjsonIntegerOrMissing(prompt_token_details, "cached_tokens");
+	result.cache_creation_prompt_tokens = YyjsonIntegerOrMissing(prompt_token_details, "cache_write_tokens");
 	if (config.provider == "deepseek") {
 		auto cached = YyjsonIntegerOrMissing(usage, "prompt_cache_hit_tokens");
 		if (cached >= 0) {
@@ -4508,6 +4552,8 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
 		result.cached_prompt_tokens =
 		    YyjsonIntegerOrMissing(YyjsonObjectGet(usage, "input_tokens_details"), "cached_tokens");
+		result.cache_creation_prompt_tokens =
+		    YyjsonIntegerOrMissing(YyjsonObjectGet(usage, "input_tokens_details"), "cache_write_tokens");
 		YyjsonDirectString(root, "status", result.finish_reason);
 	}
 	auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
@@ -4546,10 +4592,29 @@ double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionO
 	}
 	auto cached_prompt_tokens = std::max<int64_t>(0, result.cached_prompt_tokens);
 	auto cache_creation_prompt_tokens = std::max<int64_t>(0, result.cache_creation_prompt_tokens);
+	// Anthropic reports uncached input separately; OpenAI includes cached tokens in prompt_tokens.
 	auto billable_prompt_tokens =
-	    std::max<int64_t>(0, result.prompt_tokens - cached_prompt_tokens - cache_creation_prompt_tokens);
+	    config.protocol == "anthropic_messages"
+	        ? result.prompt_tokens
+	        : std::max<int64_t>(0, result.prompt_tokens - cached_prompt_tokens - cache_creation_prompt_tokens);
+	auto model = LowerAscii(config.model);
 	auto cached_input_multiplier = config.protocol == "anthropic_messages" ? 0.1 : 0.5;
-	auto cache_creation_multiplier = config.protocol == "anthropic_messages" ? 1.25 : 1.0;
+	if (config.provider == "anthropic" && model == "claude-fable-5-1") {
+		cached_input_multiplier = 0.025;
+	} else if (config.provider == "anthropic" && model == "claude-opus-5-5") {
+		cached_input_multiplier = 0.05;
+	} else if (config.provider == "openai" && model == "gpt-6.1-sol") {
+		cached_input_multiplier = 0.05;
+	} else if (config.provider == "openai" &&
+	           (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-") || StartsWith(model, "gpt-6-"))) {
+		cached_input_multiplier = 0.1;
+	}
+	auto cache_creation_multiplier =
+	    config.protocol == "anthropic_messages" ||
+	            (config.provider == "openai" && (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-") ||
+	                                             StartsWith(model, "gpt-6-") || StartsWith(model, "gpt-6.1-")))
+	        ? 1.25
+	        : 1.0;
 	auto input_cost = static_cast<double>(billable_prompt_tokens) * input_price;
 	input_cost += static_cast<double>(cached_prompt_tokens) * input_price * cached_input_multiplier;
 	input_cost += static_cast<double>(cache_creation_prompt_tokens) * input_price * cache_creation_multiplier;
