@@ -9,6 +9,9 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Added
 
+- Built-in pricing and request compatibility for GPT-6 Astra, GPT-6.1 Sol,
+  GPT-6 Sol, GPT-6 Luna, Claude Fable 5.1, Claude Opus 5.5 and Claude Sonnet 5.5.
+
 - A labeled-data Jev batch evaluation example compares batch sizes 1, 8, 16 and
   32 with row-level predictions, accuracy, agreement and request usage.
 
@@ -16,6 +19,13 @@ include SQL API changes and patch versions should preserve the SQL API.
   typed SQL fields, with automatic batches of up to 32 rows and bounded request
   bodies. Includes a runnable table-to-Parquet cookbook and deterministic HTTP
   coverage. Existing Jev entry points retain their behavior.
+
+### Fixed
+
+- Account for provider cache reads and writes in token totals and cost estimates,
+  including the model-specific cache rates of the new OpenAI and Claude models.
+- Omit unsupported sampling parameters for the new reasoning models while
+  retaining GPT-6 Sol and Luna temperature settings with reasoning disabled.
 
 ## 0.5.2 - 2026-09-26
 

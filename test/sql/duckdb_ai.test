@@ -437,6 +437,11 @@ SELECT NOT contains(ai_completion_request_json('hello', provider := 'openai', mo
 ----
 true	true	true	true	true	true	true	true
 
+query III
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-6-sol', temperature := 0.2, request_options := '{"reasoning_effort":"none"}'), '"temperature":0.2'), contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-6-luna', temperature := 0.2, request_options := '{"reasoning_effort":"none"}'), '"temperature":0.2'), NOT contains(ai_completion_request_json('hello', provider := 'openai', model := 'gpt-6-luna', temperature := 0.2, request_options := '{"reasoning_effort":"low"}'), '"temperature"');
+----
+true	true	true
+
 query I
 SELECT contains(ai_completion_request_json('hello', provider := 'anthropic', system_prompt := 'system', prompt_cache := true), '"cache_control":{"type":"ephemeral"}');
 ----

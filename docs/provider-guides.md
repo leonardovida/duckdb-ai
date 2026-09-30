@@ -310,8 +310,10 @@ SELECT ai_embed(
 For text completions, set `model := 'gpt-6-astra'`, `gpt-6.1-sol`,
 `gpt-6-sol`, or `gpt-6-luna` to use the GPT-6 family. The existing default
 remains `gpt-5.6-luna`. These models support this extension's Chat Completions
-requests without tools. GPT-6 reasoning requests omit the `temperature` option;
-use `request_options` for provider-native controls such as `reasoning_effort`.
+requests without tools. GPT-6 reasoning requests omit the `temperature` option.
+GPT-6 Sol and Luna preserve it when
+`request_options := '{"reasoning_effort":"none"}'` disables reasoning.
+Use `request_options` for provider-native controls such as `reasoning_effort`.
 With `prompt_cache := true` and a stable system prompt, the extension uses an
 explicit cache breakpoint for GPT-6. Built-in cost estimates use standard text
 token rates for requests up to 272K input tokens; long-context, regional,

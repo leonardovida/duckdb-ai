@@ -3751,9 +3751,21 @@ bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
 	                                       config.model == "gemini-3.5-flash-lite");
 }
 
-bool OpenAIOmitsSamplingParameters(const ProviderConfig &config) {
-	return config.provider == "openai" && (config.model == "gpt-6-astra" || config.model == "gpt-6.1-sol" ||
-	                                       config.model == "gpt-6-sol" || config.model == "gpt-6-luna");
+bool OpenAIOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
+	if (config.provider != "openai" || (config.model != "gpt-6-astra" && config.model != "gpt-6.1-sol" &&
+	                                    config.model != "gpt-6-sol" && config.model != "gpt-6-luna")) {
+		return false;
+	}
+	if (config.model == "gpt-6-sol" || config.model == "gpt-6-luna") {
+		std::string error;
+		auto doc = ReadYyjsonDocument(options.request_options, error);
+		auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+		std::string effort;
+		if (YyjsonDirectString(root, "reasoning_effort", effort) && effort == "none") {
+			return false;
+		}
+	}
+	return true;
 }
 
 bool AnthropicOmitsSamplingParameters(const ProviderConfig &config) {
@@ -3770,9 +3782,9 @@ bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
 	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5");
 }
 
-bool ProviderOmitsSamplingParameters(const ProviderConfig &config) {
+bool ProviderOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
 	return GeminiOmitsSamplingParameters(config) || DatabricksOmitsSamplingParameters(config) ||
-	       OpenAIOmitsSamplingParameters(config) || AnthropicOmitsSamplingParameters(config);
+	       OpenAIOmitsSamplingParameters(config, options) || AnthropicOmitsSamplingParameters(config);
 }
 
 void ValidateProviderResponseFormat(const ProviderConfig &config, const CompletionOptions &options) {
@@ -3828,7 +3840,7 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 				payload += ",\"system\":\"" + JsonEscape(options.system_prompt) + "\"";
 			}
 		}
-		if (options.has_temperature && !ProviderOmitsSamplingParameters(config)) {
+		if (options.has_temperature && !ProviderOmitsSamplingParameters(config, options)) {
 			payload += ",\"temperature\":" + JsonDouble(options.temperature);
 		}
 		if (!options.response_schema.empty()) {
@@ -3866,7 +3878,7 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 	auto explicit_openai_prompt_cache = OpenAIUsesExplicitPromptCache(config, options);
 	auto payload = "{\"model\":\"" + escaped_model +
 	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt, explicit_openai_prompt_cache);
-	if (options.has_temperature && !ProviderOmitsSamplingParameters(config)) {
+	if (options.has_temperature && !ProviderOmitsSamplingParameters(config, options)) {
 		payload += ",\"temperature\":" + JsonDouble(options.temperature);
 	}
 	if (options.has_max_tokens) {
