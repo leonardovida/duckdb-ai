@@ -5538,9 +5538,16 @@ void StorePromptQueryCachedSql(ClientContext &context, const std::string &cache_
 		return;
 	}
 
-	cache.bytes += 2 * cache_key.size() + generated_sql.size();
+	auto entry_bytes = 2 * cache_key.size() + generated_sql.size();
 	auto order_entry = cache.recency_order.insert(cache.recency_order.end(), cache_key);
-	cache.generated_sql.emplace(cache_key, PromptQueryCacheState::Entry {std::move(generated_sql), order_entry});
+	try {
+		cache.generated_sql.emplace(cache_key, PromptQueryCacheState::Entry {std::move(generated_sql), order_entry});
+	} catch (...) {
+		// Keep the map, list and byte count consistent if allocation fails.
+		cache.recency_order.erase(order_entry);
+		throw;
+	}
+	cache.bytes += entry_bytes;
 	while (cache.generated_sql.size() > MAX_PROMPT_QUERY_CACHE_ENTRIES || cache.bytes > MAX_PROMPT_QUERY_CACHE_BYTES) {
 		auto oldest = cache.generated_sql.find(cache.recency_order.front());
 		cache.bytes -= 2 * oldest->first.size() + oldest->second.sql.size();
