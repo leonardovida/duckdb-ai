@@ -91,6 +91,22 @@ new processes, prompt/configuration invalidation, input rejection and rollback
 after killing a process midway through a batch. The crash check also confirms
 that the first provider call is repeated on restart when its result was not committed.
 
+## Persist batch usage
+
+The example also commits `enrichment_batch_usage` with each batch's results. It
+records the configuration hash, completion time, provider row events, transport
+attempts (including retries), failures, cache hits, known reported tokens, and
+unknown-token event counts from `ai_usage_totals()`. These snapshots survive
+reopening and roll back with an uncommitted batch. Treat known tokens as partial
+when unknown events are present; database rollback cannot undo provider charges.
+
+```sql
+SELECT config_hash, sum(request_attempts) AS attempts,
+       sum(known_total_tokens) AS known_tokens,
+       sum(unknown_token_events) AS unknown_events
+FROM enrichment_batch_usage GROUP BY config_hash;
+```
+
 ## Understand the limits
 
 - Run one writer at a time. This example does not coordinate workers or schedule jobs.

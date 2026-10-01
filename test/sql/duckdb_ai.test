@@ -1607,3 +1607,36 @@ WITH decisions AS MATERIALIZED (
 SELECT answer IS NULL, answer.team IS NULL, answer.rating IS NULL FROM decisions;
 ----
 true	true	true
+
+# Classifier labels must stay unique under the normalization used by prompts.
+statement error
+SELECT ai_build_classifier('sample', ['alpha', ' ALPHA '], optimization := 'minimize_cost');
+----
+labels must be non-empty and unique
+
+statement error
+SELECT ai_build_classifier('sample', ['alpha', '   '], optimization := 'minimize_cost');
+----
+labels must be non-empty and unique
+
+query I
+SELECT contains(result.error, 'labels must be non-empty and unique')
+FROM (
+  SELECT ai_classify_optimized(
+    'x',
+    '{"version":1,"optimization":"minimize_cost","usable":true,"accuracy":0.9,"confidence_margin":0.1,"labels":["a"," A "],"centroids":[[1,0],[0,1]],"embedding":{"provider":"ollama","model":"embed"}}'
+  ) AS result
+);
+----
+true
+
+query II
+SELECT max_entries, max_bytes FROM ai_query_cache_stats();
+----
+1024	67108864
+
+query I
+SELECT typeof(provider_events) = 'UBIGINT' AND typeof(request_attempts) = 'UBIGINT'
+FROM ai_usage_totals();
+----
+true

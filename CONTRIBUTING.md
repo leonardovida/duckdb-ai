@@ -37,6 +37,8 @@ GEN=ninja make tidy-check-ai
 GEN=ninja make release
 GEN=ninja make test
 python3 test/smoke/mock_provider_smoke.py
+python3 test/smoke/accuracy_gate_smoke.py
+python3 test/smoke/reliability_smoke.py --library build/release/src/libduckdb.so
 ```
 
 Run documentation site checks from `website/`:
@@ -79,3 +81,19 @@ request.
 - Public SQL API changes are documented.
 - No credentials, generated secrets, or local-only corpora are committed.
 - Any skipped validation is called out with a concrete reason.
+
+## Owned-code sanitizer checks (Linux/GCC)
+
+After building the normal release core, instrument only the loadable extension:
+
+```sh
+cmake -G Ninja -S duckdb -B build/release -DAI_ENABLE_SANITIZERS=ON
+cmake --build build/release --target ai_loadable_extension -j2
+python3 test/smoke/sanitizer_smoke.py --duckdb /path/to/vanilla-duckdb-v1.5.5 --extension build/release/extension/ai/ai.duckdb_extension
+```
+
+The host must use DuckDB v1.5.5. Static DuckDB linkage is required for C++ RTTI;
+the two project-owned sources are instrumented while core/vendor code remains
+uninstrumented. Restore `AI_ENABLE_SANITIZERS=OFF` and rebuild before publishing
+normal extension artifacts. CI performs this after the regular checks and also
+runs macOS/Windows builds through the upstream distribution tooling.

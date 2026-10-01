@@ -48,6 +48,7 @@
 #include <iomanip>
 #include <initializer_list>
 #include <limits>
+#include <list>
 #include <mutex>
 #include <numeric>
 #include <set>
@@ -63,6 +64,7 @@ namespace {
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr idx_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr size_t MAX_PROMPT_QUERY_CACHE_ENTRIES = 1024;
+constexpr size_t MAX_PROMPT_QUERY_CACHE_BYTES = 64ULL * 1024 * 1024;
 constexpr size_t MAX_SIMILARITY_QUERY_CACHES = 8;
 constexpr size_t MAX_SIMILARITY_QUERY_CACHE_BYTES = 8ULL * 1024 * 1024;
 constexpr int64_t MAX_SQL_FIX_ATTEMPTS = 5;
@@ -356,12 +358,11 @@ struct ClassifierBuildBindData : public FunctionData {
 	}
 };
 
+using ClassifierReservoir = std::set<std::pair<uint64_t, std::string>>;
+
 struct ClassifierBuildState {
-	idx_t size;
-	idx_t alloc_size;
-	idx_t sample_count;
 	idx_t row_count;
-	char *dataptr;
+	ClassifierReservoir *samples;
 };
 
 struct OptimizedClassifierBindData : public FunctionData {
@@ -448,8 +449,18 @@ struct PromptQueryCacheState : public ObjectCacheEntry {
 	}
 
 	std::mutex mutex;
-	std::unordered_map<std::string, std::string> generated_sql;
-	std::deque<std::string> recency_order;
+	struct Entry {
+		std::string sql;
+		std::list<std::string>::iterator order_entry;
+	};
+
+	std::unordered_map<std::string, Entry> generated_sql;
+	std::list<std::string> recency_order;
+	size_t bytes = 0;
+	uint64_t hits = 0;
+	uint64_t misses = 0;
+	uint64_t evictions = 0;
+	uint64_t oversized_skips = 0;
 };
 
 enum class PromptAssistantKind : uint8_t { EXPLAIN, FIXUP, FIX_LINE };
@@ -1626,16 +1637,10 @@ unique_ptr<StringVectorReader> OptionalStringReader(DataChunk &args, bool enable
 	return enabled ? make_uniq<StringVectorReader>(args, column) : nullptr;
 }
 
+std::string JsonEscapeSqlText(const std::string &input);
+
 std::string QuoteClassificationLabel(const std::string &label) {
-	std::string result = "\"";
-	for (auto c : label) {
-		if (c == '"' || c == '\\') {
-			result += '\\';
-		}
-		result += c;
-	}
-	result += "\"";
-	return result;
+	return "\"" + JsonEscapeSqlText(label) + "\"";
 }
 
 std::string FormatClassificationLabels(const vector<std::string> &labels) {
@@ -4624,7 +4629,7 @@ std::vector<std::string> ReadClassifierLabels(ClientContext &context, Expression
 		}
 		const auto &label_value = child;
 		auto label = StringValue::Get(label_value.DefaultCastAs(LogicalType::VARCHAR));
-		if (label.empty() || !seen.insert(LowerAscii(label)).second) {
+		if (TrimAscii(label).empty() || !seen.insert(LowerAscii(TrimAscii(label))).second) {
 			throw BinderException("ai_build_classifier labels must be non-empty and unique");
 		}
 		labels.push_back(std::move(label));
@@ -4702,49 +4707,41 @@ unique_ptr<FunctionData> ClassifierBuildBind(ClientContext &context, AggregateFu
 	return std::move(bind_data);
 }
 
-void ClassifierEnsureCapacity(ClassifierBuildState &state, ArenaAllocator &allocator, idx_t required_size) {
-	if (state.alloc_size >= required_size) {
-		return;
+uint64_t ClassifierSamplePriority(const char *data, idx_t size) {
+	uint64_t hash = 1469598103934665603ULL;
+	for (idx_t i = 0; i < size; i++) {
+		hash ^= static_cast<unsigned char>(data[i]);
+		hash *= 1099511628211ULL;
 	}
-	auto new_size = state.alloc_size == 0 ? MaxValue<idx_t>(64, required_size) : state.alloc_size;
-	while (new_size < required_size) {
-		new_size *= 2;
-	}
-	if (!state.dataptr) {
-		state.dataptr = char_ptr_cast(allocator.Allocate(new_size));
-	} else {
-		state.dataptr = char_ptr_cast(allocator.Reallocate(data_ptr_cast(state.dataptr), state.alloc_size, new_size));
-	}
-	state.alloc_size = new_size;
+	// Avalanche sequential text hashes before selecting the bottom-k priorities.
+	hash ^= hash >> 30;
+	hash *= 0xbf58476d1ce4e5b9ULL;
+	hash ^= hash >> 27;
+	hash *= 0x94d049bb133111ebULL;
+	return hash ^ (hash >> 31);
 }
 
-void ClassifierAppendSample(ClassifierBuildState &state, ArenaAllocator &allocator, const char *data, idx_t size,
-                            idx_t sample_size) {
-	state.row_count++;
-	if (state.sample_count >= sample_size) {
+void ClassifierAppendSample(ClassifierBuildState &state, const char *data, idx_t size, idx_t sample_size) {
+	if (!state.samples) {
+		state.samples = new ClassifierReservoir();
+	}
+	auto priority = ClassifierSamplePriority(data, size);
+	if (state.samples->size() == sample_size && priority > state.samples->rbegin()->first) {
 		return;
 	}
-	ClassifierEnsureCapacity(state, allocator, state.size + sizeof(uint64_t) + size);
-	auto length = static_cast<uint64_t>(size);
-	memcpy(state.dataptr + state.size, &length, sizeof(uint64_t));
-	state.size += sizeof(uint64_t);
-	memcpy(state.dataptr + state.size, data, size);
-	state.size += size;
-	state.sample_count++;
+	state.samples->emplace(priority, std::string(data, size));
+	if (state.samples->size() > sample_size) {
+		state.samples->erase(std::prev(state.samples->end()));
+	}
 }
 
 std::vector<std::string> ClassifierSamples(const ClassifierBuildState &state) {
 	std::vector<std::string> samples;
-	idx_t offset = 0;
-	while (offset + sizeof(uint64_t) <= state.size && samples.size() < state.sample_count) {
-		uint64_t length;
-		memcpy(&length, state.dataptr + offset, sizeof(uint64_t));
-		offset += sizeof(uint64_t);
-		if (length > state.size - offset) {
-			throw InternalException("ai_build_classifier aggregate state is corrupt");
+	if (state.samples) {
+		samples.reserve(state.samples->size());
+		for (auto &sample : *state.samples) {
+			samples.push_back(sample.second);
 		}
-		samples.emplace_back(state.dataptr + offset, NumericCast<idx_t>(length));
-		offset += NumericCast<idx_t>(length);
 	}
 	return samples;
 }
@@ -4755,16 +4752,19 @@ std::string JoinClassifierLabels(const std::vector<std::string> &labels) {
 		if (i > 0) {
 			result += ", ";
 		}
-		result += labels[i];
+		result += QuoteClassificationLabel(labels[i]);
 	}
 	return result;
 }
 
 idx_t ClassifierLabelIndex(const std::vector<std::string> &labels, const std::string &input) {
-	auto normalized = LowerAscii(TrimAscii(StripMarkdownJsonFence(input)));
-	if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"') {
-		normalized = normalized.substr(1, normalized.size() - 2);
+	auto normalized = TrimAscii(StripMarkdownJsonFence(input));
+	std::vector<std::string> parsed;
+	std::string error;
+	if (duckdb_ai::ExtractJsonStringArray("[" + normalized + "]", parsed, error) && parsed.size() == 1) {
+		normalized = parsed[0];
 	}
+	normalized = LowerAscii(normalized);
 	for (idx_t i = 0; i < labels.size(); i++) {
 		if (LowerAscii(labels[i]) == normalized) {
 			return i;
@@ -4846,17 +4846,21 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 		if (validation_rows[i]) {
 			continue;
 		}
-		counts[labelled_classes[i]]++;
+		auto label = labelled_classes[i];
+		auto count = ++counts[label];
+		auto weight = 1.0 / static_cast<double>(count);
 		for (idx_t dimension = 0; dimension < dimensions; dimension++) {
-			centroids[labelled_classes[i]][dimension] += embeddings[i].values[dimension];
-		}
-	}
-	for (idx_t label = 0; label < centroids.size(); label++) {
-		if (counts[label] == 0) {
-			continue;
-		}
-		for (auto &value : centroids[label]) {
-			value /= static_cast<double>(counts[label]);
+			auto &mean = centroids[label][dimension];
+			auto value = embeddings[i].values[dimension];
+			// A sum can overflow although its mean is finite. Differences are safe
+			// for equal signs; weighted terms avoid overflow for opposite signs.
+			if (count == 1) {
+				mean = value;
+			} else if (std::signbit(mean) == std::signbit(value)) {
+				mean += (value - mean) * weight;
+			} else {
+				mean = mean * (1.0 - weight) + value * weight;
+			}
 		}
 	}
 	idx_t correct = 0;
@@ -4889,6 +4893,7 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 	artifact << "{\"version\":1,\"optimization\":\"minimize_cost\",\"usable\":" << (usable ? "true" : "false")
 	         << ",\"accuracy\":" << accuracy << ",\"quality_threshold\":" << bind_data.quality_threshold
 	         << ",\"validation_count\":" << evaluated << ",\"confidence_margin\":" << bind_data.confidence_margin
+	         << ",\"sampling\":\"distinct_text_bottom_k\",\"validation_strategy\":\"distinct_text_per_class\""
 	         << ",\"sample_count\":" << labelled_samples.size() << ",\"total_count\":" << state.row_count
 	         << ",\"embedding\":{\"provider\":\"" << JsonEscapeSqlText(embedding_config.provider) << "\",\"model\":\""
 	         << JsonEscapeSqlText(embedding_config.model) << "\",\"profile\":\""
@@ -4922,18 +4927,15 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 struct ClassifierBuildOperation {
 	template <class STATE>
 	static void Initialize(STATE &state) {
-		state.size = 0;
-		state.alloc_size = 0;
-		state.sample_count = 0;
 		state.row_count = 0;
-		state.dataptr = nullptr;
+		state.samples = nullptr;
 	}
 
 	template <class INPUT_TYPE, class STATE, class OP>
 	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &unary_input) {
 		auto &bind_data = unary_input.input.bind_data->Cast<ClassifierBuildBindData>();
-		ClassifierAppendSample(state, unary_input.input.allocator, input.GetData(), input.GetSize(),
-		                       bind_data.sample_size);
+		state.row_count++;
+		ClassifierAppendSample(state, input.GetData(), input.GetSize(), bind_data.sample_size);
 	}
 
 	template <class INPUT_TYPE, class STATE, class OP>
@@ -4947,16 +4949,11 @@ struct ClassifierBuildOperation {
 	template <class STATE, class OP>
 	static void Combine(const STATE &source, STATE &target, AggregateInputData &aggregate_input) {
 		auto &bind_data = aggregate_input.bind_data->Cast<ClassifierBuildBindData>();
-		auto samples = ClassifierSamples(source);
 		target.row_count += source.row_count;
-		for (auto &sample : samples) {
-			if (target.sample_count >= bind_data.sample_size) {
-				break;
+		if (source.samples) {
+			for (auto &sample : *source.samples) {
+				ClassifierAppendSample(target, sample.second.data(), sample.second.size(), bind_data.sample_size);
 			}
-			auto before = target.row_count;
-			ClassifierAppendSample(target, aggregate_input.allocator, sample.data(), sample.size(),
-			                       bind_data.sample_size);
-			target.row_count = before;
 		}
 	}
 
@@ -4976,6 +4973,12 @@ struct ClassifierBuildOperation {
 			}
 			finalize_data.ReturnNull();
 		}
+	}
+
+	template <class STATE>
+	static void Destroy(STATE &state, AggregateInputData &) {
+		delete state.samples;
+		state.samples = nullptr;
 	}
 
 	static bool IgnoreNull() {
@@ -5475,7 +5478,15 @@ void AppendPromptQueryCacheKeyPart(std::string &key, double value) {
 std::string PromptQueryCacheKey(const std::string &question, const std::string &schema_context,
                                 const duckdb_ai::CompletionOptions &options) {
 	std::string key;
-	AppendPromptQueryCacheKeyPart(key, "ai_query_data_v1");
+	auto config = duckdb_ai::ResolveProvider(options);
+	AppendPromptQueryCacheKeyPart(key, "ai_query_data_v2");
+	AppendPromptQueryCacheKeyPart(key, config.provider);
+	AppendPromptQueryCacheKeyPart(key, config.protocol);
+	AppendPromptQueryCacheKeyPart(key, config.model);
+	AppendPromptQueryCacheKeyPart(key, config.base_url);
+	AppendPromptQueryCacheKeyPart(key, std::to_string(std::hash<std::string> {}(config.api_key)));
+	AppendPromptQueryCacheKeyPart(key, options.secret_name);
+	AppendPromptQueryCacheKeyPart(key, options.model_options);
 	AppendPromptQueryCacheKeyPart(key, question);
 	AppendPromptQueryCacheKeyPart(key, schema_context);
 	AppendPromptQueryCacheKeyPart(key, options.provider);
@@ -5497,36 +5508,52 @@ std::string PromptQueryCacheKey(const std::string &question, const std::string &
 	return key;
 }
 
-void RemovePromptQueryCacheOrderEntry(PromptQueryCacheState &cache, const std::string &cache_key) {
-	auto entry = std::find(cache.recency_order.begin(), cache.recency_order.end(), cache_key);
-	if (entry != cache.recency_order.end()) {
-		cache.recency_order.erase(entry);
-	}
-}
-
 bool TryGetPromptQueryCachedSql(ClientContext &context, const std::string &cache_key, std::string &generated_sql) {
 	auto &cache = PromptQueryCache(context);
 	std::lock_guard<std::mutex> lock(cache.mutex);
 	auto entry = cache.generated_sql.find(cache_key);
 	if (entry == cache.generated_sql.end()) {
+		cache.misses++;
 		return false;
 	}
-	generated_sql = entry->second;
-	RemovePromptQueryCacheOrderEntry(cache, cache_key);
-	cache.recency_order.push_back(cache_key);
+	cache.hits++;
+	generated_sql = entry->second.sql;
+	cache.recency_order.splice(cache.recency_order.end(), cache.recency_order, entry->second.order_entry);
 	return true;
 }
 
 void StorePromptQueryCachedSql(ClientContext &context, const std::string &cache_key, std::string generated_sql) {
 	auto &cache = PromptQueryCache(context);
 	std::lock_guard<std::mutex> lock(cache.mutex);
-	RemovePromptQueryCacheOrderEntry(cache, cache_key);
-	cache.generated_sql[cache_key] = std::move(generated_sql);
-	cache.recency_order.push_back(cache_key);
-	while (cache.generated_sql.size() > MAX_PROMPT_QUERY_CACHE_ENTRIES && !cache.recency_order.empty()) {
-		auto oldest = std::move(cache.recency_order.front());
-		cache.recency_order.pop_front();
+	auto existing = cache.generated_sql.find(cache_key);
+	if (existing != cache.generated_sql.end()) {
+		cache.bytes -= 2 * cache_key.size() + existing->second.sql.size();
+		cache.recency_order.erase(existing->second.order_entry);
+		cache.generated_sql.erase(existing);
+	}
+	// The map and recency list each own a key copy. Oversized entries bypass caching.
+	if (cache_key.size() > MAX_PROMPT_QUERY_CACHE_BYTES / 2 ||
+	    generated_sql.size() > MAX_PROMPT_QUERY_CACHE_BYTES - 2 * cache_key.size()) {
+		cache.oversized_skips++;
+		return;
+	}
+
+	auto entry_bytes = 2 * cache_key.size() + generated_sql.size();
+	auto order_entry = cache.recency_order.insert(cache.recency_order.end(), cache_key);
+	try {
+		cache.generated_sql.emplace(cache_key, PromptQueryCacheState::Entry {std::move(generated_sql), order_entry});
+	} catch (...) {
+		// Keep the map, list and byte count consistent if allocation fails.
+		cache.recency_order.erase(order_entry);
+		throw;
+	}
+	cache.bytes += entry_bytes;
+	while (cache.generated_sql.size() > MAX_PROMPT_QUERY_CACHE_ENTRIES || cache.bytes > MAX_PROMPT_QUERY_CACHE_BYTES) {
+		auto oldest = cache.generated_sql.find(cache.recency_order.front());
+		cache.bytes -= 2 * oldest->first.size() + oldest->second.sql.size();
 		cache.generated_sql.erase(oldest);
+		cache.recency_order.pop_front();
+		cache.evictions++;
 	}
 }
 
@@ -5535,6 +5562,8 @@ void ClearPromptQueryCache(ClientContext &context) {
 	std::lock_guard<std::mutex> lock(cache.mutex);
 	cache.generated_sql.clear();
 	cache.recency_order.clear();
+	cache.bytes = 0;
+	cache.hits = cache.misses = cache.evictions = cache.oversized_skips = 0;
 }
 
 unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctionBindInput &input) {
@@ -7151,7 +7180,7 @@ ParsedClassifierArtifact ParseClassifierArtifact(ClientContext &context, const s
 	}
 	std::set<std::string> unique_labels;
 	for (auto &label : result.labels) {
-		if (label.empty() || !unique_labels.insert(LowerAscii(label)).second) {
+		if (TrimAscii(label).empty() || !unique_labels.insert(LowerAscii(TrimAscii(label))).second) {
 			throw InvalidInputException("classifier artifact labels must be non-empty and unique");
 		}
 	}
@@ -7427,15 +7456,16 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 			                                                          job.error_message, metadata));
 			continue;
 		}
-		auto label = ClassifierLabelIndex(row.artifact.labels, job.output);
-		if (label == DConstants::INVALID_INDEX) {
+		// The fallback already returned a canonical artifact label. Decoding it
+		// again would alter literal quotes, surrounding spaces, or Markdown fences.
+		auto label = std::find(row.artifact.labels.begin(), row.artifact.labels.end(), job.output);
+		if (label == row.artifact.labels.end()) {
 			result.SetValue(job.row, AiOptimizedClassifierResultValue(
 			                             result_type, "", true, 0, false,
 			                             "fallback classifier returned a label outside the artifact", metadata));
 			continue;
 		}
-		result.SetValue(job.row, AiOptimizedClassifierResultValue(result_type, row.artifact.labels[label], true, 0,
-		                                                          false, "", metadata));
+		result.SetValue(job.row, AiOptimizedClassifierResultValue(result_type, *label, true, 0, false, "", metadata));
 	}
 }
 
@@ -7971,6 +8001,63 @@ void AiClearUsageFunction(ClientContext &context, TableFunctionInput &data_p, Da
 	data.emitted = true;
 }
 
+unique_ptr<FunctionData> AiQueryCacheStatsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &types,
+                                               vector<string> &names) {
+	for (auto name :
+	     {"entries", "bytes", "max_entries", "max_bytes", "hits", "misses", "evictions", "oversized_skips"}) {
+		names.emplace_back(name);
+		types.emplace_back(LogicalType::UBIGINT);
+	}
+	return nullptr;
+}
+
+void AiQueryCacheStatsFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &scan = input.global_state->Cast<AiClearUsageScanData>();
+	if (scan.emitted) {
+		return;
+	}
+	auto &cache = PromptQueryCache(context);
+	std::lock_guard<std::mutex> lock(cache.mutex);
+	uint64_t values[] = {cache.generated_sql.size(),
+	                     cache.bytes,
+	                     MAX_PROMPT_QUERY_CACHE_ENTRIES,
+	                     MAX_PROMPT_QUERY_CACHE_BYTES,
+	                     cache.hits,
+	                     cache.misses,
+	                     cache.evictions,
+	                     cache.oversized_skips};
+	for (idx_t i = 0; i < 8; i++) {
+		output.SetValue(i, 0, Value::UBIGINT(values[i]));
+	}
+	output.SetCardinality(1);
+	scan.emitted = true;
+}
+
+unique_ptr<FunctionData> AiUsageTotalsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &types,
+                                           vector<string> &names) {
+	for (auto name : {"provider_events", "request_attempts", "failures", "cache_hits", "known_total_tokens",
+	                  "unknown_token_events"}) {
+		names.emplace_back(name);
+		types.emplace_back(LogicalType::UBIGINT);
+	}
+	return nullptr;
+}
+
+void AiUsageTotalsFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &scan = input.global_state->Cast<AiClearUsageScanData>();
+	if (scan.emitted) {
+		return;
+	}
+	auto totals = duckdb_ai::GetUsageTotals(context);
+	uint64_t values[] = {totals.provider_events, totals.request_attempts,   totals.failures,
+	                     totals.cache_hits,      totals.known_total_tokens, totals.unknown_token_events};
+	for (idx_t i = 0; i < 6; i++) {
+		output.SetValue(i, 0, Value::UBIGINT(values[i]));
+	}
+	output.SetCardinality(1);
+	scan.emitted = true;
+}
+
 void AiClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.global_state->Cast<AiClearUsageScanData>();
 	if (data.emitted) {
@@ -8270,6 +8357,10 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
     {"ai_usage_summary", "Returns query-level AI usage totals and bounded-buffer drop counters.",
      "SELECT * FROM ai_usage_summary();"},
     {"ai_clear_usage", "Clears the per-database usage event buffer.", "SELECT * FROM ai_clear_usage();"},
+    {"ai_query_cache_stats", "Returns generated SQL cache size, bounds, and eviction counters.",
+     "SELECT * FROM ai_query_cache_stats();"},
+    {"ai_usage_totals", "Returns provider counters independent of bounded usage event retention.",
+     "SELECT * FROM ai_usage_totals();"},
     {"ai_clear_cache", "Clears per-database in-memory response and generated-SQL caches.",
      "SELECT * FROM ai_clear_cache();"},
     {"ai_secrets", "Lists configured duckdb_ai secrets with credentials redacted.", "SELECT * FROM ai_secrets();"},
@@ -8461,6 +8552,8 @@ void RegisterClassifierBuildFunction(ExtensionLoader &loader) {
 		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		    AggregateFunction::UnaryUpdate<ClassifierBuildState, string_t, ClassifierBuildOperation>,
 		    ClassifierBuildBind);
+		function.SetStateDestructorCallback(
+		    AggregateFunction::StateDestroy<ClassifierBuildState, ClassifierBuildOperation>);
 		function.SetFallible();
 		function.SetVolatile();
 		functions.AddFunction(std::move(function));
@@ -9001,6 +9094,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDocumentedFunction(loader, TableFunction("ai_usage", {}, AiUsageFunction, AiUsageBind, AiUsageInit));
 	RegisterDocumentedFunction(
 	    loader, TableFunction("ai_usage_summary", {}, AiUsageSummaryFunction, AiUsageSummaryBind, AiUsageSummaryInit));
+	RegisterDocumentedFunction(loader, TableFunction("ai_query_cache_stats", {}, AiQueryCacheStatsFunction,
+	                                                 AiQueryCacheStatsBind, AiClearUsageInit));
+	RegisterDocumentedFunction(
+	    loader, TableFunction("ai_usage_totals", {}, AiUsageTotalsFunction, AiUsageTotalsBind, AiClearUsageInit));
 	RegisterDocumentedFunction(
 	    loader, TableFunction("ai_clear_usage", {}, AiClearUsageFunction, AiClearUsageBind, AiClearUsageInit));
 	RegisterDocumentedFunction(

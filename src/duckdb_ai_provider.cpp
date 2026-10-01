@@ -128,6 +128,7 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	std::deque<UsageEvent> usage_events;
 	uint64_t next_usage_event_id = 1;
 	uint64_t dropped_usage_events = 0;
+	UsageTotals usage_totals;
 
 	std::mutex provider_control_mutex;
 	std::condition_variable provider_control_cv;
@@ -1192,9 +1193,8 @@ std::string ResponseCacheKey(const std::string &operation, const ProviderConfig 
 	       api_key_hash + "\n" + payload;
 }
 
-void TouchResponseCacheEntry(ProviderRuntimeState &state, CachedHttpResponse &entry, const std::string &cache_key) {
-	state.response_cache_order.erase(entry.order_entry);
-	entry.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
+void TouchResponseCacheEntry(ProviderRuntimeState &state, CachedHttpResponse &entry) {
+	state.response_cache_order.splice(state.response_cache_order.end(), state.response_cache_order, entry.order_entry);
 }
 
 void RemoveCachedResponse(ProviderRuntimeState &state, const std::string &cache_key) {
@@ -1203,7 +1203,7 @@ void RemoveCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 	if (entry == state.response_cache.end()) {
 		return;
 	}
-	auto entry_bytes = cache_key.size() + entry->second.response.body.size();
+	auto entry_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 	state.response_cache_bytes =
 	    state.response_cache_bytes >= entry_bytes ? state.response_cache_bytes - entry_bytes : 0;
 	state.response_cache_order.erase(entry->second.order_entry);
@@ -1218,7 +1218,7 @@ bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 		return false;
 	}
 	if (ResponseCacheEntryExpired(entry->second, options)) {
-		auto entry_bytes = cache_key.size() + entry->second.response.body.size();
+		auto entry_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 		state.response_cache_bytes =
 		    state.response_cache_bytes >= entry_bytes ? state.response_cache_bytes - entry_bytes : 0;
 		state.response_cache_order.erase(entry->second.order_entry);
@@ -1229,35 +1229,42 @@ bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 	response.elapsed_ms = 0;
 	response.retries = 0;
 	response.cache_hit = true;
-	TouchResponseCacheEntry(state, entry->second, cache_key);
+	TouchResponseCacheEntry(state, entry->second);
 	return true;
 }
 
 void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const HttpResponse &response,
                          const CompletionOptions &options) {
 	auto max_entries = MaxResponseCacheEntries(options);
-	auto response_bytes = cache_key.size() + response.body.size();
-	if (max_entries == 0 || response_bytes > DEFAULT_MAX_RESPONSE_CACHE_BYTES) {
+	// The map and recency list each retain their own key copy.
+	if (max_entries == 0 || cache_key.size() > DEFAULT_MAX_RESPONSE_CACHE_BYTES / 2 ||
+	    response.body.size() > DEFAULT_MAX_RESPONSE_CACHE_BYTES - 2 * cache_key.size()) {
 		return;
 	}
+	auto response_bytes = 2 * cache_key.size() + response.body.size();
 	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	CachedHttpResponse cached;
+	cached.response = response;
+	cached.response.cache_hit = false;
+	cached.created_at = std::chrono::steady_clock::now();
 	auto entry = state.response_cache.find(cache_key);
 	if (entry != state.response_cache.end()) {
-		auto previous_bytes = cache_key.size() + entry->second.response.body.size();
+		auto previous_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 		state.response_cache_bytes =
 		    state.response_cache_bytes >= previous_bytes ? state.response_cache_bytes - previous_bytes : 0;
-		entry->second.response = response;
-		entry->second.response.cache_hit = false;
-		entry->second.created_at = std::chrono::steady_clock::now();
+		cached.order_entry = entry->second.order_entry;
+		entry->second = std::move(cached);
 		state.response_cache_bytes += response_bytes;
-		TouchResponseCacheEntry(state, entry->second, cache_key);
+		TouchResponseCacheEntry(state, entry->second);
 	} else {
-		CachedHttpResponse cached;
-		cached.response = response;
-		cached.response.cache_hit = false;
-		cached.created_at = std::chrono::steady_clock::now();
 		cached.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
-		state.response_cache.emplace(cache_key, std::move(cached));
+		auto order_entry = cached.order_entry;
+		try {
+			state.response_cache.emplace(cache_key, std::move(cached));
+		} catch (...) {
+			state.response_cache_order.erase(order_entry);
+			throw;
+		}
 		state.response_cache_bytes += response_bytes;
 	}
 	while (
@@ -1267,7 +1274,7 @@ void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_k
 		state.response_cache_order.pop_front();
 		auto oldest_entry = state.response_cache.find(oldest);
 		if (oldest_entry != state.response_cache.end()) {
-			auto oldest_bytes = oldest.size() + oldest_entry->second.response.body.size();
+			auto oldest_bytes = 2 * oldest.size() + oldest_entry->second.response.body.size();
 			state.response_cache_bytes =
 			    state.response_cache_bytes >= oldest_bytes ? state.response_cache_bytes - oldest_bytes : 0;
 			state.response_cache.erase(oldest_entry);
@@ -2754,9 +2761,23 @@ void PruneProviderTokenWindow(ProviderRuntimeState &state, std::chrono::steady_c
 	}
 }
 
+int64_t ProfileTokenEstimate(const std::string &text, double multiplier) {
+	auto estimate = std::ceil(static_cast<double>(EstimateTokenCount(text)) * multiplier);
+	if (!std::isfinite(estimate) || estimate > static_cast<double>(MAX_TOKEN_LIMIT_PER_MINUTE)) {
+		throw InvalidInputException("Estimated request token count is too large");
+	}
+	return static_cast<int64_t>(estimate);
+}
+
+int64_t EstimatedCompletionInputTokens(const std::string &prompt, const CompletionOptions &options, double multiplier) {
+	return ProfileTokenEstimate(prompt, multiplier) + ProfileTokenEstimate(options.system_prompt, multiplier) +
+	       ProfileTokenEstimate(options.response_schema, multiplier);
+}
+
 int64_t EstimatedCompletionTokens(const std::string &prompt, const CompletionOptions &options) {
 	auto output_estimate = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
-	return EstimateTokenCount(prompt) + output_estimate;
+	return EstimatedCompletionInputTokens(prompt, options, GetProviderCapabilities(options).token_estimate_multiplier) +
+	       output_estimate;
 }
 
 int64_t TokenReservation(int64_t estimated_tokens, int64_t token_limit_per_minute) {
@@ -3052,6 +3073,11 @@ HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload
 			HttpResponse response;
 			{
 				ProviderRequestGuard request_guard(options, estimated_tokens);
+				{
+					auto &runtime = RuntimeState(options);
+					std::lock_guard<std::mutex> lock(runtime.usage_mutex);
+					runtime.usage_totals.request_attempts++;
+				}
 				response = HttpPost(url, payload, headers, timeout_seconds, false, 0, retry_backoff_ms,
 				                    options.client_context, connect_timeout_seconds);
 			}
@@ -4858,6 +4884,18 @@ double EstimateEmbeddingCostUsd(const ProviderConfig &config, const CompletionOp
 
 void PushUsageEvent(ProviderRuntimeState &state, UsageEvent event) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
+	if (event.provider != "local") {
+		state.usage_totals.provider_events++;
+		state.usage_totals.failures += event.status == "error" ? 1 : 0;
+		state.usage_totals.cache_hits += event.cache_hit ? 1 : 0;
+		if (event.total_tokens >= 0) {
+			auto tokens = static_cast<uint64_t>(event.total_tokens);
+			state.usage_totals.known_total_tokens += MinValue<uint64_t>(
+			    tokens, std::numeric_limits<uint64_t>::max() - state.usage_totals.known_total_tokens);
+		} else {
+			state.usage_totals.unknown_token_events++;
+		}
+	}
 	event.event_id = state.next_usage_event_id++;
 	state.usage_events.push_back(std::move(event));
 	if (state.usage_events.size() > MAX_USAGE_EVENTS) {
@@ -5247,13 +5285,14 @@ std::string SerializeEmbeddingCacheBody(const ProviderConfig &config, const Embe
 
 void ValidateEmbeddingInputLimits(const std::string &input, idx_t request_bytes,
                                   const ProviderCapabilities &capabilities) {
-	auto input_tokens = EstimateTokenCount(input);
+	auto input_tokens = ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 	if (input_tokens > capabilities.max_batch_tokens) {
 		throw InvalidInputException(
 		    "AI embedding input has %lld estimated tokens; external model request limit is %lld",
 		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.max_batch_tokens));
 	}
-	if (capabilities.context_tokens > 0 && input_tokens > capabilities.context_tokens) {
+	if ((capabilities.context_tokens > 0 && input_tokens > capabilities.context_tokens) ||
+	    (capabilities.max_input_tokens > 0 && input_tokens > capabilities.max_input_tokens)) {
 		throw InvalidInputException(
 		    "AI embedding input has %lld estimated tokens; external model context limit is %lld",
 		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.context_tokens));
@@ -5304,11 +5343,21 @@ EmbeddingResult ParseValidatedEmbeddingResult(const ProviderConfig &config, cons
 void ValidateCompletionRequestLimits(const std::string &prompt, const std::string &payload,
                                      const CompletionOptions &options) {
 	auto capabilities = GetProviderCapabilities(options, false);
-	auto input_tokens = EstimateTokenCount(prompt) + EstimateTokenCount(options.system_prompt);
+	auto input_tokens = EstimatedCompletionInputTokens(prompt, options, capabilities.token_estimate_multiplier);
 	if (capabilities.context_tokens > 0 && input_tokens > capabilities.context_tokens) {
 		throw InvalidInputException(
 		    "AI completion input has %lld estimated tokens; external model context limit is %lld",
 		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.context_tokens));
+	}
+	if (capabilities.context_window_tokens > 0) {
+		auto output_tokens = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
+		if (input_tokens + output_tokens > capabilities.context_window_tokens) {
+			throw InvalidInputException(
+			    "AI completion estimated input plus output exceeds external model context window");
+		}
+	}
+	if (capabilities.max_input_tokens > 0 && input_tokens > capabilities.max_input_tokens) {
+		throw InvalidInputException("AI completion input exceeds external model max_input_tokens");
 	}
 	if (NumericCast<int64_t>(payload.size()) > capabilities.max_request_bytes) {
 		throw InvalidInputException("AI completion request has %llu bytes; external model request limit is %lld",
@@ -5377,9 +5426,10 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
                                                const std::vector<std::string> &inputs,
                                                const CompletionOptions &options) {
 	auto payload = EmbeddingPayload(config, inputs);
+	auto capabilities = GetProviderCapabilities(options, true);
 	auto total_tokens = int64_t(0);
 	for (auto &input : inputs) {
-		total_tokens += EstimateTokenCount(input);
+		total_tokens += ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 	}
 	HttpResponse response;
 	try {
@@ -5411,7 +5461,6 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		}
 		throw;
 	}
-	auto capabilities = GetProviderCapabilities(options, true);
 	if (capabilities.embedding_dimensions > 0) {
 		for (auto &result : results) {
 			auto error = EmbeddingDimensionError(result, capabilities);
@@ -5511,9 +5560,12 @@ ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, b
 			throw InvalidInputException("External model options must be a JSON object: %s", error);
 		}
 		auto apply_limit = [&](const char *name, int64_t &target, int64_t maximum) {
+			if (!YyjsonObjectGet(root, name)) {
+				return false;
+			}
 			int64_t value;
 			if (!YyjsonDirectInteger(root, name, value)) {
-				return false;
+				throw InvalidInputException("External model option \"%s\" must be a positive integer", name);
 			}
 			if (value <= 0 || value > maximum) {
 				throw InvalidInputException("External model option \"%s\" must be between 1 and %lld", name,
@@ -5528,8 +5580,20 @@ ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, b
 		apply_limit("max_batch_tokens", capabilities.max_batch_tokens, 1000000000);
 		apply_limit("max_request_bytes", capabilities.max_request_bytes,
 		            static_cast<int64_t>(MAX_HTTP_RESPONSE_BYTES_LIMIT));
-		if (!apply_limit("context_size", capabilities.context_tokens, 1000000000)) {
-			apply_limit("max_input_tokens", capabilities.context_tokens, 1000000000);
+		apply_limit("context_size", capabilities.context_window_tokens, 1000000000);
+		apply_limit("max_input_tokens", capabilities.max_input_tokens, 1000000000);
+		capabilities.context_tokens =
+		    capabilities.context_window_tokens > 0 ? capabilities.context_window_tokens : capabilities.max_input_tokens;
+		auto multiplier = YyjsonObjectGet(root, "token_estimate_multiplier");
+		if (multiplier) {
+			if (!duckdb_yyjson::yyjson_is_num(multiplier)) {
+				throw InvalidInputException("token_estimate_multiplier must be a number between 1 and 16");
+			}
+			auto value = duckdb_yyjson::yyjson_get_num(multiplier);
+			if (!std::isfinite(value) || value < 1 || value > 16) {
+				throw InvalidInputException("token_estimate_multiplier must be a number between 1 and 16");
+			}
+			capabilities.token_estimate_multiplier = value;
 		}
 		apply_limit("embedding_dimensions", capabilities.embedding_dimensions, 1000000);
 		auto native_batch = YyjsonObjectGet(root, "native_batch_support");
@@ -5765,8 +5829,9 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	HttpResponse response;
 	std::string cache_key;
 	try {
-		response = FetchProviderResponse("embedding", config, endpoint, payload, request_options,
-		                                 EstimateTokenCount(input), cache_key);
+		response =
+		    FetchProviderResponse("embedding", config, endpoint, payload, request_options,
+		                          ProfileTokenEstimate(input, capabilities.token_estimate_multiplier), cache_key);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
@@ -5844,7 +5909,7 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 		int64_t batch_bytes = NumericCast<int64_t>(EmbeddingPayload(config, std::vector<std::string> {}).size());
 		while (batch_end < miss_rows.size()) {
 			auto &input = inputs[miss_rows[batch_end]];
-			auto input_tokens = EstimateTokenCount(input);
+			auto input_tokens = ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 			auto input_bytes = NumericCast<int64_t>(JsonEscape(input).size()) + 2 + (batch_end > batch_start ? 1 : 0);
 			auto input_count = NumericCast<int64_t>(batch_end - batch_start + 1);
 			if (batch_end > batch_start && (input_count > capabilities.max_batch_inputs ||
@@ -5984,6 +6049,7 @@ void ResetUsageEvents(ProviderRuntimeState &state) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
 	state.usage_events.clear();
 	state.dropped_usage_events = 0;
+	state.usage_totals = UsageTotals {};
 }
 
 void ResetResponseCache(ProviderRuntimeState &state) {
@@ -6009,6 +6075,12 @@ UsageBufferStats UsageStats() {
 
 UsageBufferStats UsageStats(ClientContext &context) {
 	return SnapshotUsageStats(RuntimeState(context));
+}
+
+UsageTotals GetUsageTotals(ClientContext &context) {
+	auto &runtime = RuntimeState(context);
+	std::lock_guard<std::mutex> lock(runtime.usage_mutex);
+	return runtime.usage_totals;
 }
 
 void ClearUsageEvents() {

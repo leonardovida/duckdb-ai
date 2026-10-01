@@ -3,7 +3,8 @@
 #
 # Code and test changes run formatting, clang-tidy, release build, SQLLogicTests,
 # and deterministic provider smokes. The Jev cookbook is included because its
-# SQL is executed by the mock smoke suite. Distribution builds remain manual.
+# SQL is executed by the mock smoke suite. macOS/Windows and owned-code sanitizers
+# run on every change; the full distribution matrix remains manual.
 #
 name: CI
 
@@ -188,13 +189,54 @@ jobs:
         shell: bash
         run: |
           python3 test/smoke/mock_provider_smoke.py
+          python3 test/smoke/extension_upload_smoke.py
           python3 test/smoke/resumable_enrichment_smoke.py
           python3 test/smoke/jev_batch_evaluation_smoke.py
+          python3 test/smoke/accuracy_gate_smoke.py
+          python3 test/smoke/reliability_smoke.py --library build/release/src/libduckdb.so
+
+      - name: Run owned-code ASan and UBSan checks
+        shell: bash
+        run: |
+          cmake -G Ninja -S duckdb -B build/release -DAI_ENABLE_SANITIZERS=ON
+          cmake --build build/release --target ai_loadable_extension -j2
+          curl --fail --location https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.gz | gzip -d > build/release/duckdb-host
+          chmod +x build/release/duckdb-host
+          python3 test/smoke/sanitizer_smoke.py --duckdb build/release/duckdb-host --extension build/release/extension/ai/ai.duckdb_extension
 
       - name: Show ccache stats
         if: always()
         shell: bash
         run: ccache --show-stats || true
+
+  platform-checks:
+    name: Platform checks
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    with:
+      duckdb_version: v1.5.5
+      ci_tools_version: v1.5-variegata
+      extension_name: ai
+      reduced_ci_mode: 'enabled'
+      exclude_archs: 'linux_amd64;linux_arm64;linux_amd64_musl;linux_arm64_musl;osx_amd64;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      artifact_postfix: '-platform-check'
+
+  repository-checks:
+    name: Repository checks
+    if: always()
+    needs: [format-check, tidy-check, build-test, platform-checks]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every validation job to pass
+        env:
+          CHECK_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = json.loads(os.environ['CHECK_RESULTS'])
+          failed = [name for name, check in results.items() if check['result'] != 'success']
+          if failed:
+              raise SystemExit('Failed or skipped checks: ' + ', '.join(failed))
+          PY
 
   distribution-build:
     name: Distribution build

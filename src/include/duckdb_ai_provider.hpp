@@ -30,6 +30,9 @@ struct ProviderCapabilities {
 	int64_t max_batch_tokens;
 	int64_t max_request_bytes;
 	int64_t context_tokens;
+	int64_t max_input_tokens = -1;
+	int64_t context_window_tokens = -1;
+	double token_estimate_multiplier = 1;
 	int64_t embedding_dimensions;
 	bool native_batch_jobs;
 };
@@ -171,6 +174,18 @@ struct UsageBufferStats {
 	uint64_t queued_log_events;
 	uint64_t dropped_log_events;
 };
+
+//! Lifetime counters retained independently of the bounded usage-event buffer.
+struct UsageTotals {
+	uint64_t provider_events = 0;
+	uint64_t request_attempts = 0;
+	uint64_t failures = 0;
+	uint64_t cache_hits = 0;
+	uint64_t known_total_tokens = 0;
+	uint64_t unknown_token_events = 0;
+};
+
+UsageTotals GetUsageTotals(ClientContext &context);
 
 //! Built-in model pricing row exposed through ai_model_prices().
 struct ModelPrice {
