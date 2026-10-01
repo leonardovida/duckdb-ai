@@ -1338,12 +1338,132 @@ struct JsonValue {
 	bool boolean_value = false;
 	double number_value = 0;
 	bool number_is_integer = false;
-	//! Preserve integer digits beyond DOUBLE's exact range for projection and validation.
+	//! Preserve the JSON numeric lexeme for exact decimal comparisons and projection.
 	std::string number_text;
 	std::string string_value;
 	std::vector<JsonValue> array_value;
 	std::map<std::string, JsonValue> object_value;
 };
+
+int CompareIntegerText(const std::string &left, const std::string &right) {
+	auto left_negative = left[0] == '-';
+	auto right_negative = right[0] == '-';
+	if (left_negative != right_negative) {
+		return left_negative ? -1 : 1;
+	}
+	auto result = left.size() == right.size() ? left.compare(right) : (left.size() < right.size() ? -1 : 1);
+	return left_negative ? -result : result;
+}
+
+std::string UnsignedDecimalAdd(const std::string &left, const std::string &right) {
+	std::string result(std::max(left.size(), right.size()) + 1, '0');
+	idx_t l = left.size(), r = right.size(), output = result.size();
+	int carry = 0;
+	while (l > 0 || r > 0 || carry > 0) {
+		auto digit = carry + (l > 0 ? left[--l] - '0' : 0) + (r > 0 ? right[--r] - '0' : 0);
+		result[--output] = static_cast<char>('0' + digit % 10);
+		carry = digit / 10;
+	}
+	auto first = result.find_first_not_of('0');
+	return first == std::string::npos ? "0" : result.substr(first);
+}
+
+// left >= right, with both magnitudes normalized and nonnegative.
+std::string UnsignedDecimalSubtract(const std::string &left, const std::string &right) {
+	auto result = left;
+	idx_t l = left.size(), r = right.size();
+	int borrow = 0;
+	while (l > 0) {
+		auto digit = left[--l] - '0' - borrow - (r > 0 ? right[--r] - '0' : 0);
+		borrow = digit < 0 ? 1 : 0;
+		result[l] = static_cast<char>('0' + digit + borrow * 10);
+	}
+	auto first = result.find_first_not_of('0');
+	return first == std::string::npos ? "0" : result.substr(first);
+}
+
+std::string AddDecimalExponent(std::string exponent, int64_t adjustment) {
+	auto negative = !exponent.empty() && exponent[0] == '-';
+	auto first = exponent.find_first_not_of("+-0");
+	auto magnitude = first == std::string::npos ? std::string("0") : exponent.substr(first);
+	if (magnitude == "0") {
+		negative = false;
+	}
+	// adjustment is bounded by the input length, not by the exponent lexeme.
+	auto adjustment_negative = adjustment < 0;
+	auto other = std::to_string(adjustment_negative ? -adjustment : adjustment);
+	if (negative == adjustment_negative) {
+		magnitude = UnsignedDecimalAdd(magnitude, other);
+	} else if (CompareIntegerText(magnitude, other) >= 0) {
+		magnitude = UnsignedDecimalSubtract(magnitude, other);
+	} else {
+		magnitude = UnsignedDecimalSubtract(other, magnitude);
+		negative = adjustment_negative;
+	}
+	return negative && magnitude != "0" ? "-" + magnitude : magnitude;
+}
+
+struct ExactDecimalNumber {
+	bool negative;
+	std::string digits;
+	//! Position of the decimal point relative to the first significant digit.
+	std::string order;
+};
+
+ExactDecimalNumber ExactDecimal(const JsonValue &value) {
+	auto text = value.number_text.empty() ? JsonDoubleExact(value.number_value) : value.number_text;
+	ExactDecimalNumber result {text[0] == '-', "", "0"};
+	auto exponent_start = text.find_first_of("eE");
+	auto coefficient_end = exponent_start == std::string::npos ? text.size() : exponent_start;
+	auto point = text.find('.');
+	auto fraction_digits = point == std::string::npos ? 0 : coefficient_end - point - 1;
+	for (idx_t i = result.negative ? 1 : 0; i < coefficient_end; i++) {
+		if (text[i] != '.') {
+			result.digits += text[i];
+		}
+	}
+	auto first = result.digits.find_first_not_of('0');
+	if (first == std::string::npos) {
+		return {false, "0", "0"};
+	}
+	result.digits.erase(0, first);
+	auto exponent = exponent_start == std::string::npos ? std::string("0") : text.substr(exponent_start + 1);
+	result.order = AddDecimalExponent(exponent, NumericCast<int64_t>(result.digits.size()) -
+	                                                NumericCast<int64_t>(fraction_digits));
+	result.digits.erase(result.digits.find_last_not_of('0') + 1);
+	return result;
+}
+
+std::string ExactIntegerText(const JsonValue &value) {
+	auto number = ExactDecimal(value);
+	if (number.digits == "0") {
+		return "0";
+	}
+	if (CompareIntegerText(number.order, std::to_string(number.digits.size())) < 0) {
+		return "";
+	}
+	// Nonzero numbers accepted by the parser are finite doubles, so integral
+	// values have at most 309 decimal digits. Check before narrowing the exponent.
+	if (CompareIntegerText(number.order, "309") > 0) {
+		throw InvalidInputException("JSON integer is outside the finite DOUBLE range");
+	}
+	auto length = static_cast<size_t>(std::stoull(number.order));
+	return (number.negative ? "-" : "") + number.digits + std::string(length - number.digits.size(), '0');
+}
+
+bool IsExactIntegerMultiple(std::string magnitude, const std::string &divisor) {
+	if (magnitude[0] == '-') {
+		magnitude.erase(0, 1);
+	}
+	std::string remainder = "0";
+	for (auto digit : magnitude) {
+		remainder = remainder == "0" ? std::string(1, digit) : remainder + digit;
+		while (CompareIntegerText(remainder, divisor) >= 0) {
+			remainder = UnsignedDecimalSubtract(remainder, divisor);
+		}
+	}
+	return remainder == "0";
+}
 
 using YyjsonDocPtr = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>;
 
@@ -1451,10 +1571,8 @@ bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, st
 			error = "JSON number is outside the finite DOUBLE range";
 			return false;
 		}
-		target.number_is_integer = text.find_first_of(".eE") == std::string::npos;
-		if (target.number_is_integer) {
-			target.number_text = std::move(text);
-		}
+		target.number_text = std::move(text);
+		target.number_is_integer = !ExactIntegerText(target).empty();
 		return true;
 	}
 	if (duckdb_yyjson::yyjson_is_num(source)) {
@@ -1664,7 +1782,7 @@ bool FindYyjsonNumberArrayField(duckdb_yyjson::yyjson_val *value, const std::str
 }
 
 bool ParseJsonValueDocument(const std::string &input, JsonValue &value, std::string &error) {
-	auto doc = ReadYyjsonDocument(input, error, duckdb_yyjson::YYJSON_READ_BIGNUM_AS_RAW);
+	auto doc = ReadYyjsonDocument(input, error, duckdb_yyjson::YYJSON_READ_NUMBER_AS_RAW);
 	if (!doc) {
 		return false;
 	}
@@ -1695,27 +1813,15 @@ bool SchemaNumberField(const JsonValue &schema, const std::string &field, double
 
 bool SchemaNonNegativeIntegerField(const JsonValue &schema, const std::string &field, int64_t &value) {
 	auto field_value = ObjectField(schema, field);
-	if (field_value && !field_value->number_text.empty()) {
-		if (field_value->number_text[0] == '-') {
-			return false;
-		}
-		auto integer = std::stoull(field_value->number_text);
-		if (integer > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-			return false;
-		}
-		value = static_cast<int64_t>(integer);
-		return true;
-	}
-	double number_value;
-	if (!SchemaNumberField(schema, field, number_value)) {
+	if (!field_value || field_value->type != JsonValueType::NUMBER) {
 		return false;
 	}
-	if (!std::isfinite(number_value) || number_value < 0 ||
-	    number_value >= -static_cast<double>(std::numeric_limits<int64_t>::min()) ||
-	    std::floor(number_value) != number_value) {
+	auto integer = ExactIntegerText(*field_value);
+	if (integer.empty() || integer[0] == '-' ||
+	    CompareIntegerText(integer, std::to_string(std::numeric_limits<int64_t>::max())) > 0) {
 		return false;
 	}
-	value = static_cast<int64_t>(number_value);
+	value = std::stoll(integer);
 	return true;
 }
 
@@ -1723,7 +1829,7 @@ bool IsJsonInteger(const JsonValue &value) {
 	if (value.type != JsonValueType::NUMBER) {
 		return false;
 	}
-	return value.number_is_integer || std::floor(value.number_value) == value.number_value;
+	return value.number_is_integer || !ExactIntegerText(value).empty();
 }
 
 std::string JsonTypeName(const JsonValue &value) {
@@ -1744,45 +1850,30 @@ std::string JsonTypeName(const JsonValue &value) {
 	return "unknown";
 }
 
-int CompareIntegerText(const std::string &left, const std::string &right) {
-	auto left_negative = left[0] == '-';
-	auto right_negative = right[0] == '-';
-	if (left_negative != right_negative) {
-		return left_negative ? -1 : 1;
-	}
-	auto result = left.size() == right.size() ? left.compare(right) : (left.size() < right.size() ? -1 : 1);
-	return left_negative ? -result : result;
-}
-
 int CompareJsonNumbers(const JsonValue &left, const JsonValue &right) {
-	if (left.number_value < right.number_value) {
-		return -1;
-	}
-	if (left.number_value > right.number_value) {
-		return 1;
-	}
-	// Rounded doubles can compare equal for distinct 64-bit integers. Compare exact
-	// digits, including a real-valued integer's exact binary value when in range.
-	auto integer_text = [](const JsonValue &value) {
-		if (!value.number_text.empty()) {
-			return value.number_text;
+	auto l = ExactDecimal(left);
+	auto r = ExactDecimal(right);
+	if (l.digits == "0" || r.digits == "0") {
+		if (l.digits == r.digits) {
+			return 0;
 		}
-		auto number = value.number_value;
-		if (number == 18446744073709551616.0) {
-			return std::string("18446744073709551616");
-		}
-		if (std::floor(number) == number && number >= -9223372036854775808.0 && number < 18446744073709551616.0) {
-			return number < 0 ? std::to_string(static_cast<int64_t>(number))
-			                  : std::to_string(static_cast<uint64_t>(number));
-		}
-		return std::string();
-	};
-	auto left_text = integer_text(left);
-	auto right_text = integer_text(right);
-	if (!left_text.empty() && !right_text.empty()) {
-		return CompareIntegerText(left_text, right_text);
+		return l.digits == "0" ? (r.negative ? 1 : -1) : (l.negative ? -1 : 1);
 	}
-	return 0;
+	if (l.negative != r.negative) {
+		return l.negative ? -1 : 1;
+	}
+	auto comparison = CompareIntegerText(l.order, r.order);
+	if (comparison == 0) {
+		for (idx_t i = 0; i < std::max(l.digits.size(), r.digits.size()); i++) {
+			auto a = i < l.digits.size() ? l.digits[i] : '0';
+			auto b = i < r.digits.size() ? r.digits[i] : '0';
+			if (a != b) {
+				comparison = a < b ? -1 : 1;
+				break;
+			}
+		}
+	}
+	return l.negative ? -comparison : comparison;
 }
 
 bool JsonValueEquals(const JsonValue &left, const JsonValue &right) {
@@ -1839,8 +1930,13 @@ size_t JsonValueHash(const JsonValue &value) {
 		HashCombine(hash, std::hash<bool> {}(value.boolean_value));
 		return hash;
 	case JsonValueType::NUMBER:
-		// JsonValueEquals treats positive and negative zero as equal.
-		HashCombine(hash, std::hash<double> {}(value.number_value == 0 ? 0.0 : value.number_value));
+		// Equivalent decimal spellings, including signed zero, share a hash.
+		{
+			auto number = ExactDecimal(value);
+			HashCombine(hash, std::hash<bool> {}(number.negative));
+			HashCombine(hash, std::hash<std::string> {}(number.digits));
+			HashCombine(hash, std::hash<std::string> {}(number.order));
+		}
 		return hash;
 	case JsonValueType::STRING:
 		HashCombine(hash, std::hash<std::string> {}(value.string_value));
@@ -2137,11 +2233,10 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		}
 		if (SchemaNumberField(schema, "multipleOf", numeric_bound) && numeric_bound > 0) {
 			auto &divisor = *ObjectField(schema, "multipleOf");
-			if (!value.number_text.empty() && !divisor.number_text.empty()) {
-				auto magnitude =
-				    std::stoull(value.number_text[0] == '-' ? value.number_text.substr(1) : value.number_text);
-				if (magnitude % std::stoull(divisor.number_text) != 0) {
-					error = path + " must be a multiple of " + divisor.number_text;
+			if (IsJsonInteger(value) && IsJsonInteger(divisor)) {
+				auto divisor_text = ExactIntegerText(divisor);
+				if (!IsExactIntegerMultiple(ExactIntegerText(value), divisor_text)) {
+					error = path + " must be a multiple of " + divisor_text;
 					return false;
 				}
 			} else {
@@ -6023,6 +6118,9 @@ JsonExtractedValue ExtractJsonValue(const JsonValue &value) {
 		extracted.kind = JsonExtractedKind::NUMBER;
 		extracted.number_value = value.number_value;
 		extracted.number_is_integer = IsJsonInteger(value);
+		if (extracted.number_is_integer) {
+			extracted.json_value = ExactIntegerText(value);
+		}
 		break;
 	case JsonValueType::STRING:
 		extracted.kind = JsonExtractedKind::STRING;

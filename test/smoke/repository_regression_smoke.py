@@ -6,8 +6,10 @@ import csv
 import io
 import json
 import os
+import random
 import subprocess
 import threading
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -105,7 +107,7 @@ def run(duckdb_path):
         checks += 1
 
     def schema_check(response, schema, valid, name):
-        payload = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+        payload = schema if isinstance(schema, str) else json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
         check(
             f"SELECT ai_complete_json({literal('return JSON:' + response)}, "
             f"response_schema := {literal(payload)}, fail_on_error := false) IS NOT NULL;",
@@ -191,15 +193,88 @@ def run(duckdb_path):
                 "exact integer multipleOf",
             )
 
+        for response, rule, valid in (
+            ("9007199254740993", '{"enum":[9007199254740993.0]}', True),
+            ("9007199254740992", '{"enum":[9007199254740993.0]}', False),
+            ("9007199254740993", '{"enum":[9.007199254740993e15]}', True),
+            ("9007199254740993", '{"enum":[9007199254740993.25]}', False),
+            ("9007199254740993.250", '{"enum":[9.00719925474099325e15]}', True),
+            ("9007199254740993.2", '{"minimum":9007199254740993.1}', True),
+            ("9007199254740993.0", '{"minimum":9007199254740993.1}', False),
+            ("-9007199254740993.2", '{"maximum":-9007199254740993.1}', True),
+            ("-9007199254740993.0", '{"maximum":-9007199254740993.1}', False),
+            ("1.00000000000000000001", '{"minimum":1.00000000000000000002}', False),
+            ("1e-100000000000000000000000", '{"exclusiveMinimum":0}', True),
+            ("1e-100000000000000000000000", '{"type":"integer"}', False),
+            ("0e999999999999999999999999", '{"enum":[-0.0]}', True),
+            ("100000000000000000000", '{"multipleOf":10}', True),
+            ("100000000000000000001", '{"multipleOf":10}', False),
+            ("-100000000000000000000", '{"multipleOf":10}', True),
+            ("200000000000000000000", '{"multipleOf":100000000000000000000}', True),
+            ("200000000000000000001", '{"multipleOf":100000000000000000000}', False),
+            ("1e20", '{"multipleOf":1e19}', True),
+            ("1e20", '{"multipleOf":3e19}', False),
+            ("1e308", '{"multipleOf":1e307}', True),
+        ):
+            schema_check(
+                '{"value":' + response + '}',
+                '{"properties":{"value":' + rule + '}}',
+                valid,
+                "exact decimal and wide integer " + response + "/" + rule,
+            )
+        for response, valid in (
+            ("[9007199254740993,9007199254740993.0]", False),
+            ("[9007199254740993,9007199254740993.25]", True),
+            ("[9007199254740993.25,9.00719925474099325e15]", False),
+            ("[0,1e-100000000000000000000000]", True),
+        ):
+            schema_check(response, {"uniqueItems": True}, valid, "exact decimal uniqueness")
+
+        rng = random.Random(613)
+        for _ in range(16):
+            left = f"{rng.randint(-(10**24), 10**24)}e{rng.randint(-450, 200):+04d}"
+            right = f"{rng.randint(-(10**24), 10**24)}e{rng.randint(-450, 200):+04d}"
+            for keyword, valid in (
+                ("minimum", Decimal(left) >= Decimal(right)),
+                ("exclusiveMaximum", Decimal(left) < Decimal(right)),
+            ):
+                schema_check(
+                    '{"value":' + left + '}',
+                    '{"properties":{"value":{"' + keyword + '":' + right + '}}}',
+                    valid,
+                    "decimal oracle comparison " + left + "/" + right,
+                )
+        for _ in range(8):
+            divisor = rng.randint(2, 10**100)
+            multiple = divisor * rng.randint(-(10**50), 10**50)
+            for number in (multiple, multiple + 1):
+                schema_check(
+                    '{"value":' + str(number) + '}',
+                    {"properties": {"value": {"multipleOf": divisor}}},
+                    number % divisor == 0,
+                    "Python integer oracle divisibility",
+                )
+
         record_schema = literal('{"type":"object","properties":{"value":{"type":"integer"}}}')
-        for number in (9007199254740993, 9223372036854775807, -9223372036854775808):
+        for number in (
+            9007199254740993,
+            9223372036854775807,
+            -9223372036854775808,
+            "9007199254740993.0",
+            "9.007199254740993e15",
+        ):
+            expected_number = str(number) if isinstance(number, int) else "9007199254740993"
             prompt = literal('return JSON:{"value":' + str(number) + "}")
             check(
                 f"SELECT value FROM ai_complete_record({prompt}, {record_schema});",
-                [[str(number)]],
+                [[expected_number]],
                 "exact table BIGINT",
             )
-            check(f"SELECT ai_extract_record({prompt}, {record_schema}).value;", [[str(number)]], "exact scalar BIGINT")
+            check(
+                f"SELECT ai_extract_record({prompt}, {record_schema}).value;",
+                [[expected_number]],
+                "exact scalar BIGINT",
+            )
         for number in (9223372036854775808, 18446744073709551615, -9223372036854775809):
             prompt = literal('return JSON:{"value":' + str(number) + "}")
             check(

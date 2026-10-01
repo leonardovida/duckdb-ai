@@ -239,6 +239,10 @@ has bounded-time matching behavior; constructs unsupported by RE2 are rejected.
 Type unions accept only their listed types. Nested boolean schemas are supported:
 `true` allows any value and `false` rejects every value. String `minLength` and
 `maxLength` count Unicode code points, so an emoji counts as one and a combining
-mark counts separately from its base character. Integer values retain exact
-64-bit digits for equality, bounds, and typed projection; `number` fields use
-DuckDB `DOUBLE` precision.
+mark counts separately from its base character. Numeric equality and bounds
+compare the original decimal values, including equivalent exponent spellings.
+Integer `multipleOf` checks use decimal arithmetic without narrowing to 64 bits.
+Numbers whose double conversion is non-finite are rejected. Typed integer
+projection preserves exact values within the signed `BIGINT` range; projected
+`number` fields use DuckDB `DOUBLE` precision. Non-integer `multipleOf` checks
+still use floating-point tolerance.

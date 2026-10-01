@@ -13,7 +13,8 @@ include SQL API changes and patch versions should preserve the SQL API.
   rejected cached responses. Record projection preserves exact 64-bit integers
   and respects `fail_on_error` for projection failures.
 - JSON Schema validation now enforces union types and nested boolean schemas,
-  counts Unicode code points, and preserves exact 64-bit integer comparisons.
+  counts Unicode code points, compares decimal lexemes exactly, and validates
+  integer divisibility without narrowing large values to 64 bits.
 - Cosine similarity handles extreme finite embedding magnitudes, and cached
   embeddings retain double precision.
 - Classifier holdouts retain training examples for each observed class; artifacts

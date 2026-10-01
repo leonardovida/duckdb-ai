@@ -20,7 +20,7 @@ implementations were not audited. No live AI providers were called.
 | Schema union types | A value matching none of an array of allowed types could pass. | Unmatched values fail validation. |
 | Nested boolean schemas | Boolean children could be ignored by supported schema keywords. | `true`/`false` children participate in validation. |
 | Unicode length | Schema lengths counted UTF-8 bytes. | Lengths count Unicode code points, including combining marks. |
-| Integer accuracy | JSON integers passed through doubles, corrupting large record values and some schema comparisons. | Signed/unsigned 64-bit integer digits remain exact in projection, bounds, enum, uniqueness, and integer divisibility checks. Out-of-range BIGINT projections fail safely. |
+| Integer accuracy | JSON integers passed through doubles, corrupting large record values and some schema comparisons. | Decimal lexemes remain exact in bounds, enum, and uniqueness checks; integral divisibility uses decimal arithmetic beyond 64 bits. BIGINT projections preserve exact in-range values and reject out-of-range values safely. |
 | Typed responses | A provider response could enter the cache and count as successful before typed validation failed. | Typed validators run before success accounting; rejected responses are evicted and usage records the error. Validation does not introduce automatic retries. |
 | Scalar record failures | Projection exceptions could escape `fail_on_error := false`. | Failed records return a null struct under that policy. |
 | Embedding precision | Synthetic cached embedding JSON used 15 significant digits. | Cache serialization preserves round-trip double precision. |
@@ -33,7 +33,8 @@ implementations were not audited. No live AI providers were called.
 ## Performance evidence
 
 Compared a saved, unchanged release binary with the final release binary on the
-same Linux host. Runtime cases used the repository's local mock embedding server
+same Linux host. Measurements preceded the follow-up decimal-schema review
+fixes. Runtime cases used the repository's local mock embedding server
 and alternated binary order across five repetitions. Chunk cases used five
 repetitions per binary, except the original 1 MB case was stopped after its first
 five-second timeout. Timings include shell startup and query execution.
@@ -64,7 +65,7 @@ throughput. No material similarity speedup was measured.
 - Release build succeeded with GCC 14 and Ninja on Linux.
 - SQLLogicTests passed: 524 assertions, up from the original 500.
 - Main mock-provider suite passed, including provider API coverage, Jev provider
-  and typed/batched Jev coverage, and 58 new repository regression checks.
+  and typed/batched Jev coverage, and 135 new repository regression checks.
 - Resumable enrichment and labeled Jev batch evaluation smoke suites passed.
 - The corrected clang-tidy target passed with LLVM 22.1.8 and analyzed both C++
   sources. DuckDB's full extension format gate and `git diff --check` passed.
@@ -127,6 +128,8 @@ throughput. No material similarity speedup was measured.
    profile mixed provider/model workloads before changing batching or grouping.
 
 Remaining numerical limits should stay explicit: the JSON Schema implementation
-is a documented subset, exact integer guarantees cover 64-bit integers, and
-non-integer schema arithmetic remains floating point. A successful schema check
+is a documented subset, BIGINT projection is limited to signed 64-bit values,
+projected DOUBLE fields use floating point, and non-integer `multipleOf` uses
+floating-point tolerance. Numeric lexemes converting to non-finite doubles are
+rejected. A successful schema check
 does not establish factual accuracy of an AI-generated answer.
