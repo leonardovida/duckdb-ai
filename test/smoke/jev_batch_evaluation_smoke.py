@@ -21,6 +21,38 @@ def run(duckdb_override=None):
     duckdb = Path(duckdb_override) if duckdb_override else root / "build/release/duckdb"
     script = root / "examples/jev_batch_evaluation.py"
     evaluator = runpy.run_path(str(script))
+    metrics = evaluator["classification_metrics"](
+        [
+            {"label": "a", "prediction": "a", "failed": False},
+            {"label": "a", "prediction": "b", "failed": False},
+            {"label": "a", "prediction": None, "failed": True},
+            {"label": "b", "prediction": "b", "failed": False},
+        ],
+        ["a", "b", "unobserved"],
+    )
+    assert metrics["accuracy"] == 0.5 and metrics["coverage"] == 0.75
+    assert metrics["per_class"]["a"] == {
+        "support": 3,
+        "predicted": 1,
+        "true_positive": 1,
+        "precision": 1,
+        "recall": 1 / 3,
+        "f1": 0.5,
+    }
+    assert metrics["per_class"]["b"]["precision"] == 0.5
+    assert metrics["per_class"]["b"]["recall"] == 1
+    assert metrics["per_class"]["b"]["f1"] == 2 / 3
+    assert metrics["confusion_matrix"]["a"] == {"predictions": {"a": 1, "b": 1, "unobserved": 0}, "failed": 1}
+    assert metrics["per_class"]["unobserved"]["precision"] is None
+    assert metrics["per_class"]["unobserved"]["recall"] is None
+    assert metrics["per_class"]["unobserved"]["f1"] is None
+    assert metrics["macro_f1_labels"] == ["a", "b"]
+    assert metrics["macro_f1"] == (0.5 + 2 / 3) / 2
+    missing = evaluator["classification_metrics"]([{"label": "a", "prediction": None, "failed": True}], ["a"])
+    assert missing["macro_f1"] == 0 and missing["coverage"] == 0
+    assert missing["per_class"]["a"]["precision"] is None
+    empty = evaluator["classification_metrics"]([], ["a"])
+    assert empty["macro_f1"] is None and empty["accuracy"] is None
     expected = [{"id": "1", "text": "source", "label": "a"}]
     result = subprocess.CompletedProcess([], 1, stdout="", stderr="Binder Error: invalid key smoke-secret-value")
     with patch.dict(os.environ, TYPESAFE_API_KEY="smoke-secret-value"), patch("subprocess.run", return_value=result):
@@ -104,7 +136,15 @@ def run(duckdb_override=None):
         DUCKDB_AI_LOG_INCLUDE_TEXT="1",
     )
 
-    def invoke(input_path, criteria_path, allow_live=True, model="jev-1.13.0", timeout_seconds=None, credentials=True):
+    def invoke(
+        input_path,
+        criteria_path,
+        allow_live=True,
+        model="jev-1.13.0",
+        timeout_seconds=None,
+        credentials=True,
+        gate_options=(),
+    ):
         command = [
             sys.executable,
             str(script),
@@ -121,6 +161,7 @@ def run(duckdb_override=None):
             command.append("--allow-live")
         if timeout_seconds is not None:
             command.extend(["--timeout-seconds", str(timeout_seconds)])
+        command.extend(gate_options)
         child_env = env.copy()
         if not credentials:
             child_env.pop("TYPESAFE_API_KEY")
@@ -162,7 +203,10 @@ def run(duckdb_override=None):
                 [1] * 33 + [8, 8, 8, 8, 1] + [16, 16, 1] + [32, 1]
             )
             assert [run["usage"]["request_operations"] for run in report["runs"]] == [33, 5, 3, 2]
-            assert runs[1]["metrics"] == {
+            assert {
+                key: runs[1]["metrics"][key]
+                for key in ("rows", "correct", "failed", "accuracy", "accuracy_denominator", "failures_in_denominator")
+            } == {
                 "rows": 33,
                 "correct": 32,
                 "failed": 1,
@@ -170,6 +214,11 @@ def run(duckdb_override=None):
                 "accuracy_denominator": 33,
                 "failures_in_denominator": 1,
             }
+            assert runs[1]["metrics"]["coverage"] == 32 / 33
+            assert runs[1]["metrics"]["per_class"]["a'b"]["support"] == 17
+            assert runs[1]["metrics"]["per_class"]["a'b"]["recall"] == 16 / 17
+            assert runs[1]["metrics"]["confusion_matrix"]["a'b"]["failed"] == 1
+            assert runs[8]["metrics"]["confusion_matrix"]["a'b"]["predictions"]["b"] == 1
             assert runs[8]["metrics"]["failed"] == 8
             assert runs[8]["metrics"]["accuracy"] == 24 / 33
             assert runs[8]["agreement_to_batch_1"] == {
@@ -200,6 +249,13 @@ def run(duckdb_override=None):
 
             duplicate = directory / "duplicate.csv"
             duplicate.write_text("id,text,label\n0,ok,a'b\n0,again,a'b\n", encoding="utf-8")
+            gated = invoke(
+                input_path, criteria_path, gate_options=("--min-accuracy", "0.99", "--min-class-recall", "0.9")
+            )
+            assert gated.returncode == 2 and "quality gate failed" in gated.stderr
+            gate_report = json.loads(gated.stdout)
+            assert gate_report["complete"] and not gate_report["quality_gate"]["passed"]
+            assert gate_report["quality_gate"]["failures"]
             requests.clear()
             invalid = invoke(duplicate, criteria_path)
             assert invalid.returncode != 0 and not requests and "duplicate id" in invalid.stderr

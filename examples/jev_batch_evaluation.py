@@ -121,6 +121,73 @@ def safe_diagnostic(detail):
     return next((line.strip()[:500] for line in detail.splitlines() if line.strip()), "no diagnostic available")
 
 
+def classification_metrics(predictions, labels):
+    total = len(predictions)
+    failed = sum(row["failed"] for row in predictions)
+    correct = sum(not row["failed"] and row["prediction"] == row["label"] for row in predictions)
+    confusion = {label: {"predictions": {choice: 0 for choice in labels}, "failed": 0} for label in labels}
+    for row in predictions:
+        if row["failed"]:
+            confusion[row["label"]]["failed"] += 1
+        else:
+            confusion[row["label"]]["predictions"][row["prediction"]] += 1
+    per_class = {}
+    for label in labels:
+        counts = confusion[label]
+        support = sum(counts["predictions"].values()) + counts["failed"]
+        predicted = sum(count["predictions"][label] for count in confusion.values())
+        true_positive = counts["predictions"][label]
+        denominator = support + predicted
+        per_class[label] = {
+            "support": support,
+            "predicted": predicted,
+            "true_positive": true_positive,
+            "precision": true_positive / predicted if predicted else None,
+            "recall": true_positive / support if support else None,
+            "f1": 2 * true_positive / denominator if denominator else None,
+        }
+    observed_labels = [label for label in labels if per_class[label]["support"]]
+    return {
+        "rows": total,
+        "correct": correct,
+        "failed": failed,
+        "accuracy": correct / total if total else None,
+        "accuracy_denominator": total,
+        "failures_in_denominator": failed,
+        "answered": total - failed,
+        "coverage": (total - failed) / total if total else None,
+        "per_class": per_class,
+        "confusion_matrix": confusion,
+        "macro_f1": (
+            sum(per_class[label]["f1"] for label in observed_labels) / len(observed_labels) if observed_labels else None
+        ),
+        "macro_f1_labels": observed_labels,
+    }
+
+
+def check_quality_gate(runs, thresholds, required_labels):
+    failures = []
+    for run in runs:
+        metrics = run["metrics"]
+        for metric in ("accuracy", "macro_f1", "coverage"):
+            minimum = thresholds.get(metric)
+            value = metrics.get(metric)
+            if minimum is not None and (value is None or not math.isfinite(value) or value < minimum):
+                failures.append(f"batch {run['batch_size']}: {metric} below {minimum}")
+        for label in required_labels:
+            values = metrics.get("per_class", {}).get(label)
+            if not values or not values.get("support"):
+                failures.append(f"batch {run['batch_size']}: no ground-truth examples for {label!r}")
+                continue
+            minimum = thresholds.get("class_recall")
+            recall = values.get("recall")
+            if minimum is not None and (recall is None or not math.isfinite(recall) or recall < minimum):
+                failures.append(f"batch {run['batch_size']}: recall for {label!r} below {minimum}")
+    if not runs:
+        failures.append("no evaluation runs")
+    return {"passed": not failures, "thresholds": thresholds, "required_labels": required_labels, "failures": failures}
+
+
 def run_batch(duckdb, input_path, criteria, model, batch_size, expected_rows, timeout_seconds):
     map_sql = criteria_sql(criteria)
     source = sql_string(str(input_path))
@@ -194,21 +261,10 @@ FROM usage;
                 "failed": bool(row["failed"]),
             }
         )
-    correct = sum(row["prediction"] == row["label"] for row in predictions)
-    failed = sum(row["failed"] for row in predictions)
-    total = len(predictions)
-    accuracy = correct / total if total else None
     return {
         "batch_size": batch_size,
         "elapsed_query_wall_ms": elapsed_ms,
-        "metrics": {
-            "rows": total,
-            "correct": correct,
-            "failed": failed,
-            "accuracy": accuracy,
-            "accuracy_denominator": total,
-            "failures_in_denominator": failed,
-        },
+        "metrics": classification_metrics(predictions, list(criteria)),
         "usage": {
             "request_operations": usage.get("request_operations"),
             "prompt_tokens": usage.get("prompt_tokens"),
@@ -255,6 +311,9 @@ def main(argv=None):
         "--timeout-seconds", type=float, default=3600, help="timeout for each batch-size run (default: 3600)"
     )
     parser.add_argument("--allow-live", action="store_true", help="explicitly permit provider calls")
+    for metric in ("accuracy", "macro-f1", "coverage", "class-recall"):
+        parser.add_argument("--min-" + metric, type=float, default=None)
+    parser.add_argument("--required-label", action="append", default=[])
     args = parser.parse_args(argv)
     if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be a finite positive number")
@@ -264,7 +323,14 @@ def main(argv=None):
         parser.error("--model must not be empty")
     if not args.duckdb.is_file():
         parser.error(f"DuckDB executable not found: {args.duckdb}")
+    thresholds = {
+        metric: getattr(args, "min_" + metric) for metric in ("accuracy", "macro_f1", "coverage", "class_recall")
+    }
+    if any(value is not None and (not math.isfinite(value) or value < 0 or value > 1) for value in thresholds.values()):
+        parser.error("quality thresholds must be finite numbers between 0 and 1")
     criteria, criteria_sha256 = load_criteria(args.criteria)
+    if any(label not in criteria for label in args.required_label):
+        parser.error("required labels must exist in the criteria")
     rows, input_sha256 = load_input(args.input, criteria)
     results = []
     report = {
@@ -299,8 +365,12 @@ def main(argv=None):
                 sys.stdout.write("\n")
                 raise RuntimeError(report["error"]) from None
     report["complete"] = True
+    if args.required_label or any(value is not None for value in thresholds.values()):
+        report["quality_gate"] = check_quality_gate(results, thresholds, args.required_label or list(criteria))
     json.dump(report, sys.stdout, ensure_ascii=False, separators=(",", ":"))
     sys.stdout.write("\n")
+    if report.get("quality_gate", {}).get("passed") is False:
+        raise RuntimeError("quality gate failed: " + "; ".join(report["quality_gate"]["failures"]))
 
 
 if __name__ == "__main__":

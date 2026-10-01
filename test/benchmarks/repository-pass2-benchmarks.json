@@ -1,0 +1,119 @@
+{
+  "method": "1024 warm entries; 2000 repeated binds of the newest entry; timer excludes warmup and process startup",
+  "workloads": [
+    {
+      "shared_question_prefix_chars": 0,
+      "rounds": {
+        "before": [
+          {
+            "cached_bind_ms": 290.982,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 304.914,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 329.175,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 321.46,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 325.245,
+            "provider_requests": 1024
+          }
+        ],
+        "after": [
+          {
+            "cached_bind_ms": 272.801,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 276.819,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 285.013,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 295.644,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 277.864,
+            "provider_requests": 1024
+          }
+        ]
+      },
+      "median_ms": {
+        "before": 321.46,
+        "after": 277.864
+      },
+      "speedup": 1.1568968992024875
+    },
+    {
+      "shared_question_prefix_chars": 4096,
+      "rounds": {
+        "before": [
+          {
+            "cached_bind_ms": 458.22,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 500.805,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 483.489,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 563.844,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 590.931,
+            "provider_requests": 1024
+          }
+        ],
+        "after": [
+          {
+            "cached_bind_ms": 324.499,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 287.464,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 333.87,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 392.339,
+            "provider_requests": 1024
+          },
+          {
+            "cached_bind_ms": 337.98,
+            "provider_requests": 1024
+          }
+        ]
+      },
+      "median_ms": {
+        "before": 500.805,
+        "after": 333.87
+      },
+      "speedup": 1.5
+    }
+  ],
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.41",
+  "repetitions": 5,
+  "binary_sha256": {
+    "before": "d90626394026e8f5251c1a018fbd1cb32d6e1b463323595893be996be22c47c9",
+    "after": "328dbe2e6e4e409ba6a3f84fafdcc0abfc44bd85b9bdf7ea380e8c2d24c6ef26"
+  }
+}

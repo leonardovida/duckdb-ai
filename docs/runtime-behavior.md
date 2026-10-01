@@ -109,6 +109,29 @@ an oversized group before any provider call. Hierarchical reduction also stops
 immediately with an explicit error when a provider's intermediate responses do
 not reduce either the chunk count or total byte size.
 
+## Estimated token pacing
+
+Completion reservations include the user prompt, system prompt, response schema,
+and requested output limit (512 tokens when no output limit is supplied). Schema
+text can appear in both the system instructions and the provider's structured
+output field; both transmitted copies count. External model input limits use the
+same input estimate. `max_input_tokens` limits only input; `context_size` limits
+estimated input plus the requested output maximum (512 estimated tokens when unspecified). Both
+limits apply when a profile supplies both. Native output limits are read from the
+request JSON body. For embedding models, both context limits constrain input.
+Profiles may set `token_estimate_multiplier` to a finite value from 1 through 16
+to scale input estimates conservatively for that provider/model; completion
+pacing, context checks, and embedding batching share the multiplier. Choose it
+from measured usage on representative prompts. It does not provide exact
+provider tokenization, and `ai_count_tokens()` retains its unscaled local estimate. Estimates still use roughly one token per four UTF-8 bytes,
+so they do not guarantee exact enforcement of a provider's token quota.
+
+Generated SQL caching for `ai_query_data()` also uses the resolved provider,
+credential fingerprint, and profile options. Rotating credentials or replacing a
+profile therefore creates a new cache key. Recency updates take constant time;
+retained key and SQL text is limited to 64 MiB and 1,024 entries per database.
+Container overhead is additional. Oversized entries are not retained.
+
 ## Cancellation and retries
 
 Provider HTTP calls use libcurl with interrupt-aware progress callbacks. When a
@@ -246,3 +269,14 @@ Numbers whose double conversion is non-finite are rejected. Typed integer
 projection preserves exact values within the signed `BIGINT` range; projected
 `number` fields use DuckDB `DOUBLE` precision. Non-integer `multipleOf` checks
 still use floating-point tolerance.
+
+## Lifetime and persisted diagnostics
+
+`ai_query_cache_stats()` exposes generated SQL cache retention, bounds and
+lookup/eviction counters. `ai_usage_totals()` keeps provider row events, transport
+attempts, failures, cache hits and partial known-token totals independently of
+usage-event eviction. Counters are per database, protected by the existing state
+mutexes, and reset by their corresponding clear function. They are in memory;
+`examples/resumable_enrichment.py` persists each batch's usage snapshot in the same
+transaction as its results, so totals survive process reopening and uncommitted
+snapshots roll back with a crashed batch.

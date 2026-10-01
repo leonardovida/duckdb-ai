@@ -15,6 +15,7 @@ extension repository.
   GEN=ninja make release
   GEN=ninja make test
   python3 test/smoke/mock_provider_smoke.py
+  python3 test/smoke/extension_upload_smoke.py
   PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
   ```
 

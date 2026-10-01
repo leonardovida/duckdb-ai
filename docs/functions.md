@@ -63,7 +63,9 @@ FROM ai_usage();
 | `ai_provider_protocol(provider)` | Scalar | Returns the internal provider protocol. |
 | `ai_usage()` | Table | Returns recent per-database AI usage events. |
 | `ai_usage_summary()` | Table | Returns query-level calls, batches, retries, cache hits, cost, and dropped-event counters. |
-| `ai_clear_usage()` | Table | Clears the per-database usage event buffer. |
+| `ai_usage_totals()` | Table | Returns lifetime provider counters independent of event-buffer eviction. |
+| `ai_query_cache_stats()` | Table | Returns generated SQL cache size, bounds, hits, misses, and evictions. |
+| `ai_clear_usage()` | Table | Clears the per-database usage event buffer and lifetime counters. |
 | `ai_clear_cache()` | Table | Clears per-database in-memory response and generated-SQL caches. |
 | `ai_secrets()` | Table | Lists configured `duckdb_ai` secrets with credentials redacted. |
 | `ai_models()` | Table | Lists safe external-model metadata and validation status. |
@@ -676,11 +678,21 @@ Result: `VARCHAR`
 #### `ai_build_classifier(text, labels[, ...])`
 
 Description: Experimental relation-level `MINIMIZE_COST` workflow. The
-aggregate samples up to `sample_size` rows, labels them with the configured task
+aggregate deterministically samples up to `sample_size` distinct texts across the
+whole relation, labels them with the configured task
 model, embeds the successful samples in packed requests, builds one centroid per
 label, and validates on a deterministic held-out subset. The returned versioned
 artifact includes quality, fallback margin, embedding profile, labels, and
-centroids. Version 1 supports single-label classification only.
+centroids. Version 1 supports single-label classification only. Labels must be
+nonblank and unique ignoring case and surrounding whitespace. Quoting preserves
+commas, quotes, backslashes, and control characters through training and fallback.
+Centroids use an incremental mean to avoid overflowing sums of finite embeddings.
+
+Sampling selects the lowest stable text-hash priorities and merges across worker
+partitions without depending on row order. Identical texts appear only once, so
+exact duplicates cannot leak between training and holdout data. Artifact fields
+`sampling` and `validation_strategy` describe this policy. Near-duplicate records
+still require dataset-level grouping during independent evaluation.
 
 The holdout split runs within each observed label and preserves at least one
 training example for that label. Artifacts with no held-out validation examples
@@ -823,7 +835,9 @@ Result: `VARCHAR` containing a read-only DuckDB `SELECT`
 Description: Table function that generates one read-only DuckDB `SELECT` at bind
 time and executes it as a subquery. Successful generated SQL is cached in the
 current DuckDB database instance for repeated binds with the same question,
-schema context, and output-affecting options. Use `on_error := 'null'` to return
+schema context, resolved provider credentials, model profile, and output-affecting
+options. The cache retains at most 1,024 entries and 64 MiB of key/SQL text, evicting
+least recently used entries; oversized entries bypass caching. Use `on_error := 'null'` to return
 an empty error-shaped relation instead of failing the bind.
 
 With `fix_attempts := N` (0 to 5, default 0), the function verifies the
@@ -1079,6 +1093,40 @@ Result columns: `query_id`, `provider`, `model`, `calls`, `batch_count`,
 `estimated_cost_usd`, `retained_events`, `dropped_events`, `queued_log_events`,
 `dropped_log_events`.
 
+#### `ai_usage_totals()`
+
+Description: One-row snapshot of per-database provider counters since database
+startup or `ai_clear_usage()`, independent of the bounded event buffer. Local
+helper events are excluded. `request_attempts` includes retries and attempted
+transports, including failures; cache hits and requests canceled while waiting
+for pacing do not increment it.
+
+```sql
+SELECT * FROM ai_usage_totals();
+```
+
+Result: `provider_events`, `request_attempts`, `failures`, `cache_hits`,
+`known_total_tokens`, and `unknown_token_events`, all `UBIGINT`. Provider events
+count rows, so a packed request can produce multiple events. Known tokens are the
+sum of event-reported totals, including the existing cached-event accounting;
+they are partial when `unknown_token_events > 0`, and are not a billing total.
+These counters survive event eviction but not database shutdown. Persist snapshots
+for jobs that need totals after reopening, as in the resumable enrichment example.
+
+#### `ai_query_cache_stats()`
+
+Description: One-row snapshot of generated SQL cache retention and lookup counters
+for the current database. It makes no provider request.
+
+```sql
+SELECT * FROM ai_query_cache_stats();
+```
+
+Result: `entries`, `bytes`, `max_entries`, `max_bytes`, `hits`, `misses`,
+`evictions`, and `oversized_skips`, all `UBIGINT`. Bytes count retained SQL and both
+owned key copies; container overhead is additional. `ai_clear_cache()` clears
+entries and resets these counters. Replacing an entry is not an eviction.
+
 #### `ai_clear_usage()`
 
 Description: Clears the current DuckDB database instance's usage event buffer
@@ -1156,7 +1204,8 @@ SELECT * FROM ai_models();
 ```
 
 Embedding profiles can set `max_batch_inputs`, `max_inputs`,
-`max_batch_tokens`, `max_request_bytes`, `context_size` or `max_input_tokens`,
+`max_batch_tokens`, `max_request_bytes`, `context_size`, `max_input_tokens`,
+`token_estimate_multiplier`,
 `embedding_dimensions`, and `native_batch_support` in `options`. Packing uses
 these limits before sending requests and recursively splits provider HTTP 413
 responses. Declared embedding dimensions are validated against provider output.

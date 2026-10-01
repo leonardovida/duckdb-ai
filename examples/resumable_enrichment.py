@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS enrichment_results (
     attempts BIGINT, completed_at TIMESTAMPTZ,
     PRIMARY KEY (source_id, prompt_hash, config_hash)
 );
+CREATE TABLE IF NOT EXISTS enrichment_batch_usage (
+    config_hash VARCHAR, completed_at TIMESTAMPTZ, provider_events UBIGINT,
+    request_attempts UBIGINT, failures UBIGINT, cache_hits UBIGINT,
+    known_total_tokens UBIGINT, unknown_token_events UBIGINT
+);
 BEGIN TRANSACTION;
 CREATE TEMP TABLE pending AS
 SELECT i.*, coalesce(r.attempts, 0) + 1 AS attempts
@@ -64,6 +69,7 @@ INSERT OR REPLACE INTO enrichment_results
 SELECT source_id, prompt_hash, {literal(fingerprint)}, {literal(args.config_version)},
        prompt, result.response, result.error, attempts, current_timestamp
 FROM batch_results;
+INSERT INTO enrichment_batch_usage SELECT {literal(fingerprint)}, current_timestamp, * FROM ai_usage_totals();
 COMMIT;
 SELECT count(*) AS attempted,
        count(*) FILTER (WHERE result.error IS NULL) AS succeeded,

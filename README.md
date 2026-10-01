@@ -24,6 +24,11 @@ reranking, including tested scope and provider-specific limitations.
 
 <img src="docs/assets/duckdb-ai-logo.svg" alt="duckdb-ai: AI functions for DuckDB SQL" width="280">
 
+Cache and usage diagnostics are available through `ai_query_cache_stats()` and
+`ai_usage_totals()`. The [runtime reference](docs/runtime-behavior.md) explains
+retention, token margins, and context limits; the [Jev evaluator](docs/cookbooks/jev-decisions.md)
+provides acceptance gates against independently labeled data.
+
 ## Start here: agents and integrations
 
 - **Package name:** `duckdb-ai`. **DuckDB extension name:** `ai`.

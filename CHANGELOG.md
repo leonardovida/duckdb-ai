@@ -5,6 +5,45 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## Unreleased
+
+### Fixed
+
+- Classifier centroid accumulation avoids overflowing finite embeddings. Labels
+  preserve commas, escaped characters, literal quotes, whitespace, and fences
+  through training and fallback; ambiguous duplicate labels fail early.
+- Generated SQL cache keys include resolved credentials and model profiles, so
+  credential rotation and profile replacement invalidate earlier entries.
+- Completion token reservations and input limits include system prompts and
+  response schemas.
+- Release signing uses private temporary staging with failure cleanup. Unsigned
+  reruns reset signatures; unsupported signature sizes fail explicitly, and
+  WebAssembly compression and upload headers agree for every wasm target.
+
+### Performance
+
+- Generated SQL cache recency updates take constant time. Retained key and SQL
+  text is bounded by 64 MiB as well as the existing 1,024-entry limit.
+
+### Diagnostics and validation
+
+- Added `ai_query_cache_stats()` and `ai_usage_totals()` without changing existing
+  result schemas. Resumable enrichment persists batch counters with its results.
+- Classifier sampling now selects distinct texts across the entire relation using
+  stable bottom-k priorities, with identical texts isolated from holdout leakage.
+- Model profiles support conservative `token_estimate_multiplier` margins.
+  `context_size` reserves output as well as input; `max_input_tokens` remains an
+  independent input-only limit.
+- Accuracy thresholds and required-label gates are available in the labeled
+  evaluator, with independent multilingual synthetic fixtures in CI.
+- CI now exercises owned C++ ASan/UBSan, deterministic schema/chunk fuzz cases,
+  shared-connection stress, and macOS/Windows extension checks on every change.
+
+### Evaluation
+
+- The labeled Jev evaluator reports per-class precision, recall, F1, support,
+  macro F1, answer coverage, and a confusion matrix including failed predictions.
+
 ## 0.6.1 - 2026-10-01
 
 ### Fixed

@@ -193,7 +193,14 @@ the command exits nonzero and writes the completed comparisons with
 already have incurred charges. Successful reports have `complete: true`.
 
 The report retains predictions by identifier for inspection. Accuracy counts
-missing predictions as incorrect. Agreement compares each run with batch size
+missing predictions as incorrect. It also reports answer coverage, per-class
+support, precision, recall, F1, and a confusion matrix with a separate failed
+count for each actual class. Failures reduce recall and F1. Precision is `null`
+when a class has no predictions; recall is `null` when it has no labeled examples.
+Macro F1 averages the classes present in the labeled data, listed explicitly in
+`macro_f1_labels`; unobserved classes remain visible in the per-class table.
+These metrics compare predictions with the supplied ground-truth labels.
+Agreement compares each run with batch size
 1 among rows where both runs returned a prediction. Coverage counts show
 how many rows each run answered. A missing prediction never counts as agreement.
 Inspect coverage before interpreting agreement, since it excludes missing
@@ -218,6 +225,27 @@ speedup or prediction stability. Repeat comparisons and inspect disagreements
 before adopting a batch size. Provider-side caching, service load and model
 changes can affect results. The local mock test establishes the evaluator's
 request accounting and metrics, not Jev's live quality or costs.
+
+## Gate changes against labeled data
+
+Supply acceptance thresholds to make the evaluator fail when any tested batch
+size misses them:
+
+```sh
+python3 examples/jev_batch_evaluation.py --duckdb build/release/duckdb \
+  --input labeled-tickets.csv --criteria criteria.json --model jev-1.13.0 \
+  --allow-live --min-accuracy 0.95 --min-macro-f1 0.9 \
+  --min-coverage 0.99 --min-class-recall 0.8
+```
+
+The JSON report contains `quality_gate`, including failing metrics and labels;
+a failed gate exits with status 2. When gating is enabled, every criteria label
+must have ground-truth examples by default. Repeated `--required-label` options
+may explicitly select required classes. Use labels independent of the model's
+training/teacher outputs, keep minority and out-of-domain cases, and group related
+records when splitting datasets. Thresholds must reflect the application's error
+costs. CI includes a hand-authored synthetic multilingual fixture that verifies
+gate arithmetic and failure handling; it does not certify production model quality.
 
 ## Choose the appropriate interface
 
