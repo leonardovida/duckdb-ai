@@ -199,8 +199,9 @@ as `0` because no provider HTTP request was made.
 The maximum number of cached entries defaults to `1024`. Set
 `cache_max_entries := ...`, `duckdb_ai_cache_max_entries`, or
 `DUCKDB_AI_CACHE_MAX_ENTRIES` to change the bound. Use `0` to disable
-response-cache storage. Cached response bodies and keys also have a hard 64 MiB
-per-database bound; an individual response larger than that is not cached.
+response-cache storage. Cached response bodies and both retained key copies also
+have a hard 64 MiB per-database bound; entries exceeding that bound are not cached.
+Container overhead is additional.
 
 `ai_query_data()` also keeps a small in-memory generated-SQL cache for successful
 binds. `ai_clear_cache()` clears the response, generated-SQL, and similarity

@@ -1193,9 +1193,8 @@ std::string ResponseCacheKey(const std::string &operation, const ProviderConfig 
 	       api_key_hash + "\n" + payload;
 }
 
-void TouchResponseCacheEntry(ProviderRuntimeState &state, CachedHttpResponse &entry, const std::string &cache_key) {
-	state.response_cache_order.erase(entry.order_entry);
-	entry.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
+void TouchResponseCacheEntry(ProviderRuntimeState &state, CachedHttpResponse &entry) {
+	state.response_cache_order.splice(state.response_cache_order.end(), state.response_cache_order, entry.order_entry);
 }
 
 void RemoveCachedResponse(ProviderRuntimeState &state, const std::string &cache_key) {
@@ -1204,7 +1203,7 @@ void RemoveCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 	if (entry == state.response_cache.end()) {
 		return;
 	}
-	auto entry_bytes = cache_key.size() + entry->second.response.body.size();
+	auto entry_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 	state.response_cache_bytes =
 	    state.response_cache_bytes >= entry_bytes ? state.response_cache_bytes - entry_bytes : 0;
 	state.response_cache_order.erase(entry->second.order_entry);
@@ -1219,7 +1218,7 @@ bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 		return false;
 	}
 	if (ResponseCacheEntryExpired(entry->second, options)) {
-		auto entry_bytes = cache_key.size() + entry->second.response.body.size();
+		auto entry_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 		state.response_cache_bytes =
 		    state.response_cache_bytes >= entry_bytes ? state.response_cache_bytes - entry_bytes : 0;
 		state.response_cache_order.erase(entry->second.order_entry);
@@ -1230,35 +1229,42 @@ bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 	response.elapsed_ms = 0;
 	response.retries = 0;
 	response.cache_hit = true;
-	TouchResponseCacheEntry(state, entry->second, cache_key);
+	TouchResponseCacheEntry(state, entry->second);
 	return true;
 }
 
 void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const HttpResponse &response,
                          const CompletionOptions &options) {
 	auto max_entries = MaxResponseCacheEntries(options);
-	auto response_bytes = cache_key.size() + response.body.size();
-	if (max_entries == 0 || response_bytes > DEFAULT_MAX_RESPONSE_CACHE_BYTES) {
+	// The map and recency list each retain their own key copy.
+	if (max_entries == 0 || cache_key.size() > DEFAULT_MAX_RESPONSE_CACHE_BYTES / 2 ||
+	    response.body.size() > DEFAULT_MAX_RESPONSE_CACHE_BYTES - 2 * cache_key.size()) {
 		return;
 	}
+	auto response_bytes = 2 * cache_key.size() + response.body.size();
 	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	CachedHttpResponse cached;
+	cached.response = response;
+	cached.response.cache_hit = false;
+	cached.created_at = std::chrono::steady_clock::now();
 	auto entry = state.response_cache.find(cache_key);
 	if (entry != state.response_cache.end()) {
-		auto previous_bytes = cache_key.size() + entry->second.response.body.size();
+		auto previous_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 		state.response_cache_bytes =
 		    state.response_cache_bytes >= previous_bytes ? state.response_cache_bytes - previous_bytes : 0;
-		entry->second.response = response;
-		entry->second.response.cache_hit = false;
-		entry->second.created_at = std::chrono::steady_clock::now();
+		cached.order_entry = entry->second.order_entry;
+		entry->second = std::move(cached);
 		state.response_cache_bytes += response_bytes;
-		TouchResponseCacheEntry(state, entry->second, cache_key);
+		TouchResponseCacheEntry(state, entry->second);
 	} else {
-		CachedHttpResponse cached;
-		cached.response = response;
-		cached.response.cache_hit = false;
-		cached.created_at = std::chrono::steady_clock::now();
 		cached.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
-		state.response_cache.emplace(cache_key, std::move(cached));
+		auto order_entry = cached.order_entry;
+		try {
+			state.response_cache.emplace(cache_key, std::move(cached));
+		} catch (...) {
+			state.response_cache_order.erase(order_entry);
+			throw;
+		}
 		state.response_cache_bytes += response_bytes;
 	}
 	while (
@@ -1268,7 +1274,7 @@ void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_k
 		state.response_cache_order.pop_front();
 		auto oldest_entry = state.response_cache.find(oldest);
 		if (oldest_entry != state.response_cache.end()) {
-			auto oldest_bytes = oldest.size() + oldest_entry->second.response.body.size();
+			auto oldest_bytes = 2 * oldest.size() + oldest_entry->second.response.body.size();
 			state.response_cache_bytes =
 			    state.response_cache_bytes >= oldest_bytes ? state.response_cache_bytes - oldest_bytes : 0;
 			state.response_cache.erase(oldest_entry);

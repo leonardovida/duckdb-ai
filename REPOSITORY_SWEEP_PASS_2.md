@@ -29,6 +29,7 @@ actual uploads, release publication, or upstream community changes were made.
 | SQL cache bounds | A 1,024-entry cap still permitted large retained key/schema strings with no byte limit. | Retained key and SQL text is capped at 64 MiB, counting both owned key copies. Oversized entries bypass caching, and replacements remove old entries. Container overhead is additional. |
 | SQL cache recency | Every cache hit searched and erased a deque entry under the cache mutex. | Stored list iterators and splice update recency in constant time; map lookup and key hashing still depend on key length. |
 | SQL cache allocation failures | An allocation failure during insertion could leave retained-byte accounting or the recency list inconsistent. | Failed insertions roll back the list entry, and byte accounting changes only after insertion succeeds. |
+| Provider response cache | Recency refresh allocated a new list node after erasing the old one; insertion/replacement failures could leave inconsistent state, and bounds counted one of two retained key copies. | Recency uses allocation-free splice, failed insertions roll back, replacements prepare their copy before updating accounting, and both keys count toward the bound. |
 | Estimated completion budgets | Reservations omitted separate system prompts and response schemas; input-limit checks omitted schemas. | Reservations include all three input components and the requested/default output estimate. Schema copies in instructions and structured-output fields both count. |
 | Unsigned packaging | Truncating an existing 256-byte signature file left its previous signature intact. | Every unsigned run starts with a fresh zero-filled signature. The v0.6.1 behavior was reproduced with a sentinel signature. |
 | Signing workspace and cleanup | Signing used caller-owned `private.pem`; the hash helper's `x*` files could overwrite/delete caller files, and signing failures left the key behind. | Private staging isolates all hash/signing files, restricts permissions, and cleans up on failure and exit. Existing caller sentinels remain untouched. |
@@ -46,6 +47,9 @@ normalization of a literal quoted label before its fix.
 An allocation-fault harness using the actual cache insertion function reproduced
 invalid cache accounting before the fix. Nine injected allocation failures now
 preserve cache invariants, including replacement and subsequent eviction.
+The provider-cache fault harness recovers from seven injected allocation failures,
+verifies replacement/removal/eviction accounting and oversized-entry bypass, and
+confirms recency refresh succeeds with all allocations disabled.
 
 New runtime checks cover opposite-sign means, eleven label shapes through three
 classification paths, account/profile changes, byte eviction with recency refresh,
