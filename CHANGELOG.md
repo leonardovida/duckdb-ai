@@ -5,6 +5,33 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## 0.6.1 - 2026-10-01
+
+### Fixed
+
+- Typed completion validation now runs before success accounting and evicts
+  rejected cached responses. Record projection preserves exact 64-bit integers
+  and respects `fail_on_error` for projection failures.
+- JSON Schema validation now enforces union types and nested boolean schemas,
+  counts Unicode code points, and preserves exact 64-bit integer comparisons.
+- Cosine similarity handles extreme finite embedding magnitudes, and cached
+  embeddings retain double precision.
+- Classifier holdouts retain training examples for each observed class; artifacts
+  without validation examples are marked unusable.
+- Batch-size recommendations reject results outside the BIGINT range.
+
+### Performance
+
+- Chunk metadata advances through the document instead of rescanning every
+  prefix. Usage-buffer eviction now takes constant time, and per-request model
+  pricing avoids copying the complete price catalog.
+
+### Maintenance
+
+- CI now analyzes extension sources directly under `src/` with clang-tidy.
+- Added deterministic regressions and updated three documentation dependencies
+  to versions without currently reported npm audit vulnerabilities.
+
 ## 0.6.0 - 2026-09-30
 
 ### Added

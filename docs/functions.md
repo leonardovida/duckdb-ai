@@ -271,6 +271,10 @@ Description: Table function that calls a completion provider, validates the JSON
 response against `response_schema`, and projects top-level schema properties as
 typed DuckDB columns.
 
+Schema `integer` fields project as `BIGINT` without rounding through `DOUBLE`.
+Values outside the signed 64-bit range fail projection. With
+`fail_on_error := false`, a failed table result contains null columns.
+
 Example:
 
 ```sql
@@ -290,6 +294,10 @@ Description: Scalar function that calls a completion provider for each input row
 and returns a typed `STRUCT` projected from the top-level object properties in
 `response_schema`. The schema must be constant so DuckDB can bind the return
 type.
+
+Integer fields preserve exact `BIGINT` values. Schema or projection failures
+follow `on_error`/`fail_on_error`; with `fail_on_error := false`, the entire
+record is `NULL`.
 
 Example:
 
@@ -374,7 +382,9 @@ Result: `VARCHAR` containing provider request JSON
 #### `ai_similarity(left_text, right_text[, model[, provider]])`
 
 Description: Embeds both input strings with the same provider/model and returns
-cosine similarity.
+cosine similarity in `[-1, 1]`. Norms are scaled to support finite coordinates
+with very large or small magnitudes. Zero-norm vectors are rejected;
+`fail_on_error := false` returns `NULL` for those failures.
 
 Example:
 
@@ -671,6 +681,12 @@ model, embeds the successful samples in packed requests, builds one centroid per
 label, and validates on a deterministic held-out subset. The returned versioned
 artifact includes quality, fallback margin, embedding profile, labels, and
 centroids. Version 1 supports single-label classification only.
+
+The holdout split runs within each observed label and preserves at least one
+training example for that label. Artifacts with no held-out validation examples
+are marked unusable even when `quality_threshold := 0`. Reported accuracy
+measures agreement with the labeling model on this sample; validate the artifact
+against separately labeled, representative data before production use.
 
 Example:
 
@@ -981,7 +997,8 @@ Result: `BIGINT`
 Description: Returns a conservative number of rows to process per batch or
 minute for a rate-limited AI job. `input_tokens_per_row` can come from
 `avg(ai_count_tokens(prompt))`, `max_output_tokens_per_row` should match the
-planned `max_tokens`, and `safety_factor` defaults to `0.8`.
+planned `max_tokens`, and `safety_factor` defaults to `0.8`. Results outside
+the `BIGINT` range raise an error.
 
 Example:
 

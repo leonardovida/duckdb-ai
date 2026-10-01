@@ -64,9 +64,10 @@ constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr idx_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr size_t MAX_PROMPT_QUERY_CACHE_ENTRIES = 1024;
 constexpr size_t MAX_SIMILARITY_QUERY_CACHES = 8;
-constexpr size_t MAX_SIMILARITY_QUERY_CACHE_BYTES = 8 * 1024 * 1024;
+constexpr size_t MAX_SIMILARITY_QUERY_CACHE_BYTES = 8ULL * 1024 * 1024;
 constexpr int64_t MAX_SQL_FIX_ATTEMPTS = 5;
-std::atomic<uint64_t> NEXT_QUERY_ID {1};
+// Process-wide atomic IDs are intentionally mutable.
+std::atomic<uint64_t> NEXT_QUERY_ID {1}; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 // Tripwire so CompletionOptionsEqual is updated when CompletionOptions gains fields. The size is
 // ABI-specific (std::string layout differs per standard library), so only enforce it on the
@@ -1845,11 +1846,14 @@ struct SimilarityCacheState : public ObjectCacheEntry {
 	std::deque<idx_t> recency_order;
 };
 
-ProviderExecutorState fallback_provider_executor;
+ProviderExecutorState &FallbackProviderExecutor() {
+	static ProviderExecutorState executor;
+	return executor;
+}
 
 ProviderExecutorState &ProviderExecutor(const duckdb_ai::CompletionOptions &options) {
 	if (!options.client_context) {
-		return fallback_provider_executor;
+		return FallbackProviderExecutor();
 	}
 	return *ObjectCache::GetObjectCache(*options.client_context)
 	            .GetOrCreate<ProviderExecutorState>(ProviderExecutorState::ObjectType());
@@ -2122,14 +2126,17 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 	}
 
 	RunProviderJobs(jobs, [&](ProviderStringJob &job) {
-		job.output = bind_data.request_json ? duckdb_ai::BuildRequestJson(job.input, job.options)
-		                                    : duckdb_ai::Complete(job.input, job.options).text;
-		if (bind_data.validate_json_output) {
-			std::string error;
-			if (!ValidateJsonCompletionOutput(job.output, job.options.response_schema, error)) {
-				throw InvalidInputException("ai_complete_json expected valid JSON output: %s", error);
-			}
-		}
+		job.output =
+		    bind_data.request_json
+		        ? duckdb_ai::BuildRequestJson(job.input, job.options)
+		        : duckdb_ai::Complete(job.input, job.options, [&](const duckdb_ai::CompletionResult &response) {
+			          if (bind_data.validate_json_output) {
+				          std::string error;
+				          if (!ValidateJsonCompletionOutput(response.text, job.options.response_schema, error)) {
+					          throw InvalidInputException("ai_complete_json expected valid JSON output: %s", error);
+				          }
+			          }
+		          }).text;
 	});
 
 	for (auto &job : jobs) {
@@ -2358,11 +2365,14 @@ Value AiRecordValue(const duckdb_ai::JsonExtractedValue &value, const AiRecordCo
 		if (value.kind != duckdb_ai::JsonExtractedKind::NUMBER || !value.number_is_integer) {
 			throw InvalidInputException("ai_complete_record field \"%s\" expected integer", column.name);
 		}
-		if (value.number_value < static_cast<double>(std::numeric_limits<int64_t>::min()) ||
-		    value.number_value > static_cast<double>(std::numeric_limits<int64_t>::max())) {
+		{
+			Value integer;
+			std::string error;
+			if (Value(value.json_value).DefaultTryCastAs(column.type, integer, &error)) {
+				return integer;
+			}
 			throw InvalidInputException("ai_complete_record field \"%s\" integer is out of BIGINT range", column.name);
 		}
-		return Value::BIGINT(static_cast<int64_t>(value.number_value));
 	case LogicalTypeId::DOUBLE:
 		if (value.kind != duckdb_ai::JsonExtractedKind::NUMBER) {
 			throw InvalidInputException("ai_complete_record field \"%s\" expected number", column.name);
@@ -2444,6 +2454,28 @@ unique_ptr<GlobalTableFunctionState> AiRecordInit(ClientContext &, TableFunction
 	return make_uniq<AiRecordScanData>();
 }
 
+vector<Value> ProjectAiRecord(const std::string &response, const std::string &schema,
+                              const vector<AiRecordColumn> &columns, const std::string &function_name) {
+	std::string error;
+	if (!ValidateJsonCompletionOutput(response, schema, error)) {
+		throw InvalidInputException("%s expected valid JSON output: %s", function_name, error);
+	}
+	vector<std::string> field_names;
+	for (auto &column : columns) {
+		field_names.push_back(column.name);
+	}
+	vector<duckdb_ai::JsonExtractedValue> values;
+	if (!duckdb_ai::ExtractJsonObjectFields(response, field_names, values, error)) {
+		throw InvalidInputException("%s could not project JSON output: %s", function_name, error);
+	}
+	vector<Value> projected;
+	projected.reserve(columns.size());
+	for (idx_t column_index = 0; column_index < columns.size(); column_index++) {
+		projected.push_back(AiRecordValue(values[column_index], columns[column_index]));
+	}
+	return projected;
+}
+
 void AiRecordFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &state = input.global_state->Cast<AiRecordScanData>();
 	if (state.emitted) {
@@ -2455,22 +2487,12 @@ void AiRecordFunction(ClientContext &context, TableFunctionInput &input, DataChu
 		duckdb_ai::AttachProviderRuntimeState(options, context);
 		ApplyAiProviderSecret(context, options);
 		ApplyJsonCompletionSystemPrompt(options, bind_data.response_schema);
-		auto result = duckdb_ai::Complete(bind_data.prompt, options).text;
-		std::string error;
-		if (!ValidateJsonCompletionOutput(result, bind_data.response_schema, error)) {
-			throw InvalidInputException("ai_complete_record expected valid JSON output: %s", error);
-		}
-		vector<std::string> field_names;
-		field_names.reserve(bind_data.columns.size());
-		for (auto &column : bind_data.columns) {
-			field_names.push_back(column.name);
-		}
-		vector<duckdb_ai::JsonExtractedValue> values;
-		if (!duckdb_ai::ExtractJsonObjectFields(result, field_names, values, error)) {
-			throw InvalidInputException("ai_complete_record could not project JSON output: %s", error);
-		}
+		vector<Value> values;
+		duckdb_ai::Complete(bind_data.prompt, options, [&](const duckdb_ai::CompletionResult &response) {
+			values = ProjectAiRecord(response.text, bind_data.response_schema, bind_data.columns, "ai_complete_record");
+		});
 		for (idx_t column_index = 0; column_index < bind_data.columns.size(); column_index++) {
-			output.SetValue(column_index, 0, AiRecordValue(values[column_index], bind_data.columns[column_index]));
+			output.SetValue(column_index, 0, values[column_index]);
 		}
 		output.SetCardinality(1);
 	} catch (std::exception &) {
@@ -2485,14 +2507,9 @@ void AiRecordFunction(ClientContext &context, TableFunctionInput &input, DataChu
 	state.emitted = true;
 }
 
-Value AiRecordStructValue(const vector<AiRecordColumn> &columns, const vector<duckdb_ai::JsonExtractedValue> &values) {
-	vector<Value> children;
-	children.reserve(columns.size());
-	for (idx_t column_index = 0; column_index < columns.size(); column_index++) {
-		children.push_back(AiRecordValue(values[column_index], columns[column_index]));
-	}
-	return Value::STRUCT(AiRecordStructType(columns), std::move(children));
-}
+struct ProviderRecordJob : public ProviderStringJob {
+	Value record;
+};
 
 unique_ptr<FunctionData> AiExtractRecordBind(ClientContext &context, ScalarFunction &bound_function,
                                              vector<unique_ptr<Expression>> &arguments) {
@@ -2545,7 +2562,7 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
 
-	std::vector<ProviderStringJob> jobs;
+	std::vector<ProviderRecordJob> jobs;
 	jobs.reserve(args.size());
 	std::vector<SecretResolutionCacheEntry> secret_cache;
 	for (idx_t row = 0; row < args.size(); row++) {
@@ -2565,7 +2582,7 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 		try {
 			ApplyAiProviderSecretCached(state.GetContext(), options, secret_cache);
 			ApplyJsonCompletionSystemPrompt(options, bind_data.response_schema);
-			ProviderStringJob job;
+			ProviderRecordJob job;
 			job.row = row;
 			job.options = options;
 			job.fail_on_error = options.fail_on_error;
@@ -2579,35 +2596,18 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 		}
 	}
 
-	RunProviderJobs(jobs,
-	                [&](ProviderStringJob &job) { job.output = duckdb_ai::Complete(job.input, job.options).text; });
+	RunProviderJobs(jobs, [&](ProviderRecordJob &job) {
+		duckdb_ai::Complete(job.input, job.options, [&](const duckdb_ai::CompletionResult &response) {
+			job.record = Value::STRUCT(
+			    AiRecordStructType(bind_data.columns),
+			    ProjectAiRecord(response.text, bind_data.response_schema, bind_data.columns, "ai_extract_record"));
+		});
+	});
 
 	for (auto &job : jobs) {
-		if (!ProviderJobResultAvailable(job, result_validity)) {
-			continue;
+		if (ProviderJobResultAvailable(job, result_validity)) {
+			result.SetValue(job.row, job.record);
 		}
-		std::string error;
-		if (!ValidateJsonCompletionOutput(job.output, job.options.response_schema, error)) {
-			if (job.fail_on_error) {
-				throw InvalidInputException("ai_extract_record expected valid JSON output: %s", error);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		vector<std::string> field_names;
-		field_names.reserve(bind_data.columns.size());
-		for (auto &column : bind_data.columns) {
-			field_names.push_back(column.name);
-		}
-		vector<duckdb_ai::JsonExtractedValue> values;
-		if (!duckdb_ai::ExtractJsonObjectFields(job.output, field_names, values, error)) {
-			if (job.fail_on_error) {
-				throw InvalidInputException("ai_extract_record could not project JSON output: %s", error);
-			}
-			result_validity.SetInvalid(job.row);
-			continue;
-		}
-		result.SetValue(job.row, AiRecordStructValue(bind_data.columns, values));
 	}
 }
 
@@ -2767,18 +2767,34 @@ double CosineSimilarity(const std::vector<double> &left, const std::vector<doubl
 		throw InvalidInputException("AI embeddings must have the same non-zero dimension for ai_similarity");
 	}
 
+	// Scale before squaring so finite, very large or small coordinates retain their
+	// direction without overflowing or underflowing the norms.
+	double left_scale = 0;
+	double right_scale = 0;
+	for (idx_t i = 0; i < left.size(); i++) {
+		if (!std::isfinite(left[i]) || !std::isfinite(right[i])) {
+			throw InvalidInputException("AI embeddings must contain only finite values for ai_similarity");
+		}
+		left_scale = std::max(left_scale, std::fabs(left[i]));
+		right_scale = std::max(right_scale, std::fabs(right[i]));
+	}
+	if (left_scale == 0 || right_scale == 0) {
+		throw InvalidInputException("AI embeddings must have non-zero norm for ai_similarity");
+	}
 	double dot = 0;
 	double left_norm = 0;
 	double right_norm = 0;
 	for (idx_t i = 0; i < left.size(); i++) {
-		dot += left[i] * right[i];
-		left_norm += left[i] * left[i];
-		right_norm += right[i] * right[i];
+		auto left_value = left[i] / left_scale;
+		auto right_value = right[i] / right_scale;
+		dot += left_value * right_value;
+		left_norm += left_value * left_value;
+		right_norm += right_value * right_value;
 	}
 	if (left_norm == 0 || right_norm == 0) {
 		throw InvalidInputException("AI embeddings must have non-zero norm for ai_similarity");
 	}
-	return dot / (std::sqrt(left_norm) * std::sqrt(right_norm));
+	return std::max(-1.0, std::min(1.0, dot / (std::sqrt(left_norm) * std::sqrt(right_norm))));
 }
 
 bool IsAsciiWhitespace(char c);
@@ -2896,12 +2912,14 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		}
 		AppendSystemPrompt(job.options, generic_score ? BuildScoreSystemPrompt() : BuildRerankSystemPrompt());
 		auto prompt = generic_score ? BuildScorePrompt(job.left, job.right) : BuildRerankPrompt(job.left, job.right);
-		auto output = duckdb_ai::Complete(prompt, job.options).text;
-		auto parsed = generic_score ? ParseStructuredScore(output, job.output) : ParseRerankScore(output, job.output);
-		if (!parsed) {
-			throw InvalidInputException("%s expected a numeric score from 0 to 1, got: %s", func_expr.function.name,
-			                            output);
-		}
+		duckdb_ai::Complete(prompt, job.options, [&](const duckdb_ai::CompletionResult &response) {
+			auto parsed = generic_score ? ParseStructuredScore(response.text, job.output)
+			                            : ParseRerankScore(response.text, job.output);
+			if (!parsed) {
+				throw InvalidInputException("%s expected a numeric score from 0 to 1, got: %s", func_expr.function.name,
+				                            response.text);
+			}
+		});
 	});
 
 	for (auto &job : jobs) {
@@ -3922,7 +3940,7 @@ std::string ValueToOptionalString(const Value &value_p) {
 	if (value_p.IsNull()) {
 		return "";
 	}
-	auto value = value_p;
+	const auto &value = value_p;
 	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 }
 
@@ -4315,17 +4333,17 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			auto config = duckdb_ai::ResolveProvider(job.options);
 			std::string choice;
 			double probability = 0;
-			auto response = duckdb_ai::Complete(
-			    BuildJevChoiceRequest(job.input, job.parameter, bind_data, config.model), job.options);
-			if (!duckdb_ai::ParseJevAnswer(response.text, "classification", "choice", choice, probability)) {
-				throw InvalidInputException("ai_classify expected a valid TypeSafe Jev choice answer");
-			}
-			std::string canonical;
-			std::string error;
-			if (!CanonicalClassificationLabel(job.parameter, choice, canonical, error)) {
-				throw InvalidInputException("ai_classify %s", error);
-			}
-			job.output = std::move(canonical);
+			duckdb_ai::Complete(
+			    BuildJevChoiceRequest(job.input, job.parameter, bind_data, config.model), job.options,
+			    [&](const duckdb_ai::CompletionResult &response) {
+				    if (!duckdb_ai::ParseJevAnswer(response.text, "classification", "choice", choice, probability)) {
+					    throw InvalidInputException("ai_classify expected a valid TypeSafe Jev choice answer");
+				    }
+				    std::string error;
+				    if (!CanonicalClassificationLabel(job.parameter, choice, job.output, error)) {
+					    throw InvalidInputException("ai_classify %s", error);
+				    }
+			    });
 			return;
 		}
 		if (bind_data.task == AiTaskKind::REDACT &&
@@ -4339,15 +4357,15 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		}
 		AppendSystemPrompt(job.options, system_prompt);
 		auto prompt = BuildTaskUserPrompt(bind_data.task, job.input, job.parameter);
-		job.output = duckdb_ai::Complete(prompt, job.options).text;
-		if (bind_data.task == AiTaskKind::CLASSIFY) {
-			std::string canonical;
-			std::string error;
-			if (!CanonicalClassificationLabel(job.parameter, job.output, canonical, error)) {
-				throw InvalidInputException("ai_classify %s", error);
+		duckdb_ai::Complete(prompt, job.options, [&](const duckdb_ai::CompletionResult &response) {
+			job.output = response.text;
+			if (bind_data.task == AiTaskKind::CLASSIFY) {
+				std::string error;
+				if (!CanonicalClassificationLabel(job.parameter, response.text, job.output, error)) {
+					throw InvalidInputException("ai_classify %s", error);
+				}
 			}
-			job.output = std::move(canonical);
-		}
+		});
 	});
 
 	for (auto &job : jobs) {
@@ -4418,14 +4436,15 @@ void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &r
 		AppendSystemPrompt(job.options,
 		                   BuildMultiLabelClassifySystemPrompt(job.parameter) + BuildClassificationGuidance(bind_data));
 		auto prompt = BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter);
-		auto output = StripMarkdownJsonFence(duckdb_ai::Complete(prompt, job.options).text);
-		std::string error;
-		if (!duckdb_ai::ExtractJsonStringArray(output, job.output, error)) {
-			throw InvalidInputException("ai_classify_labels expected a JSON array of strings: %s", error);
-		}
-		if (!ValidateMultiClassificationLabels(job.parameter, job.output, error)) {
-			throw InvalidInputException("ai_classify_labels %s", error);
-		}
+		duckdb_ai::Complete(prompt, job.options, [&](const duckdb_ai::CompletionResult &response) {
+			std::string error;
+			if (!duckdb_ai::ExtractJsonStringArray(StripMarkdownJsonFence(response.text), job.output, error)) {
+				throw InvalidInputException("ai_classify_labels expected a JSON array of strings: %s", error);
+			}
+			if (!ValidateMultiClassificationLabels(job.parameter, job.output, error)) {
+				throw InvalidInputException("ai_classify_labels %s", error);
+			}
+		});
 	});
 
 	for (auto &job : jobs) {
@@ -4561,15 +4580,17 @@ void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &r
 	RunProviderJobs(jobs, [&](ProviderStringListJob &job) {
 		AppendSystemPrompt(job.options,
 		                   BuildMultiLabelClassifySystemPrompt(job.parameter) + BuildClassificationGuidance(bind_data));
-		auto output = StripMarkdownJsonFence(
-		    duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter), job.options).text);
-		std::string error;
-		if (!duckdb_ai::ExtractJsonStringArray(output, job.output, error)) {
-			throw InvalidInputException("ai_classify_result expected a JSON array of strings: %s", error);
-		}
-		if (!ValidateMultiClassificationLabels(job.parameter, job.output, error)) {
-			throw InvalidInputException("ai_classify_result %s", error);
-		}
+		duckdb_ai::Complete(
+		    BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter), job.options,
+		    [&](const duckdb_ai::CompletionResult &response) {
+			    std::string error;
+			    if (!duckdb_ai::ExtractJsonStringArray(StripMarkdownJsonFence(response.text), job.output, error)) {
+				    throw InvalidInputException("ai_classify_result expected a JSON array of strings: %s", error);
+			    }
+			    if (!ValidateMultiClassificationLabels(job.parameter, job.output, error)) {
+				    throw InvalidInputException("ai_classify_result %s", error);
+			    }
+		    });
 	});
 	for (auto &job : jobs) {
 		std::string metadata;
@@ -4601,7 +4622,7 @@ std::vector<std::string> ReadClassifierLabels(ClientContext &context, Expression
 		if (child.IsNull()) {
 			throw BinderException("ai_build_classifier labels must not contain NULL");
 		}
-		auto label_value = child;
+		const auto &label_value = child;
 		auto label = StringValue::Get(label_value.DefaultCastAs(LogicalType::VARCHAR));
 		if (label.empty() || !seen.insert(LowerAscii(label)).second) {
 			throw BinderException("ai_build_classifier labels must be non-empty and unique");
@@ -4766,8 +4787,14 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 	auto labels_text = JoinClassifierLabels(bind_data.labels);
 	RunProviderJobs(label_jobs, [&](ProviderStringJob &job) {
 		AppendSystemPrompt(job.options, BuildTaskSystemPrompt(AiTaskKind::CLASSIFY, labels_text));
-		job.output =
-		    duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, labels_text), job.options).text;
+		duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, labels_text), job.options,
+		                    [&](const duckdb_ai::CompletionResult &response) {
+			                    job.output = response.text;
+			                    if (ClassifierLabelIndex(bind_data.labels, job.output) == DConstants::INVALID_INDEX) {
+				                    throw InvalidInputException("ai_build_classifier received an unknown label: %s",
+				                                                job.output);
+			                    }
+		                    });
 	});
 	std::vector<std::string> labelled_samples;
 	std::vector<idx_t> labelled_classes;
@@ -4798,8 +4825,17 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 		class_totals[label]++;
 	}
 	std::vector<bool> validation_rows(embeddings.size(), false);
+	std::vector<idx_t> class_seen(bind_data.labels.size(), 0);
+	std::vector<idx_t> validation_counts(bind_data.labels.size(), 0);
 	for (idx_t i = 0; i < embeddings.size(); i++) {
-		validation_rows[i] = i % 5 == 0 && class_totals[labelled_classes[i]] > 1;
+		auto label = labelled_classes[i];
+		// Split within each class and reserve at least one training row. A global
+		// i % 5 split can put every occurrence of a sparse class into validation.
+		validation_rows[i] = class_seen[label]++ % 5 == 0 && class_totals[label] > 1 &&
+		                     validation_counts[label] < class_totals[label] - 1;
+		if (validation_rows[i]) {
+			validation_counts[label]++;
+		}
 	}
 	std::vector<std::vector<double>> centroids(bind_data.labels.size(), std::vector<double>(dimensions, 0));
 	std::vector<idx_t> counts(bind_data.labels.size(), 0);
@@ -4846,7 +4882,7 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 	}
 	auto accuracy = evaluated == 0 ? 0 : static_cast<double>(correct) / static_cast<double>(evaluated);
 	auto all_classes_present = std::all_of(counts.begin(), counts.end(), [](idx_t count) { return count > 0; });
-	auto usable = all_classes_present && accuracy >= bind_data.quality_threshold;
+	auto usable = evaluated > 0 && all_classes_present && accuracy >= bind_data.quality_threshold;
 	auto embedding_config = duckdb_ai::ResolveProvider(bind_data.embedding_options);
 	std::ostringstream artifact;
 	artifact << std::setprecision(17);
@@ -5015,22 +5051,23 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			auto config = duckdb_ai::ResolveProvider(job.options);
 			double probability = 0;
 			std::string choice;
-			auto response =
-			    duckdb_ai::Complete(BuildJevFilterRequest(job.input, job.parameter, config.model), job.options);
-			if (!duckdb_ai::ParseJevAnswer(response.text, "filter", "noul", choice, probability)) {
-				throw InvalidInputException("ai_filter expected a valid TypeSafe Jev noul answer");
-			}
+			duckdb_ai::Complete(
+			    BuildJevFilterRequest(job.input, job.parameter, config.model), job.options,
+			    [&](const duckdb_ai::CompletionResult &response) {
+				    if (!duckdb_ai::ParseJevAnswer(response.text, "filter", "noul", choice, probability)) {
+					    throw InvalidInputException("ai_filter expected a valid TypeSafe Jev noul answer");
+				    }
+			    });
 			job.output = probability >= 0.5;
 			return;
 		}
 		AppendSystemPrompt(job.options, BuildTaskSystemPrompt(bind_data.task, job.parameter));
 		auto prompt = BuildTaskUserPrompt(bind_data.task, job.input, job.parameter);
-		auto output = duckdb_ai::Complete(prompt, job.options).text;
-		bool parsed = false;
-		if (!ParseAiBooleanResult(output, parsed)) {
-			throw InvalidInputException("ai_filter expected true or false output, got: %s", output);
-		}
-		job.output = parsed;
+		duckdb_ai::Complete(prompt, job.options, [&](const duckdb_ai::CompletionResult &response) {
+			if (!ParseAiBooleanResult(response.text, job.output)) {
+				throw InvalidInputException("ai_filter expected true or false output, got: %s", response.text);
+			}
+		});
 	});
 
 	for (auto &job : jobs) {
@@ -5115,6 +5152,9 @@ int64_t RecommendedBatchSize(double input_tokens_per_row, double max_output_toke
 	if (!std::isfinite(recommended)) {
 		throw InvalidInputException("ai_recommended_batch_size requires token_limit_per_minute or "
 		                            "request_limit_per_minute to be greater than 0");
+	}
+	if (recommended >= -static_cast<double>(std::numeric_limits<int64_t>::min())) {
+		throw InvalidInputException("ai_recommended_batch_size result is out of BIGINT range");
 	}
 	return std::max<int64_t>(1, static_cast<int64_t>(recommended));
 }
@@ -5379,7 +5419,7 @@ void ApplyPromptQueryValueOption(duckdb_ai::CompletionOptions &options, std::str
 	if (value_p.IsNull()) {
 		throw BinderException("ai_query_data option \"%s\" must not be NULL", name);
 	}
-	auto value = value_p;
+	const auto &value = value_p;
 	if (name == "schema_context" || name == "schema") {
 		schema_context = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 		return;
@@ -5648,7 +5688,7 @@ vector<std::string> ReadIncludeTablesValue(const Value &value_p, const std::stri
 			if (child.IsNull()) {
 				throw BinderException("%s %s entries must not be NULL", function_name, name);
 			}
-			auto child_value = child;
+			const auto &child_value = child;
 			result.push_back(StringValue::Get(child_value.DefaultCastAs(LogicalType::VARCHAR)));
 		}
 		return result;
@@ -5660,7 +5700,7 @@ int64_t ReadSampleRowsValue(const Value &value_p, const std::string &function_na
 	if (value_p.IsNull()) {
 		throw BinderException("%s sample_rows must not be NULL", function_name);
 	}
-	auto value = value_p;
+	const auto &value = value_p;
 	auto sample_rows = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
 	if (sample_rows < 0 || sample_rows > 100) {
 		throw BinderException("%s sample_rows must be between 0 and 100", function_name);
@@ -5672,7 +5712,7 @@ int64_t ReadFixAttemptsValue(const Value &value_p, const std::string &function_n
 	if (value_p.IsNull()) {
 		throw BinderException("%s fix_attempts must not be NULL", function_name);
 	}
-	auto value = value_p;
+	const auto &value = value_p;
 	auto fix_attempts = BigIntValue::Get(value.DefaultCastAs(LogicalType::BIGINT));
 	if (fix_attempts < 0 || fix_attempts > MAX_SQL_FIX_ATTEMPTS) {
 		throw BinderException("%s fix_attempts must be between 0 and %lld", function_name, MAX_SQL_FIX_ATTEMPTS);
@@ -5747,7 +5787,7 @@ void ApplyPromptAssistantValueOption(PromptAssistantBindData &bind_data, PromptS
 	if (value_p.IsNull()) {
 		throw BinderException("%s option \"%s\" must not be NULL", function_name, name);
 	}
-	auto value = value_p;
+	const auto &value = value_p;
 	if (name == "schema_context" || name == "schema") {
 		bind_data.schema_context = StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 		return;
@@ -6256,7 +6296,7 @@ std::string ExternalModelInputString(const Value &input) {
 	if (input.IsNull()) {
 		return "";
 	}
-	auto value = input;
+	const auto &value = input;
 	return StringValue::Get(value.DefaultCastAs(LogicalType::VARCHAR));
 }
 
@@ -6438,6 +6478,8 @@ using SqlYyjsonDoc = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb
 
 SqlYyjsonDoc ParseSqlJson(const std::string &input) {
 	duckdb_yyjson::yyjson_read_err error;
+	// NOFLAG copies the buffer; yyjson mutates input only with READ_INSITU.
+	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
 	auto doc = duckdb_yyjson::yyjson_read_opts(const_cast<char *>(input.data()), input.size(),
 	                                           duckdb_yyjson::YYJSON_READ_NOFLAG, nullptr, &error);
 	return SqlYyjsonDoc(doc, duckdb_yyjson::yyjson_doc_free);
@@ -7368,8 +7410,13 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 
 	RunProviderJobs(fallback_jobs, [&](ProviderStringJob &job) {
 		AppendSystemPrompt(job.options, BuildTaskSystemPrompt(AiTaskKind::CLASSIFY, job.parameter));
-		job.output =
-		    duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter), job.options).text;
+		duckdb_ai::Complete(BuildTaskUserPrompt(AiTaskKind::CLASSIFY, job.input, job.parameter), job.options,
+		                    [&](const duckdb_ai::CompletionResult &response) {
+			                    std::string error;
+			                    if (!CanonicalClassificationLabel(job.parameter, response.text, job.output, error)) {
+				                    throw InvalidInputException("ai_classify_optimized %s", error);
+			                    }
+		                    });
 	});
 	for (auto &job : fallback_jobs) {
 		auto &row = rows[fallback_row_indexes[job.row]];
@@ -7458,13 +7505,9 @@ idx_t FindRecursiveChunkEnd(const std::string &input, const vector<idx_t> &offse
 	return target;
 }
 
-std::string MarkdownHeadingAt(const std::string &input, idx_t byte_offset) {
-	std::string heading;
-	for (idx_t line_start = 0; line_start <= byte_offset && line_start < input.size();) {
-		auto newline = input.find('\n', line_start);
-		auto page_break = input.find('\f', line_start);
-		auto line_end = MinValue<idx_t>(newline == std::string::npos ? input.size() : newline,
-		                                page_break == std::string::npos ? input.size() : page_break);
+void AdvanceMarkdownHeading(const std::string &input, idx_t byte_offset, idx_t &line_start, std::string &heading) {
+	while (line_start <= byte_offset && line_start < input.size()) {
+		auto line_end = input.find_first_of("\n\f", line_start);
 		if (line_end == std::string::npos) {
 			line_end = input.size();
 		}
@@ -7475,12 +7518,8 @@ std::string MarkdownHeadingAt(const std::string &input, idx_t byte_offset) {
 		if (marker_end > line_start && marker_end < line_end && input[marker_end] == ' ') {
 			heading = TrimAscii(input.substr(marker_end + 1, line_end - marker_end - 1));
 		}
-		if (line_end >= byte_offset || line_end == input.size()) {
-			break;
-		}
 		line_start = line_end + 1;
 	}
-	return heading;
 }
 
 vector<AiTextChunk> BuildTextChunks(const std::string &input, std::string source_id, idx_t chunk_size,
@@ -7497,6 +7536,10 @@ vector<AiTextChunk> BuildTextChunks(const std::string &input, std::string source
 	auto overlap = static_cast<idx_t>(std::floor(static_cast<double>(chunk_size) * overlap_percent / 100.0));
 	auto settings_hash = StableTextHash(source_id + "|" + input + "|" + strategy + "|" + std::to_string(chunk_size) +
 	                                    "|" + std::to_string(overlap_percent));
+	idx_t heading_line_start = 0;
+	idx_t page_offset = 0;
+	idx_t page = 1;
+	std::string heading;
 	for (idx_t start = 0, chunk_index = 0; start < codepoints; chunk_index++) {
 		auto end = MinValue<idx_t>(codepoints, start + chunk_size);
 		if (strategy == "recursive" && end < codepoints) {
@@ -7516,8 +7559,11 @@ vector<AiTextChunk> BuildTextChunks(const std::string &input, std::string source
 		chunk.start_offset = start;
 		chunk.end_offset = end;
 		chunk.text = input.substr(byte_start, byte_end - byte_start);
-		chunk.heading = MarkdownHeadingAt(input, byte_start);
-		chunk.page = 1 + NumericCast<idx_t>(std::count(input.begin(), input.begin() + byte_start, '\f'));
+		AdvanceMarkdownHeading(input, byte_start, heading_line_start, heading);
+		chunk.heading = heading;
+		page += NumericCast<idx_t>(std::count(input.data() + page_offset, input.data() + byte_start, '\f'));
+		page_offset = byte_start;
+		chunk.page = page;
 		chunks.push_back(std::move(chunk));
 		if (end == codepoints) {
 			break;
@@ -8376,14 +8422,14 @@ AggregateFunction BuildAiAggregateFunction(const std::string &name, idx_t argume
 	for (idx_t i = 1; i < argument_count; i++) {
 		arguments.emplace_back(LogicalType::ANY);
 	}
-	auto function = AggregateFunction(
-	    name, std::move(arguments), LogicalType::VARCHAR, AggregateFunction::StateSize<AiAggregateState>,
-	    AggregateFunction::StateInitialize<AiAggregateState, AiAggregateOperation>,
-	    AggregateFunction::UnaryScatterUpdate<AiAggregateState, string_t, AiAggregateOperation>,
-	    AggregateFunction::StateCombine<AiAggregateState, AiAggregateOperation>,
-	    AggregateFunction::StateFinalize<AiAggregateState, string_t, AiAggregateOperation>,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	    AggregateFunction::UnaryUpdate<AiAggregateState, string_t, AiAggregateOperation>, bind);
+	auto function =
+	    AggregateFunction(name, arguments, LogicalType::VARCHAR, AggregateFunction::StateSize<AiAggregateState>,
+	                      AggregateFunction::StateInitialize<AiAggregateState, AiAggregateOperation>,
+	                      AggregateFunction::UnaryScatterUpdate<AiAggregateState, string_t, AiAggregateOperation>,
+	                      AggregateFunction::StateCombine<AiAggregateState, AiAggregateOperation>,
+	                      AggregateFunction::StateFinalize<AiAggregateState, string_t, AiAggregateOperation>,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                      AggregateFunction::UnaryUpdate<AiAggregateState, string_t, AiAggregateOperation>, bind);
 	function.SetFallible();
 	function.SetVolatile();
 	return function;
@@ -8407,8 +8453,7 @@ void RegisterClassifierBuildFunction(ExtensionLoader &loader) {
 			arguments.emplace_back(LogicalType::ANY);
 		}
 		auto function = AggregateFunction(
-		    "ai_build_classifier", std::move(arguments), LogicalType::VARCHAR,
-		    AggregateFunction::StateSize<ClassifierBuildState>,
+		    "ai_build_classifier", arguments, LogicalType::VARCHAR, AggregateFunction::StateSize<ClassifierBuildState>,
 		    AggregateFunction::StateInitialize<ClassifierBuildState, ClassifierBuildOperation>,
 		    AggregateFunction::UnaryScatterUpdate<ClassifierBuildState, string_t, ClassifierBuildOperation>,
 		    AggregateFunction::StateCombine<ClassifierBuildState, ClassifierBuildOperation>,
@@ -8508,7 +8553,7 @@ void RegisterPromptSchemaFunction(ExtensionLoader &loader, const std::string &na
 	    {LogicalType::LIST(LogicalType::VARCHAR)},
 	};
 	for (auto &arguments : overloads) {
-		TableFunction function(std::move(arguments), PromptSchemaFunction, PromptSchemaBind, PromptSchemaInit);
+		TableFunction function(arguments, PromptSchemaFunction, PromptSchemaBind, PromptSchemaInit);
 		AddPromptSchemaNamedParameters(function);
 		ai_schema_prompt.AddFunction(std::move(function));
 	}
@@ -8522,7 +8567,7 @@ void RegisterAiRecordFunction(ExtensionLoader &loader) {
 		for (idx_t i = 0; i < argument_count; i++) {
 			arguments.emplace_back(LogicalType::VARCHAR);
 		}
-		TableFunction function(std::move(arguments), AiRecordFunction, AiRecordBind, AiRecordInit);
+		TableFunction function(arguments, AiRecordFunction, AiRecordBind, AiRecordInit);
 		AddAiRecordNamedParameters(function);
 		ai_complete_record.AddFunction(std::move(function));
 	}
@@ -8552,7 +8597,7 @@ void RegisterPromptFixupFunction(ExtensionLoader &loader, const std::string &nam
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	};
 	for (auto &arguments : overloads) {
-		TableFunction function(std::move(arguments), PromptAssistantFunction, PromptFixupBind, PromptAssistantInit);
+		TableFunction function(arguments, PromptAssistantFunction, PromptFixupBind, PromptAssistantInit);
 		AddPromptAssistantNamedParameters(function, true);
 		ai_fix_sql.AddFunction(std::move(function));
 	}
@@ -8566,7 +8611,7 @@ void RegisterPromptQueryFunction(ExtensionLoader &loader, const std::string &nam
 		for (idx_t i = 0; i < argument_count; i++) {
 			arguments.emplace_back(LogicalType::VARCHAR);
 		}
-		TableFunction function(std::move(arguments), nullptr, nullptr);
+		TableFunction function(arguments, nullptr, nullptr);
 		function.bind_replace = PromptQueryBindReplace;
 		AddPromptQueryNamedParameters(function);
 		ai_query_data.AddFunction(std::move(function));

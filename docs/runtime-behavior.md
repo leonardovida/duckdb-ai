@@ -183,6 +183,12 @@ per-database bound; an individual response larger than that is not cached.
 binds. `ai_clear_cache()` clears the response, generated-SQL, and similarity
 query caches.
 
+Typed completion functions validate their output before recording a successful
+usage event. Invalid JSON, schema violations, unknown classification labels,
+invalid booleans or scores, and record projection failures produce error events
+and evict the rejected response from the cache. A later call can request a fresh
+response. Validation failures do not automatically retry the model call.
+
 ## Deterministic performance benchmark
 
 The local benchmark uses a threaded mock embedding endpoint and reports request
@@ -229,3 +235,10 @@ embedding arrays, `ai_complete_json()` validation, and
 documented JSON Schema subset rather than full JSON Schema draft parity.
 Schema `pattern` checks use RE2-compatible regular expressions so validation
 has bounded-time matching behavior; constructs unsupported by RE2 are rejected.
+
+Type unions accept only their listed types. Nested boolean schemas are supported:
+`true` allows any value and `false` rejects every value. String `minLength` and
+`maxLength` count Unicode code points, so an emoji counts as one and a combining
+mark counts separately from its base character. Integer values retain exact
+64-bit digits for equality, bounds, and typed projection; `number` fields use
+DuckDB `DOUBLE` precision.

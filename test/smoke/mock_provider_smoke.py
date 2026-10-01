@@ -157,7 +157,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             elif "return array violation JSON" in prompt:
                 content = '{"tags":["duck","duck"]}'
             elif "return numeric unique violation JSON" in prompt:
-                content = '[0,-0.0,1]'
+                content = "[0,-0.0,1]"
             elif "return object unique violation JSON" in prompt:
                 content = '[{"a":1,"b":2},{"b":2,"a":1}]'
             elif "return oneOf violation JSON" in prompt:
@@ -2116,20 +2116,20 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected packed constant similarity inputs: {constant_similarity_inputs}")
 
     log_deadline = time.time() + 5
-    while len(MockProviderHandler.log_requests) < 50 and time.time() < log_deadline:
+    while len(MockProviderHandler.log_requests) < 45 and time.time() < log_deadline:
         time.sleep(0.05)
-    if len(MockProviderHandler.log_requests) != 50:
+    if len(MockProviderHandler.log_requests) != 45:
         event_counts = {}
         for request in MockProviderHandler.log_requests:
             event = "otlp" if "resourceLogs" in request else request.get("event", "unknown")
             event_counts[event] = event_counts.get(event, 0) + 1
-        raise AssertionError(f"expected 50 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
+        raise AssertionError(f"expected 45 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 37 or len(embedding_logs) != 12:
+    if len(completion_logs) != 32 or len(embedding_logs) != 12:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")
@@ -2909,6 +2909,7 @@ def main():
     from provider_api_smoke import run as run_provider_api_smoke
     from jev_provider_smoke import run as run_jev_provider_smoke
     from jev_typed_smoke import run as run_jev_typed_smoke
+    from repository_regression_smoke import run as run_repository_regression_smoke
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -3042,6 +3043,7 @@ def main():
     run_provider_api_smoke(args.duckdb)
     run_jev_provider_smoke(args.duckdb)
     run_jev_typed_smoke(args.duckdb)
+    run_repository_regression_smoke(args.duckdb)
     print("mock provider smoke passed")
 
 
