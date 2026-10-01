@@ -139,7 +139,7 @@ jobs:
         shell: bash
         run: |
           ccache --zero-stats || true
-          make tidy-check
+          make tidy-check-ai
 
       - name: Show ccache stats
         if: always()

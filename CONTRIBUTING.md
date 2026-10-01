@@ -33,6 +33,7 @@ Run extension checks from the repository root:
 
 ```bash
 PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
+GEN=ninja make tidy-check-ai
 GEN=ninja make release
 GEN=ninja make test
 python3 test/smoke/mock_provider_smoke.py

@@ -11,6 +11,17 @@ Catalog Error: Scalar Function with name ai_completion_request_json does not exi
 # Require statement will ensure this test is run with this extension loaded
 require ai
 
+# Large finite estimates must not overflow a floating-point to BIGINT cast.
+statement error
+SELECT ai_recommended_batch_size(1, 0, 1e30);
+----
+ai_recommended_batch_size result is out of BIGINT range
+
+query I
+SELECT ai_recommended_batch_size(1, 0, 1e30, 100, 1);
+----
+100
+
 # Provider metadata is deterministic and does not perform network calls.
 query I
 SELECT * FROM ai_clear_usage();
@@ -1224,6 +1235,27 @@ SELECT string_agg(chunk_to_retrieve, '' ORDER BY chunk_index) =
 FROM chunks;
 ----
 true
+
+# Overlapping chunks retain the heading and page at their start offset.
+query ITI
+SELECT start_offset, heading, page
+FROM ai_prep_search('# A' || chr(10) || 'abc' || chr(12) || '# B' || chr(10) || 'xyz',
+                    chunk_size := 4, overlap_percent := 50, strategy := 'fixed')
+ORDER BY chunk_index;
+----
+0	A	1
+2	A	1
+4	A	1
+6	A	1
+8	B	2
+10	B	2
+12	B	2
+
+query I
+SELECT count(*) FROM ai_generate_chunks(repeat('word' || chr(10), 20000),
+    chunk_size := 1000, overlap_percent := 0, strategy := 'fixed');
+----
+100
 
 # Rich classification options bind without changing the existing return type.
 query I

@@ -18,6 +18,7 @@
 #include <curl/curl.h>
 #include <deque>
 #include <list>
+#include <locale>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -103,13 +104,13 @@ constexpr size_t MAX_HTTP_RESPONSE_BYTES_LIMIT = 1024ULL * 1024ULL * 1024ULL;
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr int64_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr int64_t DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE = 512;
-std::once_flag curl_global_init_once;
-std::atomic<uint64_t> next_operation_id {1};
+std::once_flag curl_global_init_once;        // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<uint64_t> next_operation_id {1}; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 const size_t DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 1024;
 constexpr size_t DEFAULT_MAX_RESPONSE_CACHE_BYTES = 64ULL * 1024ULL * 1024ULL;
 
 struct ProviderRuntimeState : public ObjectCacheEntry {
-	~ProviderRuntimeState();
+	~ProviderRuntimeState() override;
 
 	static std::string ObjectType() {
 		return "duckdb_ai_runtime_state";
@@ -124,7 +125,7 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	}
 
 	std::mutex usage_mutex;
-	std::vector<UsageEvent> usage_events;
+	std::deque<UsageEvent> usage_events;
 	uint64_t next_usage_event_id = 1;
 	uint64_t dropped_usage_events = 0;
 
@@ -152,7 +153,10 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	uint64_t dropped_usage_log_events = 0;
 };
 
-ProviderRuntimeState fallback_runtime_state;
+ProviderRuntimeState &FallbackRuntimeState() {
+	static ProviderRuntimeState state;
+	return state;
+}
 
 ProviderRuntimeState &RuntimeState(ClientContext &context) {
 	return *ObjectCache::GetObjectCache(context).GetOrCreate<ProviderRuntimeState>(ProviderRuntimeState::ObjectType());
@@ -162,7 +166,7 @@ ProviderRuntimeState &RuntimeState(const CompletionOptions &options) {
 	if (options.runtime_state) {
 		return *reinterpret_cast<ProviderRuntimeState *>(options.runtime_state);
 	}
-	return options.client_context ? RuntimeState(*options.client_context) : fallback_runtime_state;
+	return options.client_context ? RuntimeState(*options.client_context) : FallbackRuntimeState();
 }
 
 std::string LowerAscii(std::string input) {
@@ -878,7 +882,15 @@ std::string JsonEscape(const std::string &input) {
 
 std::string JsonDouble(double input) {
 	std::ostringstream out;
+	out.imbue(std::locale::classic());
 	out << std::setprecision(15) << input;
+	return out.str();
+}
+
+std::string JsonDoubleExact(double input) {
+	std::ostringstream out;
+	out.imbue(std::locale::classic());
+	out << std::setprecision(std::numeric_limits<double>::max_digits10) << input;
 	return out.str();
 }
 
@@ -979,15 +991,25 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	return prices;
 }
 
+void ApplyCurrentModelPrice(ModelPrice &price) {
+	if (price.provider == "gemini" && (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash") &&
+	    price.operation == "completion" && CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
+		price.input_token_price_per_million = 0.75;
+		price.output_token_price_per_million = 3.75;
+		price.source_note = "introductory text token pricing through 2026-12-31";
+	}
+}
+
 bool TryFindBuiltinModelPrice(const std::string &provider, const std::string &model, const std::string &operation,
                               ModelPrice &result) {
 	auto provider_key = LowerAscii(provider);
 	auto model_key = LowerAscii(model);
 	auto operation_key = LowerAscii(operation);
-	for (auto &price : ModelPrices()) {
+	for (auto &price : BuiltinModelPrices()) {
 		if (LowerAscii(price.provider) == provider_key && LowerAscii(price.model) == model_key &&
 		    LowerAscii(price.operation) == operation_key) {
 			result = price;
+			ApplyCurrentModelPrice(result);
 			return true;
 		}
 	}
@@ -1316,10 +1338,132 @@ struct JsonValue {
 	bool boolean_value = false;
 	double number_value = 0;
 	bool number_is_integer = false;
+	//! Preserve the JSON numeric lexeme for exact decimal comparisons and projection.
+	std::string number_text;
 	std::string string_value;
 	std::vector<JsonValue> array_value;
 	std::map<std::string, JsonValue> object_value;
 };
+
+int CompareIntegerText(const std::string &left, const std::string &right) {
+	auto left_negative = left[0] == '-';
+	auto right_negative = right[0] == '-';
+	if (left_negative != right_negative) {
+		return left_negative ? -1 : 1;
+	}
+	auto result = left.size() == right.size() ? left.compare(right) : (left.size() < right.size() ? -1 : 1);
+	return left_negative ? -result : result;
+}
+
+std::string UnsignedDecimalAdd(const std::string &left, const std::string &right) {
+	std::string result(std::max(left.size(), right.size()) + 1, '0');
+	idx_t l = left.size(), r = right.size(), output = result.size();
+	int carry = 0;
+	while (l > 0 || r > 0 || carry > 0) {
+		auto digit = carry + (l > 0 ? left[--l] - '0' : 0) + (r > 0 ? right[--r] - '0' : 0);
+		result[--output] = static_cast<char>('0' + digit % 10);
+		carry = digit / 10;
+	}
+	auto first = result.find_first_not_of('0');
+	return first == std::string::npos ? "0" : result.substr(first);
+}
+
+// left >= right, with both magnitudes normalized and nonnegative.
+std::string UnsignedDecimalSubtract(const std::string &left, const std::string &right) {
+	auto result = left;
+	idx_t l = left.size(), r = right.size();
+	int borrow = 0;
+	while (l > 0) {
+		auto digit = left[--l] - '0' - borrow - (r > 0 ? right[--r] - '0' : 0);
+		borrow = digit < 0 ? 1 : 0;
+		result[l] = static_cast<char>('0' + digit + borrow * 10);
+	}
+	auto first = result.find_first_not_of('0');
+	return first == std::string::npos ? "0" : result.substr(first);
+}
+
+std::string AddDecimalExponent(std::string exponent, int64_t adjustment) {
+	auto negative = !exponent.empty() && exponent[0] == '-';
+	auto first = exponent.find_first_not_of("+-0");
+	auto magnitude = first == std::string::npos ? std::string("0") : exponent.substr(first);
+	if (magnitude == "0") {
+		negative = false;
+	}
+	// adjustment is bounded by the input length, not by the exponent lexeme.
+	auto adjustment_negative = adjustment < 0;
+	auto other = std::to_string(adjustment_negative ? -adjustment : adjustment);
+	if (negative == adjustment_negative) {
+		magnitude = UnsignedDecimalAdd(magnitude, other);
+	} else if (CompareIntegerText(magnitude, other) >= 0) {
+		magnitude = UnsignedDecimalSubtract(magnitude, other);
+	} else {
+		magnitude = UnsignedDecimalSubtract(other, magnitude);
+		negative = adjustment_negative;
+	}
+	return negative && magnitude != "0" ? "-" + magnitude : magnitude;
+}
+
+struct ExactDecimalNumber {
+	bool negative;
+	std::string digits;
+	//! Position of the decimal point relative to the first significant digit.
+	std::string order;
+};
+
+ExactDecimalNumber ExactDecimal(const JsonValue &value) {
+	auto text = value.number_text.empty() ? JsonDoubleExact(value.number_value) : value.number_text;
+	ExactDecimalNumber result {text[0] == '-', "", "0"};
+	auto exponent_start = text.find_first_of("eE");
+	auto coefficient_end = exponent_start == std::string::npos ? text.size() : exponent_start;
+	auto point = text.find('.');
+	auto fraction_digits = point == std::string::npos ? 0 : coefficient_end - point - 1;
+	for (idx_t i = result.negative ? 1 : 0; i < coefficient_end; i++) {
+		if (text[i] != '.') {
+			result.digits += text[i];
+		}
+	}
+	auto first = result.digits.find_first_not_of('0');
+	if (first == std::string::npos) {
+		return {false, "0", "0"};
+	}
+	result.digits.erase(0, first);
+	auto exponent = exponent_start == std::string::npos ? std::string("0") : text.substr(exponent_start + 1);
+	result.order = AddDecimalExponent(exponent, NumericCast<int64_t>(result.digits.size()) -
+	                                                NumericCast<int64_t>(fraction_digits));
+	result.digits.erase(result.digits.find_last_not_of('0') + 1);
+	return result;
+}
+
+std::string ExactIntegerText(const JsonValue &value) {
+	auto number = ExactDecimal(value);
+	if (number.digits == "0") {
+		return "0";
+	}
+	if (CompareIntegerText(number.order, std::to_string(number.digits.size())) < 0) {
+		return "";
+	}
+	// Nonzero numbers accepted by the parser are finite doubles, so integral
+	// values have at most 309 decimal digits. Check before narrowing the exponent.
+	if (CompareIntegerText(number.order, "309") > 0) {
+		throw InvalidInputException("JSON integer is outside the finite DOUBLE range");
+	}
+	auto length = static_cast<size_t>(std::stoull(number.order));
+	return (number.negative ? "-" : "") + number.digits + std::string(length - number.digits.size(), '0');
+}
+
+bool IsExactIntegerMultiple(std::string magnitude, const std::string &divisor) {
+	if (magnitude[0] == '-') {
+		magnitude.erase(0, 1);
+	}
+	std::string remainder = "0";
+	for (auto digit : magnitude) {
+		remainder = remainder == "0" ? std::string(1, digit) : remainder + digit;
+		while (CompareIntegerText(remainder, divisor) >= 0) {
+			remainder = UnsignedDecimalSubtract(remainder, divisor);
+		}
+	}
+	return remainder == "0";
+}
 
 using YyjsonDocPtr = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>;
 
@@ -1330,10 +1474,12 @@ std::string YyjsonParseError(const duckdb_yyjson::yyjson_read_err &read_error) {
 	return "malformed JSON at byte " + std::to_string(read_error.pos) + ": " + read_error.msg;
 }
 
-YyjsonDocPtr ReadYyjsonDocument(const std::string &input, std::string &error) {
+YyjsonDocPtr ReadYyjsonDocument(const std::string &input, std::string &error,
+                                duckdb_yyjson::yyjson_read_flag flags = duckdb_yyjson::YYJSON_READ_NOFLAG) {
 	duckdb_yyjson::yyjson_read_err read_error;
-	auto doc = duckdb_yyjson::yyjson_read_opts(const_cast<char *>(input.data()), input.size(),
-	                                           duckdb_yyjson::YYJSON_READ_NOFLAG, nullptr, &read_error);
+	// No in-situ parsing: yyjson copies this input before processing it.
+	auto mutable_input = const_cast<char *>(input.data()); // NOLINT(cppcoreguidelines-pro-type-const-cast)
+	auto doc = duckdb_yyjson::yyjson_read_opts(mutable_input, input.size(), flags, nullptr, &read_error);
 	if (!doc) {
 		error = YyjsonParseError(read_error);
 		return YyjsonDocPtr(nullptr, duckdb_yyjson::yyjson_doc_free);
@@ -1417,10 +1563,27 @@ bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, st
 		target.boolean_value = duckdb_yyjson::yyjson_get_bool(source);
 		return true;
 	}
+	if (duckdb_yyjson::yyjson_is_raw(source)) {
+		target.type = JsonValueType::NUMBER;
+		auto text = std::string(duckdb_yyjson::yyjson_get_raw(source), duckdb_yyjson::yyjson_get_len(source));
+		target.number_value = std::strtod(text.c_str(), nullptr);
+		if (!std::isfinite(target.number_value)) {
+			error = "JSON number is outside the finite DOUBLE range";
+			return false;
+		}
+		target.number_text = std::move(text);
+		target.number_is_integer = !ExactIntegerText(target).empty();
+		return true;
+	}
 	if (duckdb_yyjson::yyjson_is_num(source)) {
 		target.type = JsonValueType::NUMBER;
 		target.number_value = duckdb_yyjson::yyjson_get_num(source);
 		target.number_is_integer = duckdb_yyjson::yyjson_is_int(source);
+		if (target.number_is_integer) {
+			target.number_text = duckdb_yyjson::yyjson_is_uint(source)
+			                         ? std::to_string(duckdb_yyjson::yyjson_get_uint(source))
+			                         : std::to_string(duckdb_yyjson::yyjson_get_sint(source));
+		}
 		return true;
 	}
 	if (duckdb_yyjson::yyjson_is_str(source)) {
@@ -1619,7 +1782,7 @@ bool FindYyjsonNumberArrayField(duckdb_yyjson::yyjson_val *value, const std::str
 }
 
 bool ParseJsonValueDocument(const std::string &input, JsonValue &value, std::string &error) {
-	auto doc = ReadYyjsonDocument(input, error);
+	auto doc = ReadYyjsonDocument(input, error, duckdb_yyjson::YYJSON_READ_NUMBER_AS_RAW);
 	if (!doc) {
 		return false;
 	}
@@ -1649,16 +1812,16 @@ bool SchemaNumberField(const JsonValue &schema, const std::string &field, double
 }
 
 bool SchemaNonNegativeIntegerField(const JsonValue &schema, const std::string &field, int64_t &value) {
-	double number_value;
-	if (!SchemaNumberField(schema, field, number_value)) {
+	auto field_value = ObjectField(schema, field);
+	if (!field_value || field_value->type != JsonValueType::NUMBER) {
 		return false;
 	}
-	if (!std::isfinite(number_value) || number_value < 0 ||
-	    number_value > static_cast<double>(std::numeric_limits<int64_t>::max()) ||
-	    std::floor(number_value) != number_value) {
+	auto integer = ExactIntegerText(*field_value);
+	if (integer.empty() || integer[0] == '-' ||
+	    CompareIntegerText(integer, std::to_string(std::numeric_limits<int64_t>::max())) > 0) {
 		return false;
 	}
-	value = static_cast<int64_t>(number_value);
+	value = std::stoll(integer);
 	return true;
 }
 
@@ -1666,7 +1829,7 @@ bool IsJsonInteger(const JsonValue &value) {
 	if (value.type != JsonValueType::NUMBER) {
 		return false;
 	}
-	return value.number_is_integer || std::floor(value.number_value) == value.number_value;
+	return value.number_is_integer || !ExactIntegerText(value).empty();
 }
 
 std::string JsonTypeName(const JsonValue &value) {
@@ -1687,9 +1850,35 @@ std::string JsonTypeName(const JsonValue &value) {
 	return "unknown";
 }
 
+int CompareJsonNumbers(const JsonValue &left, const JsonValue &right) {
+	auto l = ExactDecimal(left);
+	auto r = ExactDecimal(right);
+	if (l.digits == "0" || r.digits == "0") {
+		if (l.digits == r.digits) {
+			return 0;
+		}
+		return l.digits == "0" ? (r.negative ? 1 : -1) : (l.negative ? -1 : 1);
+	}
+	if (l.negative != r.negative) {
+		return l.negative ? -1 : 1;
+	}
+	auto comparison = CompareIntegerText(l.order, r.order);
+	if (comparison == 0) {
+		for (idx_t i = 0; i < std::max(l.digits.size(), r.digits.size()); i++) {
+			auto a = i < l.digits.size() ? l.digits[i] : '0';
+			auto b = i < r.digits.size() ? r.digits[i] : '0';
+			if (a != b) {
+				comparison = a < b ? -1 : 1;
+				break;
+			}
+		}
+	}
+	return l.negative ? -comparison : comparison;
+}
+
 bool JsonValueEquals(const JsonValue &left, const JsonValue &right) {
 	if (left.type == JsonValueType::NUMBER && right.type == JsonValueType::NUMBER) {
-		return left.number_value == right.number_value;
+		return CompareJsonNumbers(left, right) == 0;
 	}
 	if (left.type != right.type) {
 		return false;
@@ -1741,8 +1930,13 @@ size_t JsonValueHash(const JsonValue &value) {
 		HashCombine(hash, std::hash<bool> {}(value.boolean_value));
 		return hash;
 	case JsonValueType::NUMBER:
-		// JsonValueEquals treats positive and negative zero as equal.
-		HashCombine(hash, std::hash<double> {}(value.number_value == 0 ? 0.0 : value.number_value));
+		// Equivalent decimal spellings, including signed zero, share a hash.
+		{
+			auto number = ExactDecimal(value);
+			HashCombine(hash, std::hash<bool> {}(number.negative));
+			HashCombine(hash, std::hash<std::string> {}(number.digits));
+			HashCombine(hash, std::hash<std::string> {}(number.order));
+		}
 		return hash;
 	case JsonValueType::STRING:
 		HashCombine(hash, std::hash<std::string> {}(value.string_value));
@@ -1769,7 +1963,7 @@ std::string JsonValueToJson(const JsonValue &value) {
 	case JsonValueType::BOOLEAN:
 		return value.boolean_value ? "true" : "false";
 	case JsonValueType::NUMBER:
-		return JsonDouble(value.number_value);
+		return value.number_text.empty() ? JsonDoubleExact(value.number_value) : value.number_text;
 	case JsonValueType::STRING:
 		return "\"" + JsonEscape(value.string_value) + "\"";
 	case JsonValueType::ARRAY: {
@@ -1815,6 +2009,7 @@ bool SchemaTypeAllows(const JsonValue &type_schema, const JsonValue &value) {
 				return true;
 			}
 		}
+		return false;
 	}
 	return true;
 }
@@ -1918,6 +2113,12 @@ bool RegexMatches(const std::string &value, const std::string &pattern, const st
 
 bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &schema, const std::string &path,
                                     std::string &error) {
+	if (schema.type == JsonValueType::BOOLEAN) {
+		if (!schema.boolean_value) {
+			error = path + " is not allowed by false schema";
+		}
+		return schema.boolean_value;
+	}
 	if (schema.type != JsonValueType::OBJECT) {
 		return true;
 	}
@@ -1961,7 +2162,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		}
 	}
 	auto not_schema = ObjectField(schema, "not");
-	if (not_schema && not_schema->type == JsonValueType::OBJECT) {
+	if (not_schema) {
 		std::string child_error;
 		if (ValidateJsonValueAgainstSchema(value, *not_schema, path, child_error)) {
 			error = path + " matched schema in not";
@@ -1998,54 +2199,66 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		double numeric_bound;
 		auto exclusive_minimum = ObjectField(schema, "exclusiveMinimum");
 		if (exclusive_minimum && exclusive_minimum->type == JsonValueType::NUMBER &&
-		    value.number_value <= exclusive_minimum->number_value) {
+		    CompareJsonNumbers(value, *exclusive_minimum) <= 0) {
 			error = path + " must be greater than " + JsonDouble(exclusive_minimum->number_value);
 			return false;
 		}
 		if (exclusive_minimum && exclusive_minimum->type == JsonValueType::BOOLEAN &&
 		    exclusive_minimum->boolean_value && SchemaNumberField(schema, "minimum", numeric_bound) &&
-		    value.number_value <= numeric_bound) {
+		    CompareJsonNumbers(value, *ObjectField(schema, "minimum")) <= 0) {
 			error = path + " must be greater than " + JsonDouble(numeric_bound);
 			return false;
 		}
-		if (SchemaNumberField(schema, "minimum", numeric_bound) && value.number_value < numeric_bound) {
+		if (SchemaNumberField(schema, "minimum", numeric_bound) &&
+		    CompareJsonNumbers(value, *ObjectField(schema, "minimum")) < 0) {
 			error = path + " must be greater than or equal to " + JsonDouble(numeric_bound);
 			return false;
 		}
 		auto exclusive_maximum = ObjectField(schema, "exclusiveMaximum");
 		if (exclusive_maximum && exclusive_maximum->type == JsonValueType::NUMBER &&
-		    value.number_value >= exclusive_maximum->number_value) {
+		    CompareJsonNumbers(value, *exclusive_maximum) >= 0) {
 			error = path + " must be less than " + JsonDouble(exclusive_maximum->number_value);
 			return false;
 		}
 		if (exclusive_maximum && exclusive_maximum->type == JsonValueType::BOOLEAN &&
 		    exclusive_maximum->boolean_value && SchemaNumberField(schema, "maximum", numeric_bound) &&
-		    value.number_value >= numeric_bound) {
+		    CompareJsonNumbers(value, *ObjectField(schema, "maximum")) >= 0) {
 			error = path + " must be less than " + JsonDouble(numeric_bound);
 			return false;
 		}
-		if (SchemaNumberField(schema, "maximum", numeric_bound) && value.number_value > numeric_bound) {
+		if (SchemaNumberField(schema, "maximum", numeric_bound) &&
+		    CompareJsonNumbers(value, *ObjectField(schema, "maximum")) > 0) {
 			error = path + " must be less than or equal to " + JsonDouble(numeric_bound);
 			return false;
 		}
 		if (SchemaNumberField(schema, "multipleOf", numeric_bound) && numeric_bound > 0) {
-			auto remainder = std::fmod(std::fabs(value.number_value), numeric_bound);
-			auto tolerance = std::max(1e-12, std::fabs(numeric_bound) * 1e-12);
-			if (remainder > tolerance && std::fabs(remainder - numeric_bound) > tolerance) {
-				error = path + " must be a multiple of " + JsonDouble(numeric_bound);
-				return false;
+			auto &divisor = *ObjectField(schema, "multipleOf");
+			if (IsJsonInteger(value) && IsJsonInteger(divisor)) {
+				auto divisor_text = ExactIntegerText(divisor);
+				if (!IsExactIntegerMultiple(ExactIntegerText(value), divisor_text)) {
+					error = path + " must be a multiple of " + divisor_text;
+					return false;
+				}
+			} else {
+				auto remainder = std::fmod(std::fabs(value.number_value), numeric_bound);
+				auto tolerance = std::max(1e-12, std::fabs(numeric_bound) * 1e-12);
+				if (remainder > tolerance && std::fabs(remainder - numeric_bound) > tolerance) {
+					error = path + " must be a multiple of " + JsonDouble(numeric_bound);
+					return false;
+				}
 			}
 		}
 	}
 	if (value.type == JsonValueType::STRING) {
+		// JSON Schema lengths count Unicode code points, including combining marks.
+		auto string_length = std::count_if(value.string_value.begin(), value.string_value.end(),
+		                                   [](unsigned char c) { return (c & 0xc0) != 0x80; });
 		int64_t string_limit;
-		if (SchemaNonNegativeIntegerField(schema, "minLength", string_limit) &&
-		    value.string_value.size() < static_cast<idx_t>(string_limit)) {
+		if (SchemaNonNegativeIntegerField(schema, "minLength", string_limit) && string_length < string_limit) {
 			error = path + " length must be at least " + std::to_string(string_limit);
 			return false;
 		}
-		if (SchemaNonNegativeIntegerField(schema, "maxLength", string_limit) &&
-		    value.string_value.size() > static_cast<idx_t>(string_limit)) {
+		if (SchemaNonNegativeIntegerField(schema, "maxLength", string_limit) && string_length > string_limit) {
 			error = path + " length must be at most " + std::to_string(string_limit);
 			return false;
 		}
@@ -2087,7 +2300,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			}
 		}
 		auto property_names_schema = ObjectField(schema, "propertyNames");
-		if (property_names_schema && property_names_schema->type == JsonValueType::OBJECT) {
+		if (property_names_schema) {
 			for (auto &property : value.object_value) {
 				JsonValue property_name;
 				property_name.type = JsonValueType::STRING;
@@ -2160,8 +2373,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 					error = JsonPathChild(path, property.first) + " is not allowed by additionalProperties";
 					return false;
 				}
-				if (additional_schema->type == JsonValueType::OBJECT &&
-				    !ValidateJsonValueAgainstSchema(property.second, *additional_schema,
+				if (!ValidateJsonValueAgainstSchema(property.second, *additional_schema,
 				                                    JsonPathChild(path, property.first), error)) {
 					return false;
 				}
@@ -2197,7 +2409,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			}
 		}
 		auto items_schema = ObjectField(schema, "items");
-		if (items_schema && items_schema->type == JsonValueType::OBJECT) {
+		if (items_schema && items_schema->type != JsonValueType::ARRAY) {
 			for (idx_t i = 0; i < value.array_value.size(); i++) {
 				if (!ValidateJsonValueAgainstSchema(value.array_value[i], *items_schema, JsonPathIndex(path, i),
 				                                    error)) {
@@ -2206,7 +2418,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			}
 		}
 		auto contains_schema = ObjectField(schema, "contains");
-		if (contains_schema && contains_schema->type == JsonValueType::OBJECT) {
+		if (contains_schema) {
 			idx_t matches = 0;
 			for (auto &item : value.array_value) {
 				std::string child_error;
@@ -4204,12 +4416,12 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config, const Comp
 	if (config.provider == "mimo") {
 		headers.push_back("api-key: " + config.api_key);
 		if (config.protocol == "anthropic_messages") {
-			headers.push_back("anthropic-version: 2023-06-01");
+			headers.emplace_back("anthropic-version: 2023-06-01");
 		}
 		return headers;
 	}
 	if (config.protocol == "anthropic_messages") {
-		headers.push_back("anthropic-version: 2023-06-01");
+		headers.emplace_back("anthropic-version: 2023-06-01");
 		if (config.provider == "moonshot" || config.provider == "zai") {
 			headers.push_back("Authorization: Bearer " + config.api_key);
 		} else {
@@ -4649,9 +4861,8 @@ void PushUsageEvent(ProviderRuntimeState &state, UsageEvent event) {
 	event.event_id = state.next_usage_event_id++;
 	state.usage_events.push_back(std::move(event));
 	if (state.usage_events.size() > MAX_USAGE_EVENTS) {
-		auto dropped = state.usage_events.size() - MAX_USAGE_EVENTS;
-		state.usage_events.erase(state.usage_events.begin(), state.usage_events.begin() + dropped);
-		state.dropped_usage_events += dropped;
+		state.usage_events.pop_front();
+		state.dropped_usage_events++;
 	}
 }
 
@@ -5021,7 +5232,7 @@ std::string SerializeEmbeddingCacheBody(const ProviderConfig &config, const Embe
 		if (i > 0) {
 			body += ",";
 		}
-		body += JsonDouble(result.values[i]);
+		body += JsonDoubleExact(result.values[i]);
 	}
 	body += config.protocol == "ollama_embed" ? "]]" : "]}]";
 	if (result.prompt_tokens >= 0) {
@@ -5283,14 +5494,14 @@ ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, b
 	// rejected payload instead of failing the whole vector.
 	capabilities.max_batch_inputs = 512;
 	capabilities.max_batch_tokens = 100000;
-	capabilities.max_request_bytes = 8 * 1024 * 1024;
+	capabilities.max_request_bytes = 8LL * 1024 * 1024;
 	capabilities.context_tokens = -1;
 	capabilities.embedding_dimensions = -1;
 	capabilities.native_batch_jobs = false;
 	if (config.protocol == "ollama_embed") {
 		capabilities.max_batch_inputs = 128;
 		capabilities.max_batch_tokens = 32768;
-		capabilities.max_request_bytes = 4 * 1024 * 1024;
+		capabilities.max_request_bytes = 4LL * 1024 * 1024;
 	}
 	if (!options.model_options.empty()) {
 		std::string error;
@@ -5659,8 +5870,12 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 			return EmbedBatchRequest(config, endpoint, batch_inputs, batch_options);
 		} catch (EmbeddingBatchTooLargeException &) {
 			auto split = batch_inputs.size() / 2;
-			std::vector<std::string> left(batch_inputs.begin(), batch_inputs.begin() + split);
-			std::vector<std::string> right(batch_inputs.begin() + split, batch_inputs.end());
+			std::vector<std::string> left(batch_inputs.begin(),
+			                              batch_inputs.begin() +
+			                                  NumericCast<std::vector<std::string>::difference_type>(split));
+			std::vector<std::string> right(batch_inputs.begin() +
+			                                   NumericCast<std::vector<std::string>::difference_type>(split),
+			                               batch_inputs.end());
 			auto left_results = execute_batch(left);
 			auto right_results = execute_batch(right);
 			left_results.insert(left_results.end(), std::make_move_iterator(right_results.begin()),
@@ -5754,7 +5969,7 @@ namespace {
 
 std::vector<UsageEvent> SnapshotUsageEvents(ProviderRuntimeState &state) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
-	return state.usage_events;
+	return {state.usage_events.begin(), state.usage_events.end()};
 }
 
 UsageBufferStats SnapshotUsageStats(ProviderRuntimeState &state) {
@@ -5781,7 +5996,7 @@ void ResetResponseCache(ProviderRuntimeState &state) {
 } // namespace
 
 std::vector<UsageEvent> UsageEvents() {
-	return SnapshotUsageEvents(fallback_runtime_state);
+	return SnapshotUsageEvents(FallbackRuntimeState());
 }
 
 std::vector<UsageEvent> UsageEvents(ClientContext &context) {
@@ -5789,7 +6004,7 @@ std::vector<UsageEvent> UsageEvents(ClientContext &context) {
 }
 
 UsageBufferStats UsageStats() {
-	return SnapshotUsageStats(fallback_runtime_state);
+	return SnapshotUsageStats(FallbackRuntimeState());
 }
 
 UsageBufferStats UsageStats(ClientContext &context) {
@@ -5797,7 +6012,7 @@ UsageBufferStats UsageStats(ClientContext &context) {
 }
 
 void ClearUsageEvents() {
-	ResetUsageEvents(fallback_runtime_state);
+	ResetUsageEvents(FallbackRuntimeState());
 }
 
 void ClearUsageEvents(ClientContext &context) {
@@ -5805,7 +6020,7 @@ void ClearUsageEvents(ClientContext &context) {
 }
 
 void ClearResponseCache() {
-	ResetResponseCache(fallback_runtime_state);
+	ResetResponseCache(FallbackRuntimeState());
 }
 
 void ClearResponseCache(ClientContext &context) {
@@ -5814,16 +6029,8 @@ void ClearResponseCache(ClientContext &context) {
 
 std::vector<ModelPrice> ModelPrices() {
 	auto prices = BuiltinModelPrices();
-	if (CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
-		for (auto &price : prices) {
-			if (price.provider == "gemini" &&
-			    (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash") &&
-			    price.operation == "completion") {
-				price.input_token_price_per_million = 0.75;
-				price.output_token_price_per_million = 3.75;
-				price.source_note = "introductory text token pricing through 2026-12-31";
-			}
-		}
+	for (auto &price : prices) {
+		ApplyCurrentModelPrice(price);
 	}
 	return prices;
 }
@@ -5856,7 +6063,7 @@ void RecordLocalUsageEvent(ClientContext *context, const std::string &event_name
 	event.status = "ok";
 	event.error = "";
 	event.estimated_cost_usd = -1;
-	auto &state = context ? RuntimeState(*context) : fallback_runtime_state;
+	auto &state = context ? RuntimeState(*context) : FallbackRuntimeState();
 	PushUsageEvent(state, std::move(event));
 }
 
@@ -5911,6 +6118,9 @@ JsonExtractedValue ExtractJsonValue(const JsonValue &value) {
 		extracted.kind = JsonExtractedKind::NUMBER;
 		extracted.number_value = value.number_value;
 		extracted.number_is_integer = IsJsonInteger(value);
+		if (extracted.number_is_integer) {
+			extracted.json_value = ExactIntegerText(value);
+		}
 		break;
 	case JsonValueType::STRING:
 		extracted.kind = JsonExtractedKind::STRING;
@@ -5932,7 +6142,7 @@ JsonExtractedValue ExtractJsonValue(const JsonValue &value) {
 	case JsonValueType::OBJECT:
 		extracted.kind = JsonExtractedKind::OBJECT;
 		for (auto &entry : value.object_value) {
-			extracted.object_values.push_back(make_pair(entry.first, ExtractJsonValue(entry.second)));
+			extracted.object_values.emplace_back(entry.first, ExtractJsonValue(entry.second));
 		}
 		break;
 	}
