@@ -7,6 +7,15 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Maintenance
+
+- Build and test against DuckDB 1.5.6 and matching extension CI tooling. This
+  includes the upstream fix for LIMIT/OFFSET pushdown across volatile
+  projections, preserving evaluation order for model-backed SQL expressions.
+  The sanitizer host and platform/distribution builds use the same version.
+  OFFSET can evaluate model calls for skipped rows; paginate in an input
+  subquery when pagination should happen before inference.
+
 ### Fixed
 
 - Classifier centroid accumulation avoids overflowing finite embeddings. Labels
