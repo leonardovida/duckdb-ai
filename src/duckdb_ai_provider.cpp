@@ -2449,23 +2449,9 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	return true;
 }
 
-bool FindJsonStringValue(const std::string &body, const std::string &key, std::string &value) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return false;
-	}
-	return FindYyjsonStringField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, value);
-}
-
-int64_t FindJsonIntegerValue(const std::string &body, const std::string &key) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return -1;
-	}
+int64_t FindYyjsonIntegerValue(duckdb_yyjson::yyjson_val *root, const std::string &key) {
 	int64_t value = -1;
-	if (FindYyjsonIntegerField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, value)) {
+	if (FindYyjsonIntegerField(root, key, value)) {
 		return value;
 	}
 	return -1;
@@ -3122,18 +3108,21 @@ std::string RedactProviderSecrets(const ProviderConfig &config, const std::strin
 
 std::string ProviderErrorDetail(const ProviderConfig &config, const HttpResponse &response) {
 	auto body = RedactProviderSecrets(config, response.body);
+	std::string parse_error;
+	auto doc = ReadYyjsonDocument(body, parse_error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
 	std::string message;
 	std::string error_type;
 	std::string error_code;
-	FindJsonStringValue(body, "message", message);
+	FindYyjsonStringField(root, "message", message);
 	if (message.empty()) {
-		FindJsonStringValue(body, "error", message);
+		FindYyjsonStringField(root, "error", message);
 	}
 	if (message.empty()) {
-		FindJsonStringValue(body, "detail", message);
+		FindYyjsonStringField(root, "detail", message);
 	}
-	FindJsonStringValue(body, "type", error_type);
-	FindJsonStringValue(body, "code", error_code);
+	FindYyjsonStringField(root, "type", error_type);
+	FindYyjsonStringField(root, "code", error_code);
 
 	std::string detail = "AI provider \"" + config.provider + "\" (" + config.protocol + ", model \"" + config.model +
 	                     "\") returned HTTP " + std::to_string(response.status);
@@ -4279,14 +4268,9 @@ std::string EmbeddingPayload(const ProviderConfig &config, const std::vector<std
 	return payload;
 }
 
-std::vector<double> FindEmbeddingArray(const std::string &body, const std::string &key) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return {};
-	}
+std::vector<double> FindEmbeddingArray(duckdb_yyjson::yyjson_val *root, const std::string &key) {
 	std::vector<double> values;
-	if (FindYyjsonNumberArrayField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, values)) {
+	if (FindYyjsonNumberArrayField(root, key, values)) {
 		return values;
 	}
 	return {};
@@ -4298,14 +4282,8 @@ struct ParsedEmbeddingArray {
 	int64_t index = -1;
 };
 
-std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &config, const std::string &body,
+std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &config, duckdb_yyjson::yyjson_val *root,
                                                       idx_t expected_count) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return {};
-	}
-	auto root = duckdb_yyjson::yyjson_doc_get_root(doc.get());
 	std::vector<std::vector<double>> embeddings;
 	if (config.protocol == "ollama_embed") {
 		auto embedding_values = YyjsonObjectGet(root, "embeddings");
@@ -4379,11 +4357,12 @@ std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &conf
 	return embeddings;
 }
 
-EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response) {
+EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response,
+                                     duckdb_yyjson::yyjson_val *root) {
 	EmbeddingResult result;
-	result.values = FindEmbeddingArray(response.body, config.protocol == "ollama_embed" ? "embeddings" : "embedding");
+	result.values = FindEmbeddingArray(root, config.protocol == "ollama_embed" ? "embeddings" : "embedding");
 	if (result.values.empty() && config.protocol != "ollama_embed") {
-		result.values = FindEmbeddingArray(response.body, "embeddings");
+		result.values = FindEmbeddingArray(root, "embeddings");
 	}
 	if (result.values.empty()) {
 		throw IOException("AI provider embedding response contained an empty embedding: %s", response.body);
@@ -4393,24 +4372,34 @@ EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpRes
 	result.elapsed_ms = response.elapsed_ms;
 	result.retries = response.retries;
 	result.cache_hit = response.cache_hit;
-	result.prompt_tokens = FindJsonIntegerValue(response.body, "prompt_tokens");
-	result.total_tokens = FindJsonIntegerValue(response.body, "total_tokens");
+	result.prompt_tokens = FindYyjsonIntegerValue(root, "prompt_tokens");
+	result.total_tokens = FindYyjsonIntegerValue(root, "total_tokens");
 	return result;
+}
+
+EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response) {
+	std::string error;
+	auto doc = ReadYyjsonDocument(response.body, error);
+	return ParseEmbeddingResult(config, response, doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr);
 }
 
 std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config, const HttpResponse &response,
                                                    idx_t expected_count) {
-	auto values = ParseEmbeddingArrays(config, response.body, expected_count);
+	// Keep one document alive for all array and usage lookups, including scalar fallback.
+	std::string error;
+	auto doc = ReadYyjsonDocument(response.body, error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+	auto values = ParseEmbeddingArrays(config, root, expected_count);
 	if (values.size() != expected_count) {
 		if (expected_count == 1) {
-			return {ParseEmbeddingResult(config, response)};
+			return {ParseEmbeddingResult(config, response, root)};
 		}
 		throw IOException("AI provider embedding response returned %llu embeddings for %llu inputs",
 		                  static_cast<unsigned long long>(values.size()),
 		                  static_cast<unsigned long long>(expected_count));
 	}
-	auto prompt_tokens = FindJsonIntegerValue(response.body, "prompt_tokens");
-	auto total_tokens = FindJsonIntegerValue(response.body, "total_tokens");
+	auto prompt_tokens = FindYyjsonIntegerValue(root, "prompt_tokens");
+	auto total_tokens = FindYyjsonIntegerValue(root, "total_tokens");
 	std::vector<EmbeddingResult> results;
 	results.reserve(values.size());
 	auto distribute_tokens = [&](int64_t tokens, idx_t index) {
