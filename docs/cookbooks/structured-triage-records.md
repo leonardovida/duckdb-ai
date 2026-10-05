@@ -1,5 +1,9 @@
 ---
 sidebar_position: 6
+title: "Extract typed records from model output"
+sidebar_label: "Typed records from model output"
+description: "Extract structured JSON from LLM output and project it into typed DuckDB columns with ai_complete_record and ai_extract_record."
+keywords: ["LLM structured output DuckDB", "JSON Schema extraction", "ai_extract_record"]
 ---
 
 # Extract typed records from model output

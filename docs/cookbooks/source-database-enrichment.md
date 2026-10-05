@@ -1,5 +1,8 @@
 ---
 sidebar_position: 9
+title: "Enrich rows from Postgres or MySQL safely"
+sidebar_label: "Postgres and MySQL enrichment"
+description: "Enrich Postgres or MySQL rows with LLMs from DuckDB safely: attach read-only, materialize local batches and write to reviewed staging tables."
 ---
 
 # Enrich rows from Postgres or MySQL safely

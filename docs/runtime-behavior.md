@@ -1,5 +1,9 @@
 ---
 sidebar_position: 5
+title: "Runtime behavior"
+sidebar_label: "Runtime behavior"
+description: "How DuckDB AI runs provider calls: function volatility, concurrency, retries, timeouts, response caching, cancellation, token limits and egress allowlists."
+keywords: ["DuckDB AI runtime", "LLM retries", "LLM caching", "concurrency", "timeouts"]
 ---
 
 # Runtime behavior

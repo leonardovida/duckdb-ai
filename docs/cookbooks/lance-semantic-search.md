@@ -1,5 +1,9 @@
 ---
 sidebar_position: 5
+title: "Store embeddings in Lance for semantic search"
+sidebar_label: "Semantic search with Lance"
+description: "Store DuckDB AI embeddings in Lance, build a vector index, and combine semantic search, full-text search and reranking in SQL."
+keywords: ["DuckDB vector search", "DuckDB embeddings", "Lance", "semantic search SQL"]
 ---
 
 # Store embeddings in Lance for semantic search

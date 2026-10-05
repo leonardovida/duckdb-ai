@@ -1,5 +1,9 @@
 ---
 sidebar_position: 1
+title: "Cookbooks"
+sidebar_label: "Cookbooks"
+description: "Practical DuckDB AI recipes: enrich tables with LLMs, extract typed records, build semantic search with embeddings, run resumable batch jobs and generate SQL from questions."
+keywords: ["DuckDB LLM examples", "AI SQL recipes", "semantic search DuckDB", "text-to-SQL DuckDB"]
 ---
 
 # Cookbooks

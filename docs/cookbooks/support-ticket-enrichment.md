@@ -1,5 +1,9 @@
 ---
 sidebar_position: 3
+title: "Enrich support tickets with AI text functions"
+sidebar_label: "Enrich text columns"
+description: "Summarize, classify, filter, extract, redact and translate text columns with LLM functions in DuckDB SQL."
+keywords: ["DuckDB LLM classification", "ai_summarize", "ai_classify", "ai_translate"]
 ---
 
 # Enrich support tickets with AI text functions

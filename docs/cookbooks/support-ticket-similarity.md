@@ -1,5 +1,8 @@
 ---
 sidebar_position: 4
+title: "Compare support tickets with embeddings"
+sidebar_label: "Similarity with embeddings"
+description: "Find semantically similar rows in DuckDB with ai_embed and ai_similarity."
 ---
 
 # Compare support tickets with embeddings
