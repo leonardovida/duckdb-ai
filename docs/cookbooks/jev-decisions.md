@@ -7,6 +7,12 @@ description: "Classify, score and flag DuckDB table rows with ai_jev and get typ
 
 # Turn rows into typed Jev decisions
 
+:::tip Other decision models
+Every query on this page also works with `ai_decide` and another provider,
+for example `ai_decide(body, {...}, provider := 'ollama')` for a local model or
+`provider := 'cloudflare'` for Clef. See [decision models](../provider-guides.md#decision-models).
+:::
+
 Use `ai_jev` to classify, rate and flag table rows in one call. You write the
 criteria as SQL values and get a `STRUCT` back. Its fields work directly in
 `SELECT`, `WHERE`, aggregations and Parquet exports, without parsing JSON.

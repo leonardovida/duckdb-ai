@@ -171,7 +171,7 @@ in [provider settings and secrets](docs/functions.md#provider-settings-and-secre
 | Summarize groups | `ai_agg`, `ai_summarize_agg` (aggregates) | text per group |
 | Prepare documents for RAG | `ai_generate_chunks`, `ai_prep_search`, `ai_parse_document` | chunk tables |
 | Text-to-SQL | `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` | SQL text; query results |
-| Typed decisions at scale | `ai_jev` ([TypeSafe Jev](docs/cookbooks/jev-decisions.md)) | `STRUCT` of choices, scores and probabilities |
+| Typed decisions at scale | `ai_decide` ([decision models](docs/provider-guides.md#decision-models): Jev, Clef, Perplexity, Ollama) | `STRUCT` of choices, scores and probabilities |
 | Raw provider APIs | `ai_provider_call` | full provider JSON (tools, reasoning, streaming events) |
 | Preview without calling a model | `ai_completion_request_json`, `ai_embedding_request_json`, `ai_count_tokens` | request JSON; approximate token count |
 | Usage, cost and caches | `ai_usage()`, `ai_usage_summary()`, `ai_usage_totals()`, `ai_query_cache_stats()` | tables |
@@ -359,7 +359,7 @@ more detail.
   or splitting successes from failures. `cache := true` enables an opt-in
   in-memory response cache.
 - Table functions (`ai_complete_record`, `ai_query_data`, `ai_usage`,
-  `ai_schema_prompt`) go in `FROM`. `ai_extract_record` and `ai_jev` are
+  `ai_schema_prompt`) go in `FROM`. `ai_extract_record` and `ai_decide` are
   scalars that return a `STRUCT`, and their schema arguments must be constants.
 - Use `ai_try_complete` or `on_error := 'null'` so that one bad row does not
   abort a batch.
@@ -386,7 +386,7 @@ names, aliases, credentials, endpoints, default models and embedding support.
 | Hosted models | OpenAI, Anthropic Claude, Google Gemini, Mistral, DeepSeek, xAI, Cohere, Perplexity, Groq, Cerebras, Fireworks AI, Together AI, DeepInfra, Hugging Face, NVIDIA NIM, Nebius, SambaNova, SiliconFlow |
 | Cloud platforms and gateways | Azure OpenAI, Amazon Bedrock, Google Vertex AI, Cloudflare Workers AI, Databricks, Snowflake Cortex, OpenRouter, Vercel AI Gateway, Poe |
 | Additional model platforms | Alibaba DashScope (Qwen), Moonshot (Kimi), MiniMax, Z.ai (GLM), Tencent Hunyuan, Baidu Qianfan (ERNIE), StepFun, Volcengine (Doubao) |
-| Structured decisions | TypeSafe Jev, through `ai_jev` |
+| Decision models, through `ai_decide` | TypeSafe Jev, Cloudflare Clef, Perplexity Decider, Ollama (Nimble, Tev1), any `/v1/systemone` endpoint |
 
 Provider capabilities differ: not every provider offers embeddings, JSON
 Schema enforcement, or every native API. Tests use local mocks of each
