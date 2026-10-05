@@ -1,5 +1,9 @@
 ---
 sidebar_position: 4
+title: "Best practices"
+sidebar_label: "Best practices"
+description: "Production best practices for LLM calls in DuckDB SQL: provider choice, secrets, model defaults, structured output, SQL safety, redaction, rate limits, caching, logging and cost."
+keywords: ["DuckDB LLM production", "AI batch enrichment", "LLM rate limits", "LLM cost control"]
 ---
 
 # Best practices

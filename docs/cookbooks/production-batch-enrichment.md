@@ -1,5 +1,9 @@
 ---
 sidebar_position: 8
+title: "Run production batch enrichment from S3 or Parquet"
+sidebar_label: "Batch enrichment from S3 or Parquet"
+description: "Run LLM enrichment over Parquet or S3 data in DuckDB with bounded batches, row-level failure capture and durable output files."
+keywords: ["DuckDB LLM batch", "S3 Parquet enrichment", "ai_try_complete"]
 ---
 
 # Run production batch enrichment from S3 or Parquet

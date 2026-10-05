@@ -1,5 +1,9 @@
 ---
 sidebar_position: 3
+title: "Provider guides"
+sidebar_label: "Provider guides"
+description: "Configure DuckDB AI with Ollama, llama.cpp, OpenAI, Anthropic Claude, Gemini, Azure OpenAI, Bedrock, Vertex AI, Databricks, Snowflake Cortex, OpenRouter and 30 more LLM providers."
+keywords: ["DuckDB Ollama", "DuckDB OpenAI", "DuckDB Claude", "DuckDB Gemini", "LLM provider setup", "OpenAI-compatible gateway"]
 ---
 
 # Provider guides

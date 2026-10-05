@@ -1,5 +1,7 @@
 ---
 title: Use DuckDB AI from coding agents
+sidebar_label: Agent guide
+keywords: ["DuckDB AI agent", "LLM SQL for coding agents", "Claude Code DuckDB", "llms.txt", "DuckDB function discovery"]
 description: Discover DuckDB AI SQL functions, configure model providers, preview requests without credentials, and verify integrations with local mocks.
 ---
 
@@ -100,6 +102,35 @@ credit response does not verify a successful completion.
 See [security and data flow](security-data-flow.md) for the data sent by each
 function family, and [runtime behavior](runtime-behavior.md) for retries,
 rate limits, caching, and cancellation.
+
+## Avoid repeated or unbounded model calls
+
+- Model functions run once per input row. Bound the input in a subquery, for
+  example `FROM (SELECT * FROM t ORDER BY id LIMIT 100)`. An outer `OFFSET` can
+  still evaluate model calls for the rows it skips, so paginate inside the
+  input subquery.
+- Model functions are `VOLATILE`: re-running a query, or referencing the same
+  call in several places, calls the provider again. Save results with
+  `CREATE TABLE ... AS SELECT ...` and read fields from that table.
+- `cache := true` (or `SET duckdb_ai_cache = true`) adds an opt-in in-memory
+  response cache for the current DuckDB instance. It does not persist across
+  processes.
+- Use `ai_count_tokens` and `ai_recommended_batch_size` to size batches before
+  calling a rate-limited provider.
+
+## Machine-readable documentation
+
+The documentation site publishes two plain-text files for LLMs and agents,
+regenerated on every docs build:
+
+- [`llms.txt`](https://leonardovida.github.io/duckdb-ai/llms.txt): an index of
+  every page with a one-line description.
+- [`llms-full.txt`](https://leonardovida.github.io/duckdb-ai/llms-full.txt):
+  the full Markdown text of every page in one file.
+
+Fetch `llms-full.txt` when you need the complete function reference in context.
+It documents the source on `main`, so confirm the installed version as shown
+above before relying on a recently added function.
 
 ## Verify source changes
 

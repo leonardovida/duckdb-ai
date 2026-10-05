@@ -1,5 +1,8 @@
 ---
 sidebar_position: 12
+title: "Normalize messy documents into structured records"
+sidebar_label: "Messy document intake"
+description: "Normalize mixed JSON, Avro, Excel and CSV inputs into one typed table with LLM extraction in DuckDB SQL."
 ---
 
 # Normalize messy documents into structured records

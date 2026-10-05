@@ -1,5 +1,8 @@
 ---
 sidebar_position: 9
+title: "Resume a local enrichment job"
+sidebar_label: "Resumable enrichment"
+description: "Checkpoint DuckDB LLM enrichment jobs in bounded batches and retry failed rows without repeating saved successes."
 ---
 
 # Resume a local enrichment job

@@ -1,5 +1,8 @@
 ---
 sidebar_position: 2
+title: "Create the sample support tickets table"
+sidebar_label: "Sample support tickets table"
+description: "Create the sample support_tickets table used by the DuckDB AI cookbook examples."
 ---
 
 # Create the sample support tickets table

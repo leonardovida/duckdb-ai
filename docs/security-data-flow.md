@@ -1,5 +1,9 @@
 ---
 sidebar_position: 6
+title: "Security and data flow"
+sidebar_label: "Security and data flow"
+description: "What data DuckDB AI sends to model providers, how credentials are resolved, egress controls, logging defaults and how to keep inference fully local."
+keywords: ["DuckDB AI security", "LLM data privacy", "local LLM", "egress control", "PII redaction"]
 ---
 
 # Security and data flow

@@ -1,5 +1,9 @@
 ---
 sidebar_position: 7
+title: "Generate read-only SQL over local tables"
+sidebar_label: "Text-to-SQL over local tables"
+description: "Generate and run read-only DuckDB SELECT statements from natural-language questions with ai_sql and ai_query_data."
+keywords: ["DuckDB text-to-SQL", "natural language to SQL", "ai_sql", "ai_query_data"]
 ---
 
 # Generate read-only SQL over local tables

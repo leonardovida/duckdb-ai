@@ -2,11 +2,19 @@ import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
+import llmsTxtPlugin from './plugins/llms-txt';
+import sidebars from './sidebars';
+
+const siteDescription =
+  'duckdb-ai is a DuckDB extension that calls LLMs from SQL: classify, summarize ' +
+  'and extract typed data, generate embeddings for semantic search, and turn ' +
+  'questions into read-only SQL, with Ollama, OpenAI, Claude, Gemini and 30+ providers.';
+
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
 const config: Config = {
-  title: 'duckdb-ai',
-  tagline: 'AI provider functions for DuckDB SQL',
+  title: 'DuckDB AI extension',
+  tagline: 'Call LLMs and embedding models from DuckDB SQL',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
@@ -40,6 +48,38 @@ const config: Config = {
     locales: ['en'],
   },
 
+  headTags: [
+    {
+      tagName: 'script',
+      attributes: {type: 'application/ld+json'},
+      innerHTML: JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareSourceCode',
+        name: 'duckdb-ai',
+        alternateName: 'DuckDB AI extension',
+        description: siteDescription,
+        url: 'https://leonardovida.github.io/duckdb-ai/',
+        codeRepository: 'https://github.com/leonardovida/duckdb-ai',
+        programmingLanguage: ['SQL', 'C++'],
+        runtimePlatform: 'DuckDB',
+        license: 'https://opensource.org/licenses/MIT',
+        keywords:
+          'DuckDB, LLM, AI SQL functions, embeddings, semantic search, text-to-SQL, Ollama, OpenAI, Claude, Gemini',
+      }),
+    },
+  ],
+
+  plugins: [
+    [
+      llmsTxtPlugin,
+      {
+        docsDir: '../docs',
+        sidebar: sidebars.docsSidebar,
+        summary: siteDescription,
+      },
+    ],
+  ],
+
   presets: [
     [
       'classic',
@@ -60,6 +100,17 @@ const config: Config = {
   ],
 
   themeConfig: {
+    metadata: [
+      {name: 'description', content: siteDescription},
+      {
+        name: 'keywords',
+        content:
+          'DuckDB AI, DuckDB LLM, DuckDB extension, LLM in SQL, AI SQL functions, DuckDB embeddings, semantic search, text-to-SQL, Ollama, OpenAI, Claude, Gemini',
+      },
+      {property: 'og:type', content: 'website'},
+      {property: 'og:site_name', content: 'duckdb-ai'},
+      {name: 'twitter:card', content: 'summary'},
+    ],
     colorMode: {
       respectPrefersColorScheme: true,
     },

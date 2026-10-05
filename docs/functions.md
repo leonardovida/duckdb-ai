@@ -1,5 +1,9 @@
 ---
 sidebar_position: 2
+title: "SQL function reference"
+sidebar_label: "SQL function reference"
+description: "DuckDB AI SQL function reference: ai_complete, ai_classify, ai_extract_record, ai_embed, ai_query_data and every other function, with named options, settings, examples and result types."
+keywords: ["DuckDB AI functions", "ai_complete", "ai_embed", "ai_classify", "LLM SQL functions", "DuckDB settings"]
 ---
 
 # SQL function reference
@@ -1399,6 +1403,46 @@ SET duckdb_ai_timeout_seconds = 120;
 SET duckdb_ai_allowed_hosts = 'api.openai.com,collector.example';
 SET duckdb_ai_cache = true;
 ```
+
+Every setting below is a session default. The matching named option on a call
+overrides it. A numeric value of `-1`, or an empty or `NULL` value, means the
+extension default applies. To list the settings in your installed version, run
+`SELECT name, input_type, description FROM duckdb_settings() WHERE starts_with(name, 'duckdb_ai');`.
+
+| Setting | Type | Description |
+| --- | --- | --- |
+| `duckdb_ai_provider` | `VARCHAR` | Default provider. |
+| `duckdb_ai_model` | `VARCHAR` | Global default model. |
+| `duckdb_ai_completion_model` | `VARCHAR` | Default model for completion functions. |
+| `duckdb_ai_task_model` | `VARCHAR` | Default model for text task functions. |
+| `duckdb_ai_aggregate_model` | `VARCHAR` | Default model for aggregate functions. |
+| `duckdb_ai_sql_assistant_model` | `VARCHAR` | Default model for SQL assistant functions. |
+| `duckdb_ai_embedding_model` | `VARCHAR` | Default model for embedding functions. |
+| `duckdb_ai_base_url` | `VARCHAR` | Provider base URL override. |
+| `duckdb_ai_allowed_hosts` | `VARCHAR` | Comma-separated provider and logging host allowlist. Empty allows all hosts. |
+| `duckdb_ai_timeout_seconds` | `BIGINT` | HTTP timeout in seconds. `0` uses the extension default. |
+| `duckdb_ai_connect_timeout_seconds` | `BIGINT` | Connection timeout from 1 to 31536000 seconds. |
+| `duckdb_ai_retry_count` | `BIGINT` | Retries from 0 to 10 for transport failures and retryable HTTP statuses. |
+| `duckdb_ai_retry_backoff_ms` | `BIGINT` | Base retry backoff from 0 to 60000 milliseconds. |
+| `duckdb_ai_max_concurrent_requests` | `BIGINT` | Concurrent provider requests from 0 to 64. `0` disables the limit. |
+| `duckdb_ai_min_request_interval_ms` | `BIGINT` | Minimum interval between request starts, from 0 to 60000 milliseconds. |
+| `duckdb_ai_token_limit_per_minute` | `BIGINT` | Estimated token cap per rolling minute. `0` disables the limit. |
+| `duckdb_ai_on_error` | `VARCHAR` | Error handling: `fail`, `null`, or `capture`. |
+| `duckdb_ai_response_format` | `VARCHAR` | Default response format: `text`, `json_object`, or `json_schema`. |
+| `duckdb_ai_response_schema` | `VARCHAR` | Default JSON Schema object for structured responses. |
+| `duckdb_ai_cache` | `BOOLEAN` | Cache successful provider responses in the current DuckDB instance. |
+| `duckdb_ai_cache_max_entries` | `BIGINT` | Response-cache entries from 0 to 1000000. `0` disables cache storage. |
+| `duckdb_ai_cache_ttl_seconds` | `BIGINT` | Response-cache entry age from 0 to 31536000 seconds. `0` disables age expiry. |
+| `duckdb_ai_prompt_cache` | `BOOLEAN` | Send provider-side prompt-cache hints where supported. |
+| `duckdb_ai_input_token_price_per_million` | `DOUBLE` | Input token price for estimated usage cost. `-1` disables manual pricing. |
+| `duckdb_ai_output_token_price_per_million` | `DOUBLE` | Output token price for estimated usage cost. `-1` disables manual pricing. |
+| `duckdb_ai_use_builtin_model_prices` | `BOOLEAN` | Estimate cost from the built-in `ai_model_prices()` catalog. |
+| `duckdb_ai_log_endpoint` | `VARCHAR` | HTTP endpoint for privacy-minimized usage logs. |
+| `duckdb_ai_log_format` | `VARCHAR` | Usage log payload format: `generic_json` or `otlp_json`. |
+| `duckdb_ai_log_tags` | `VARCHAR` | Tag string included in usage logs. |
+| `duckdb_ai_log_sample_rate` | `DOUBLE` | Usage log sampling rate from 0 to 1. |
+| `duckdb_ai_log_include_text` | `BOOLEAN` | Include prompt and response text in usage logs. |
+| `duckdb_ai_log_strict` | `BOOLEAN` | Fail the SQL query when usage log delivery fails. |
 
 `duckdb_ai_model` is the global model fallback. Family-specific model settings
 override it for their function groups, while per-call `model := ...` still takes

@@ -1,5 +1,8 @@
 ---
 sidebar_position: 7
+title: "Turn rows into typed Jev decisions"
+sidebar_label: "Typed Jev decisions"
+description: "Classify, score and flag DuckDB table rows with ai_jev and get typed STRUCT fields you can filter, aggregate and export without parsing JSON."
 ---
 
 # Turn rows into typed Jev decisions

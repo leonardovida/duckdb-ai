@@ -1,5 +1,8 @@
 ---
 sidebar_position: 10
+title: "Write audited AI outputs to lakehouse tables"
+sidebar_label: "Audited lakehouse output"
+description: "Write LLM outputs from DuckDB to Parquet, Delta, Iceberg or DuckLake tables with run metadata, rejected rows and usage events for auditing."
 ---
 
 # Write audited AI outputs to lakehouse tables

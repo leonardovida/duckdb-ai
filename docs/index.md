@@ -1,21 +1,30 @@
 ---
 sidebar_position: 1
 slug: /
-title: DuckDB AI extension — LLMs, embeddings, and structured extraction in SQL
-description: Run local or hosted AI models from DuckDB SQL. Start with agent integration, provider setup, embeddings, JSON extraction, and text-to-SQL examples.
+title: "LLMs, embeddings and text-to-SQL in DuckDB SQL"
+sidebar_label: Overview
+description: "Call LLMs from DuckDB SQL with the ai extension: classify, summarize and extract typed data, generate embeddings for semantic search, and ask questions in natural language, with Ollama, OpenAI, Claude, Gemini and 30+ providers."
+keywords: ["DuckDB AI", "DuckDB LLM", "LLM in SQL", "DuckDB extension", "DuckDB embeddings", "DuckDB Ollama", "DuckDB OpenAI", "text-to-SQL", "AI SQL functions"]
 ---
 
 # DuckDB AI: LLMs and embeddings in SQL
 
-duckdb-ai adds AI functions to DuckDB SQL for text summarization, classification,
-structured JSON extraction, embeddings, semantic search preparation, and
-text-to-SQL. Use local Ollama or llama.cpp models, hosted APIs such as OpenAI,
-Claude and Gemini, or enterprise gateways such as Databricks and Snowflake Cortex.
+duckdb-ai is a DuckDB extension that calls large language models from SQL.
+Use it to summarize, classify and filter rows, extract typed fields with a
+JSON Schema, generate embeddings for semantic search and RAG, and turn
+natural-language questions into read-only SQL. It works with local models
+(Ollama, llama.cpp, any OpenAI-compatible server) and hosted providers such as
+OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, Amazon Bedrock,
+Databricks and Snowflake Cortex.
 
-The extension is named `ai`; its functions use `ai_*` and its settings use
-`duckdb_ai_*`. Check the installed version before using source-only features.
+| What | Name |
+| --- | --- |
+| Extension (`INSTALL` / `LOAD`) | `ai` |
+| SQL functions | `ai_*` |
+| Settings | `duckdb_ai_*` |
+| Secret type | `TYPE duckdb_ai` |
 
-## Installation
+## Install
 
 The extension is published as a
 [DuckDB community extension](https://duckdb.org/community_extensions/extensions/ai):
@@ -25,25 +34,47 @@ INSTALL ai FROM community;
 LOAD ai;
 ```
 
-## Start here
+These docs describe the source on `main`. The community package can lag behind
+it, so check what your installed version provides:
 
-- [Agent integration guide](agent-guide.md): discover the installed API, configure
-  credentials, preview requests, and verify behavior with local mocks.
-- [SQL function reference](functions.md): every scalar, aggregate, and table
-  function exposed by the extension, with examples and result shapes.
-- [Cookbooks](cookbooks/index.md): practical workflows over local tables and
-  production inputs, including batch enrichment, source database enrichment,
-  audited outputs, observability, document intake, similarity, Lance-backed
-  semantic search, structured records, and SQL generation.
-- [Provider guides](provider-guides.md): end-to-end examples for Ollama, OpenAI,
-  Azure OpenAI, Claude, Gemini, Mistral, Z.ai, DeepSeek, OpenRouter,
-  Databricks, Snowflake Cortex REST, OpenAI Privacy Filter, and local
-  OpenAI-compatible gateways.
-- [Best practices](best-practices.md): provider selection, secrets, model
-  defaults, structured output, SQL safety, redaction, logging, throughput, cost,
-  and release validation guidance.
-- [Runtime behavior](runtime-behavior.md): function stability, per-database
-  runtime state, response caching, provider concurrency, cancellation, retries,
-  egress allowlisting, and JSON parsing.
-- [Security and data flow](security-data-flow.md): egress controls, per-function
-  data flow, logging defaults, proxy/TLS notes, and vulnerability reporting.
+```sql
+SELECT function_name
+FROM duckdb_functions()
+WHERE starts_with(function_name, 'ai_')
+ORDER BY function_name;
+```
+
+## First query
+
+With [Ollama](https://ollama.com/download) running locally and a model pulled
+(`ollama pull qwen3.8:27b`), no API key is needed:
+
+```sql
+SET duckdb_ai_provider = 'ollama';
+SET duckdb_ai_model = 'qwen3.8:27b';
+
+SELECT ai_complete('Describe DuckDB in one sentence.');
+
+SELECT ticket,
+       ai_classify(ticket, ['billing', 'performance', 'other']) AS category
+FROM (VALUES ('I was charged twice.'), ('My query got slow.')) AS t(ticket);
+```
+
+To use a hosted provider, put its API key in an environment variable and
+follow the [provider guides](provider-guides.md).
+
+## Find your way around
+
+| If you want to | Read |
+| --- | --- |
+| Look up a function, option or setting | [SQL function reference](functions.md) |
+| Configure a local or hosted model | [Provider guides](provider-guides.md) |
+| Copy a working workflow | [Cookbooks](cookbooks/index.md) |
+| Write SQL for this extension from an agent | [Agent guide](agent-guide.md) |
+| Run AI enrichment in production | [Best practices](best-practices.md) |
+| Understand retries, caching and concurrency | [Runtime behavior](runtime-behavior.md) |
+| Know what data leaves your machine | [Security and data flow](security-data-flow.md) |
+
+Agents and LLM tools can read the whole documentation set as plain text from
+[`llms.txt`](https://leonardovida.github.io/duckdb-ai/llms.txt) and
+[`llms-full.txt`](https://leonardovida.github.io/duckdb-ai/llms-full.txt).

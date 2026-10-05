@@ -1,5 +1,8 @@
 ---
 sidebar_position: 11
+title: "Monitor AI usage, failures, and cost"
+sidebar_label: "Usage, failures and cost"
+description: "Monitor DuckDB AI provider calls: latency, retries, failures, cache hits, token counts and estimated cost with ai_usage()."
 ---
 
 # Monitor AI usage, failures, and cost

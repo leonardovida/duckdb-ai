@@ -3,8 +3,10 @@
 #
 # Code and test changes run formatting, clang-tidy, release build, SQLLogicTests,
 # and deterministic provider smokes. The Jev cookbook is included because its
-# SQL is executed by the mock smoke suite. macOS/Windows and owned-code sanitizers
-# run on every change; the full distribution matrix remains manual.
+# SQL is executed by the mock smoke suite. The function reference is included
+# because docs_coverage_smoke.py checks it against the registered functions.
+# macOS/Windows and owned-code sanitizers run on every change; the full
+# distribution matrix remains manual.
 #
 name: CI
 
@@ -26,6 +28,7 @@ on:
       - 'examples/**'
       - 'scripts/**'
       - 'docs/cookbooks/jev-decisions.md'
+      - 'docs/functions.md'
   push:
     branches:
       - main
@@ -45,6 +48,7 @@ on:
       - 'examples/**'
       - 'scripts/**'
       - 'docs/cookbooks/jev-decisions.md'
+      - 'docs/functions.md'
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
@@ -189,6 +193,7 @@ jobs:
         shell: bash
         run: |
           python3 test/smoke/mock_provider_smoke.py
+          python3 test/smoke/docs_coverage_smoke.py
           python3 test/smoke/extension_upload_smoke.py
           python3 test/smoke/resumable_enrichment_smoke.py
           python3 test/smoke/jev_batch_evaluation_smoke.py
