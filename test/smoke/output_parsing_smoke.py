@@ -3,20 +3,19 @@
 schema-to-type mapping, decision answers, SQL extraction and usage rows. No network calls leave localhost."""
 import json
 import os
-import re
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MARKER = re.compile(r"<<<(.*?)>>>", re.S)
 
 
 def find_marker(value):
     if isinstance(value, str):
-        match = MARKER.search(value)
-        return match.group(1).replace("~NL~", "\n") if match else None
+        start = value.find("<<<")
+        end = value.find(">>>", start + 3) if start >= 0 else -1
+        return value[start + 3 : end].replace("~NL~", "\n") if end >= 0 else None
     items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
     for item in items:
         found = find_marker(item)
