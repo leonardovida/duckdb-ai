@@ -17,6 +17,14 @@ include SQL API changes and patch versions should preserve the SQL API.
   `systemone` provider. Questions can carry their own `instructions`.
   `ai_jev` is unchanged and remains available as the TypeSafe-only form.
 
+### Documentation
+
+- New [chain AI steps](docs/cookbooks/chain-ai-steps.md) cookbook and agent
+  guide section. They cover calling each model function once per row,
+  skipping failed and NULL rows downstream, branching with `CASE`, and
+  checkpointing each step so reruns only retry missing rows. A new smoke test
+  pins these call counts and runs the cookbook SQL.
+
 ### Maintenance
 
 - Build and test against DuckDB 1.5.6 and matching extension CI tooling. This

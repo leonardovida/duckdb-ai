@@ -303,6 +303,7 @@ SELECT * FROM ai_usage_summary();
 ```
 
 Related cookbooks:
+[chaining several AI steps](docs/cookbooks/chain-ai-steps.md),
 [production batch enrichment](docs/cookbooks/production-batch-enrichment.md),
 [resumable enrichment](docs/cookbooks/resumable-enrichment.md),
 [enriching Postgres or MySQL rows](docs/cookbooks/source-database-enrichment.md),
