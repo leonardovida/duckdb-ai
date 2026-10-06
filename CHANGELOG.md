@@ -5,7 +5,7 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
-## Unreleased
+## 0.7.0 - 2026-10-06
 
 ### Added
 
