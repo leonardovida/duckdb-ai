@@ -8377,7 +8377,7 @@ vector<AiTextChunk> BuildTextChunks(const std::string &input, std::string source
 }
 
 //! Applies one ai_generate_chunks or ai_prep_search option. Returns an error message, or an empty string.
-std::string ApplyChunkOption(AiChunkBindData &data, const std::string &name_p, Value value) {
+std::string ApplyChunkOption(AiChunkBindData &data, const std::string &name_p, const Value &value) {
 	auto name = LowerAscii(name_p);
 	auto prep_search = data.prep_search;
 	if (name == "chunk_size") {

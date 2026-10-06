@@ -2116,11 +2116,11 @@ std::string SchemaTypeName(const JsonValue &schema) {
 
 //! Follows a local "$ref" (for example "#/$defs/Address") and unwraps an anyOf or oneOf with one non-null branch,
 //! so {"anyOf": [{"type": "string"}, {"type": "null"}]} maps like {"type": "string"}.
-const JsonValue &ResolveSchemaNode(const JsonValue &root, const JsonValue &schema, idx_t depth = 0) {
-	if (depth > 32 || schema.type != JsonValueType::OBJECT) {
+const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schema, idx_t depth = 0) {
+	if (depth > 32 || schema->type != JsonValueType::OBJECT) {
 		return schema;
 	}
-	auto ref = ObjectField(schema, "$ref");
+	auto ref = ObjectField(*schema, "$ref");
 	if (ref && ref->type == JsonValueType::STRING && !ref->string_value.empty() && ref->string_value[0] == '#') {
 		auto pointer = ref->string_value.substr(1);
 		const JsonValue *node = &root;
@@ -2145,27 +2145,27 @@ const JsonValue &ResolveSchemaNode(const JsonValue &root, const JsonValue &schem
 			node = ObjectField(*node, unescaped);
 			position = next == std::string::npos ? pointer.size() : next;
 		}
-		return node ? ResolveSchemaNode(root, *node, depth + 1) : schema;
+		return node ? ResolveSchemaNode(root, node, depth + 1) : schema;
 	}
-	if (ObjectField(schema, "type") || ObjectField(schema, "properties")) {
+	if (ObjectField(*schema, "type") || ObjectField(*schema, "properties")) {
 		return schema;
 	}
 	for (auto keyword : {"anyOf", "oneOf"}) {
-		auto branches = ObjectField(schema, keyword);
+		auto branches = ObjectField(*schema, keyword);
 		if (!branches || branches->type != JsonValueType::ARRAY) {
 			continue;
 		}
 		const JsonValue *only = nullptr;
 		idx_t non_null = 0;
 		for (auto &branch : branches->array_value) {
-			auto &resolved = ResolveSchemaNode(root, branch, depth + 1);
-			if (SchemaTypeName(resolved) != "null") {
-				only = &resolved;
+			auto resolved = ResolveSchemaNode(root, &branch, depth + 1);
+			if (SchemaTypeName(*resolved) != "null") {
+				only = resolved;
 				non_null++;
 			}
 		}
 		if (non_null == 1) {
-			return *only;
+			return only;
 		}
 	}
 	return schema;
@@ -2173,7 +2173,7 @@ const JsonValue &ResolveSchemaNode(const JsonValue &root, const JsonValue &schem
 
 void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
                                std::vector<JsonSchemaProperty> &properties) {
-	auto &schema = ResolveSchemaNode(root, schema_p);
+	auto &schema = *ResolveSchemaNode(root, &schema_p);
 	if (schema.type != JsonValueType::OBJECT) {
 		return;
 	}
@@ -2183,7 +2183,7 @@ void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
 	}
 	auto required_schema = ObjectField(schema, "required");
 	for (auto &name : properties_schema->object_keys) {
-		auto &property_schema = ResolveSchemaNode(root, properties_schema->object_value.at(name));
+		auto &property_schema = *ResolveSchemaNode(root, &properties_schema->object_value.at(name));
 		JsonSchemaProperty property;
 		property.name = name;
 		property.type = property_schema.type == JsonValueType::OBJECT ? SchemaTypeName(property_schema) : "json";
@@ -2202,7 +2202,7 @@ void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
 		if (property.type == "array" && property_schema.type == JsonValueType::OBJECT) {
 			auto items_schema = ObjectField(property_schema, "items");
 			if (items_schema && items_schema->type == JsonValueType::OBJECT) {
-				auto &item_schema = ResolveSchemaNode(root, *items_schema);
+				auto &item_schema = *ResolveSchemaNode(root, items_schema);
 				property.item_type = SchemaTypeName(item_schema);
 				if (property.item_type == "object") {
 					ExtractSchemaPropertyList(root, item_schema, property.item_children);
@@ -6486,7 +6486,7 @@ bool ExtractJsonSchemaProperties(const std::string &schema, std::vector<JsonSche
 		error = "schema must be a JSON object";
 		return false;
 	}
-	auto &root_schema = ResolveSchemaNode(schema_value, schema_value);
+	auto &root_schema = *ResolveSchemaNode(schema_value, &schema_value);
 	auto root_type = ObjectField(root_schema, "type");
 	JsonValue object_value;
 	object_value.type = JsonValueType::OBJECT;
