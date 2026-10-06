@@ -39,7 +39,8 @@ ORDER BY function_name;
 Use [the function reference](functions.md) for named options and full signatures.
 The runtime function catalog may display generic parameter names and separate
 overloads. Table functions such as `ai_usage()` and `ai_complete_record()` belong
-in `FROM`; `ai_extract_record()` is a scalar returning a `STRUCT` per input row.
+in `FROM`. `ai_extract_record()` and `ai_decide()` are scalars that return one
+`STRUCT` per input row.
 
 ## Configure the intended provider
 
@@ -50,12 +51,21 @@ for `ai_embed` and `ai_similarity`; `ai_rerank` uses a completion model.
 Keep keys in a process environment or a secret manager. If a named DuckDB secret
 is used, pass `secret := 'name'` explicitly to make the intended configuration
 clear. Do not put credentials into prompts, `request_options`, source files, or
-test output. The hosted example in the [repository README](https://github.com/leonardovida/duckdb-ai#use-openai-or-another-hosted-model) uses
+test output. The hosted example in the [repository README](https://github.com/leonardovida/duckdb-ai#connect-a-hosted-provider) uses
 `OPENAI_API_KEY` from the process environment.
 
 Use explicit per-call `provider` and `model` options for isolated examples.
-For repeated queries, configure session defaults or a named secret. Consult
-[configuration precedence](best-practices.md) before combining them.
+For repeated queries, configure session defaults or a named secret. Session
+settings outrank the `MODEL` stored in a secret, so a leftover
+`SET duckdb_ai_model` sends that model to whatever provider the secret names.
+Check [the resolution order](functions.md#provider-settings-and-secrets)
+before combining them, and `RESET` settings you no longer need.
+
+For `ai_decide`, the session settings `duckdb_ai_model` and
+`duckdb_ai_base_url` are ignored, and so is the `MODEL` of a chat provider's
+secret. Pass `model := ...` or set `<PROVIDER>_DECISION_MODEL` (for example
+`OLLAMA_DECISION_MODEL`). Only `typesafe`, `cloudflare`, `perplexity`,
+`ollama` (0.35 or later) and `systemone` support it.
 
 ## Preview before making a model call
 
@@ -65,7 +75,7 @@ This query constructs JSON locally and needs no API key:
 SELECT ai_completion_request_json(
     'Reply OK',
     provider := 'openai',
-    model := 'gpt-4o-mini',
+    model := 'gpt-5.6-luna',
     max_tokens := 64
 );
 ```
@@ -73,9 +83,6 @@ SELECT ai_completion_request_json(
 Check the model, messages, and token-limit field. `ai_embedding_request_json`
 provides the equivalent preview for embeddings. A correct preview proves request
 construction, not authentication, model availability, or successful inference.
-Provider-specific discovery helpers, where available in the installed version,
-may fetch a remote catalog. Treat that as a network call and verify it against
-the provider documentation before using it in an agent workflow.
 
 For an authorized live check, use one short prompt and a bounded `max_tokens`.
 Reasoning models may spend the budget before producing visible text; use their
@@ -133,7 +140,7 @@ When a task needs more than one model call per row:
   (`SELECT ai_redact(x) AS clean, ai_summarize(clean)` is a binder error). Use a
   subquery or a step table.
 - Pass NULL to skip a row: NULL inputs make no call. `coalesce(x, '')` turns a
-  skip into an error.
+  skip into a paid request for an empty string (or an error for `ai_complete`).
 - Feed the next step only successful rows (`WHERE error IS NULL`), and put
   conditional steps behind `CASE` or `WHERE`; only matching rows are sent.
 - Save every step to a table keyed by row, input hash and a version string, and
@@ -167,10 +174,9 @@ GEN=ninja make test
 python3 test/smoke/mock_provider_smoke.py
 ```
 
-The repository's smoke tests use deterministic local HTTP fixtures for selected
-provider wire contracts. Run the smoke scripts present in your checkout and
-inspect their manifests before relying on them as coverage claims. These mocks
-exercise selected wire contracts, not all possible responses from a service.
+`test/smoke/mock_provider_smoke.py` checks request and response shapes against
+local HTTP mocks. It does not prove that a live provider accepts the request or
+returns every possible response.
 
 For docs changes, run `npm run typecheck` and `npm run build` from `website/`.
 Report the version or commit tested and distinguish local mock checks, live

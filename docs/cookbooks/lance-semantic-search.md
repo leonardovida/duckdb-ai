@@ -1,5 +1,5 @@
 ---
-sidebar_position: 5
+sidebar_position: 13
 title: "Store embeddings in Lance for semantic search"
 sidebar_label: "Semantic search with Lance"
 description: "Store DuckDB AI embeddings in Lance, build a vector index, and combine semantic search, full-text search and reranking in SQL."
@@ -10,13 +10,18 @@ keywords: ["DuckDB vector search", "DuckDB embeddings", "Lance", "semantic searc
 
 Use this cookbook when you want to reuse embeddings across searches, build a
 vector index, or combine semantic search with full-text search. Keep
-`ai_similarity` for small ad hoc comparisons; use the Lance extension when the
-same embeddings should be stored, indexed, and queried repeatedly.
+`ai_similarity` for small ad hoc comparisons. For a plain DuckDB table of
+embeddings without an index, see
+[store embeddings once](support-ticket-similarity.md#store-embeddings-once). Use
+the Lance extension when the same embeddings should be stored, indexed, and
+queried repeatedly.
 
 ## Prerequisites
 
 - Install and load both extensions.
-- Configure an embedding-capable provider.
+- Configure an embedding-capable provider. The examples use OpenAI, so set
+  `OPENAI_API_KEY` in the environment before starting DuckDB. See the
+  [provider guides](../provider-guides.md).
 - Create the [sample `support_tickets` table](support-ticket-data.md).
 
 ```sql
@@ -44,7 +49,6 @@ SELECT
     ticket_id,
     customer_id,
     priority,
-    status,
     subject,
     body,
     subject || chr(10) || body AS search_text,
@@ -76,8 +80,7 @@ COPY (
         ticket_id,
         customer_id,
         priority,
-        status,
-        subject,
+            subject,
         body,
         search_text,
         embedding::FLOAT[1536] AS embedding
@@ -99,7 +102,6 @@ SELECT
     ticket_id,
     customer_id,
     priority,
-    status,
     subject,
     body,
     search_text,
@@ -203,7 +205,7 @@ SELECT
         getvariable('semantic_query'),
         candidates.subject || chr(10) || candidates.body,
         provider := 'openai',
-        model := 'gpt-4o-mini'
+        model := 'gpt-5.6-luna'
     ) AS rerank_score
 FROM candidates
 ORDER BY rerank_score DESC, candidates._distance ASC
@@ -246,6 +248,22 @@ ORDER BY result._hybrid_score DESC;
 
 Use a lower `alpha` when keyword matches should matter more, and a higher
 `alpha` when vector similarity should dominate.
+
+## Clean up
+
+The examples write files to the current directory. To remove them, detach the
+namespace and drop the staging table:
+
+```sql
+DETACH lance_ns;
+DROP TABLE IF EXISTS support_ticket_embedding_stage;
+```
+
+Then delete the files from a shell:
+
+```sh
+rm -rf support_ticket_embeddings.lance ./lance_data
+```
 
 ## Learn more
 

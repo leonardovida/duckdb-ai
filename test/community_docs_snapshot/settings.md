@@ -1,34 +1,34 @@
-|                   name                   |                                                       description                                                        | input_type | scope  | aliases |
-|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|------------|--------|---------|
-| duckdb_ai_aggregate_model                | Default AI model for aggregate functions                                                                                 | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_allowed_hosts                  | Comma-separated AI provider host allowlist for duckdb_ai; empty allows all hosts                                         | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_base_url                       | Default AI provider base URL override for duckdb_ai                                                                      | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_cache                          | Cache successful AI provider responses in the current DuckDB instance                                                    | BOOLEAN    | GLOBAL | []      |
-| duckdb_ai_cache_max_entries              | Maximum response-cache entries between 0 and 1000000; 0 disables response-cache storage, -1 uses default                 | BIGINT     | GLOBAL | []      |
-| duckdb_ai_cache_ttl_seconds              | Maximum response-cache entry age in seconds between 0 and 31536000; 0 disables age expiry, -1 uses default               | BIGINT     | GLOBAL | []      |
-| duckdb_ai_completion_model               | Default AI model for completion functions                                                                                | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_connect_timeout_seconds        | AI provider connection timeout in seconds between 1 and 31536000; -1 uses default                                        | BIGINT     | GLOBAL | []      |
-| duckdb_ai_embedding_model                | Default AI model for embedding functions                                                                                 | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_input_token_price_per_million  | Input token price per million tokens for estimated AI usage cost; -1 disables cost estimates                             | DOUBLE     | GLOBAL | []      |
-| duckdb_ai_log_endpoint                   | HTTP endpoint for privacy-minimized AI usage logs                                                                        | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_log_format                     | AI usage log payload format: generic_json or otlp_json                                                                   | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_log_include_text               | Include prompt and response text in AI usage logs                                                                        | BOOLEAN    | GLOBAL | []      |
-| duckdb_ai_log_sample_rate                | AI usage log sampling rate between 0 and 1; -1 uses default                                                              | DOUBLE     | GLOBAL | []      |
-| duckdb_ai_log_strict                     | Fail SQL queries when AI usage log delivery fails                                                                        | BOOLEAN    | GLOBAL | []      |
-| duckdb_ai_log_tags                       | Optional tag string included in AI usage logs                                                                            | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_max_concurrent_requests        | Maximum concurrent AI provider requests between 0 and 64; 0 disables the limit, -1 uses default                          | BIGINT     | GLOBAL | []      |
-| duckdb_ai_min_request_interval_ms        | Minimum milliseconds between AI provider request starts between 0 and 60000; -1 uses default                             | BIGINT     | GLOBAL | []      |
-| duckdb_ai_model                          | Default AI model for duckdb_ai                                                                                           | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_on_error                       | AI error handling: fail, null, or capture                                                                                | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_output_token_price_per_million | Output token price per million tokens for estimated AI usage cost; -1 disables cost estimates                            | DOUBLE     | GLOBAL | []      |
-| duckdb_ai_prompt_cache                   | Enable provider-side prompt caching hints when supported                                                                 | BOOLEAN    | GLOBAL | []      |
-| duckdb_ai_provider                       | Default AI provider for duckdb_ai                                                                                        | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_response_format                | Default AI response format: text, json_object, or json_schema                                                            | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_response_schema                | Default AI JSON schema object for structured responses                                                                   | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_retry_backoff_ms               | AI provider retry backoff in milliseconds between 0 and 60000; -1 uses default                                           | BIGINT     | GLOBAL | []      |
-| duckdb_ai_retry_count                    | AI provider retry count between 0 and 10; -1 uses default                                                                | BIGINT     | GLOBAL | []      |
-| duckdb_ai_sql_assistant_model            | Default AI model for SQL assistant functions                                                                             | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_task_model                     | Default AI model for text task functions                                                                                 | VARCHAR    | GLOBAL | []      |
-| duckdb_ai_timeout_seconds                | AI provider HTTP timeout in seconds; 0 uses the extension default                                                        | BIGINT     | GLOBAL | []      |
-| duckdb_ai_token_limit_per_minute         | Maximum estimated AI provider tokens per rolling minute between 0 and 10000000000; 0 disables the limit, -1 uses default | BIGINT     | GLOBAL | []      |
-| duckdb_ai_use_builtin_model_prices       | Use duckdb_ai built-in model price catalog for estimated AI usage cost                                                   | BOOLEAN    | GLOBAL | []      |
+|                   name                   |                                                         description                                                         | input_type | scope  | aliases |
+|------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|------------|--------|---------|
+| duckdb_ai_aggregate_model                | Default model for ai_agg and ai_summarize_agg                                                                               | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_allowed_hosts                  | Comma-separated hosts that provider and log requests may reach; empty allows all hosts                                      | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_base_url                       | Provider endpoint override, for example a gateway or self-hosted server URL                                                 | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_cache                          | Reuse successful responses for identical requests, in memory for this DuckDB instance                                       | BOOLEAN    | GLOBAL | []      |
+| duckdb_ai_cache_max_entries              | Maximum number of cached responses (0 to 1000000); 0 stores nothing, -1 uses the default                                    | BIGINT     | GLOBAL | []      |
+| duckdb_ai_cache_ttl_seconds              | Maximum age of cached responses in seconds (0 to 31536000); 0 never expires, -1 uses the default                            | BIGINT     | GLOBAL | []      |
+| duckdb_ai_completion_model               | Default model for ai_complete, ai_complete_json, ai_complete_record, ai_rerank and ai_score                                 | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_connect_timeout_seconds        | Connection timeout for each provider request in seconds (1 to 31536000); -1 uses the default                                | BIGINT     | GLOBAL | []      |
+| duckdb_ai_embedding_model                | Default embedding model for ai_embed, ai_similarity and the classifier functions                                            | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_input_token_price_per_million  | Input token price in USD per million tokens for estimated_cost_usd; -1 disables manual pricing                              | DOUBLE     | GLOBAL | []      |
+| duckdb_ai_log_endpoint                   | HTTP endpoint that receives usage logs; prompt text is excluded unless log_include_text is set                              | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_log_format                     | Usage log payload format: generic_json or otlp_json                                                                         | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_log_include_text               | Include prompt and response text in usage logs (off by default)                                                             | BOOLEAN    | GLOBAL | []      |
+| duckdb_ai_log_sample_rate                | Fraction of usage events sent to the log endpoint (0 to 1); -1 uses the default                                             | DOUBLE     | GLOBAL | []      |
+| duckdb_ai_log_strict                     | Fail the SQL query when a usage log cannot be delivered                                                                     | BOOLEAN    | GLOBAL | []      |
+| duckdb_ai_log_tags                       | Tags added to every usage log, for example 'app=triage,env=prod'                                                            | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_max_concurrent_requests        | Maximum provider requests in flight at once (0 to 64); 0 removes the limit, -1 uses the default                             | BIGINT     | GLOBAL | []      |
+| duckdb_ai_min_request_interval_ms        | Minimum milliseconds between the starts of provider requests (0 to 60000); -1 uses the default                              | BIGINT     | GLOBAL | []      |
+| duckdb_ai_model                          | Default model for every ai_* function unless model := or a function-family model setting is set                             | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_on_error                       | Failed provider calls: fail stops the query, null returns NULL, capture also keeps the error where the function returns one | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_output_token_price_per_million | Output token price in USD per million tokens for estimated_cost_usd; -1 disables manual pricing                             | DOUBLE     | GLOBAL | []      |
+| duckdb_ai_prompt_cache                   | Send provider-side prompt caching hints (OpenAI, Anthropic, xAI) for repeated prompt prefixes                               | BOOLEAN    | GLOBAL | []      |
+| duckdb_ai_provider                       | Default provider for ai_* functions, for example 'ollama', 'openai' or 'anthropic'                                          | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_response_format                | Default completion response format: text, json_object or json_schema                                                        | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_response_schema                | Default JSON Schema for structured completion responses                                                                     | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_retry_backoff_ms               | Base wait between retries in milliseconds (0 to 60000), with jitter; -1 uses the default                                    | BIGINT     | GLOBAL | []      |
+| duckdb_ai_retry_count                    | Retries after network errors and retryable statuses such as 429 and 5xx (0 to 10); -1 uses the default                      | BIGINT     | GLOBAL | []      |
+| duckdb_ai_sql_assistant_model            | Default model for ai_sql, ai_query_data, ai_explain_sql and ai_fix_sql                                                      | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_task_model                     | Default model for text tasks such as ai_classify, ai_summarize, ai_translate and ai_filter                                  | VARCHAR    | GLOBAL | []      |
+| duckdb_ai_timeout_seconds                | Timeout for each provider request in seconds; 0 uses the extension default                                                  | BIGINT     | GLOBAL | []      |
+| duckdb_ai_token_limit_per_minute         | Cap on estimated provider tokens per rolling minute (0 to 10000000000); 0 removes the cap, -1 uses the default              | BIGINT     | GLOBAL | []      |
+| duckdb_ai_use_builtin_model_prices       | Estimate cost from the built-in ai_model_prices() catalog when no manual price is set                                       | BOOLEAN    | GLOBAL | []      |

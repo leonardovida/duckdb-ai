@@ -9,8 +9,8 @@ keywords: ["DuckDB AI runtime", "LLM retries", "LLM caching", "concurrency", "ti
 # Runtime behavior
 
 This page documents how the `ai` extension executes provider calls at runtime. It is
-the operational reference for the provider hardening, caching, concurrency, and
-egress controls used by the SQL functions.
+the operational reference for the retry, caching, concurrency and egress
+controls used by the SQL functions.
 
 ## Function stability
 
@@ -74,7 +74,8 @@ provider rate limiter still controls outbound request pacing.
 Configured worker caps must be between 0 and 64; larger values are rejected
 instead of being silently clamped.
 
-SQL-assistant table functions perform one provider call per invocation.
+SQL-assistant table functions perform one provider call per invocation, plus up
+to `fix_attempts` correction calls when the generated SQL does not bind.
 Aggregate functions use one request for groups that fit `max_context_chars` and
 a bounded parallel map/reduce request tree for larger groups.
 
@@ -160,7 +161,8 @@ handle for provider requests, and attaches those handles to a shared libcurl
 connection cache. This allows libcurl to reuse connections across provider
 worker threads where the provider and libcurl build support it.
 
-Provider calls use the configured `timeout_seconds` for the total request. The
+Provider calls use the configured `timeout_seconds` for the total request
+(default 120 seconds, or `DUCKDB_AI_TIMEOUT_SECONDS`). The
 connect timeout defaults to the smaller of 10 seconds and the total timeout. Set
 `connect_timeout_seconds := ...`, `duckdb_ai_connect_timeout_seconds`, or
 `DUCKDB_AI_CONNECT_TIMEOUT_SECONDS` to override it for provider requests.
@@ -282,6 +284,7 @@ lookup/eviction counters. `ai_usage_totals()` keeps provider row events, transpo
 attempts, failures, cache hits and partial known-token totals independently of
 usage-event eviction. Counters are per database, protected by the existing state
 mutexes, and reset by their corresponding clear function. They are in memory;
-`examples/resumable_enrichment.py` persists each batch's usage snapshot in the same
+[`examples/resumable_enrichment.py`](https://github.com/leonardovida/duckdb-ai/blob/main/examples/resumable_enrichment.py)
+(see the [resumable enrichment cookbook](cookbooks/resumable-enrichment.md)) persists each batch's usage snapshot in the same
 transaction as its results, so totals survive process reopening and uncommitted
 snapshots roll back with a crashed batch.

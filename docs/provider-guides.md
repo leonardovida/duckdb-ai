@@ -8,64 +8,8 @@ keywords: ["DuckDB Ollama", "DuckDB OpenAI", "DuckDB Claude", "DuckDB Gemini", "
 
 # Provider guides
 
-## Text API coverage
-
-The primary coverage focus is DeepSeek, Qwen, GLM/Z.ai, Kimi, MiniMax,
-Tencent HY3/HY4 and Xiaomi MiMo. Existing providers remain supported.
-The native JSON interface described in the [function reference](functions.md#native-provider-json)
-preserves reasoning and tools across protocol round trips. All model IDs are
-passed through, including account-specific deployments and dated versions.
-Models do not need a built-in pricing/catalog entry to be called.
-
-The table is a documentation snapshot reviewed on **2026-09-14**, not a live
-account availability check. Native transport is tested with mock HTTP for all
-seven providers. Real inference, model limits, regional availability and pricing
-are **not live-verified**. No new hard-coded prices or limits are inferred from
-model names. Check each linked catalog for current lifecycle and account terms.
-
-| Provider | Chat selection | Other documented text APIs and endpoints | Credentials |
-| --- | --- | --- | --- |
-| DeepSeek | `deepseek`; explicit V4 Flash/Pro model IDs | [Thinking/tools](https://api-docs.deepseek.com/guides/thinking_mode), JSON output; FIM uses a separately selected beta endpoint/model | `DEEPSEEK_API_KEY` |
-| Qwen | `qwen` / `dashscope`; explicit Qwen model ID | [Chat/Responses/embeddings](https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview); Messages at `https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages`; Responses at `https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1/responses` | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` |
-| GLM | `zai`; explicit GLM model ID | [Chat](https://docs.z.ai/api-reference/llm/chat-completion), embeddings; [Messages](https://docs.z.ai/devpack/tool/claude) at `https://api.z.ai/api/anthropic/v1/messages` | `ZAI_API_KEY` |
-| Kimi | `kimi` / `moonshot`; explicit Kimi ID | [Chat/Responses/Messages](https://platform.moonshot.ai/docs/introduction); Messages at `https://api.moonshot.ai/anthropic/v1/messages` | `MOONSHOT_API_KEY` / `KIMI_API_KEY` |
-| MiniMax | `minimax`; explicit MiniMax ID | [Messages](https://platform.minimax.io/docs/api-reference/text-chat-anthropic) at `https://api.minimax.io/anthropic/v1/messages` | `MINIMAX_API_KEY` |
-| Tencent | `hunyuan` / `tencent`; `hy3`, `hy4-preview` | [Chat, Responses, Messages](https://www.tencentcloud.com/document/product/1300/80632); append the respective path to the selected regional host | `HUNYUAN_API_KEY` / `TOKENHUB_API_KEY` |
-| MiMo | `mimo`, `xiaomi`, `xiaomi_mimo`; `mimo-v2.5-pro` default, explicit IDs supported | [Chat](https://mimo.mi.com/docs/en-US/api/chat/openai-api) at `https://api.xiaomimimo.com/v1/chat/completions`; [Messages](https://mimo.mi.com/docs/en-US/api/chat/anthropic-api) at `https://api.xiaomimimo.com/anthropic/v1/messages` | `MIMO_API_KEY` via `api-key` header |
-
-Tencent's documented regional bases are Singapore
-`https://tokenhub-intl.tencentcloudmaas.com/v1`, Guangzhou
-`https://tokenhub.tencentcloudmaas.com/v1`, and US
-`https://tokenhub-us.tencentcloudmaas.tech/v1`. Select the region matching your
-key explicitly. The existing Hunyuan default remains for compatibility.
-HY4 is a preview; activation and model availability are controlled by Tencent.
-
-Qwen native reranking has model-dependent paths and payloads. Use
-[`qwen3-rerank`](https://www.alibabacloud.com/help/en/model-studio/text-rerank-api)
-with the full workspace `/compatible-mode/v1/reranks` endpoint, `api := 'rerank'`,
-and a body containing `model`, `query`, `documents`, and optional `top_n`.
-GTE reranking uses nested `input`/`parameters` and a different endpoint; send its
-documented body unchanged. The existing `ai_rerank` is completion-based scoring,
-not a claim that every provider has a native reranking model. No native embeddings
-or reranking are claimed for providers without a verified public reference.
-
-Reasoning options vary: DeepSeek, GLM and MiMo use `thinking`; Qwen uses
-`enable_thinking` and supports `preserve_thinking` on selected models. Preserve
-returned reasoning state when replying to tool calls. Some Qwen models require
-streaming; use native JSON with `stream:true` and read the buffered event array.
-Use the provider's JSON-object response format when JSON Schema is unsupported,
-then validate the result locally. Coding/subscription keys may require different
-endpoints from general API keys. No automatic account, region or protocol fallback
-is performed. Image, audio, video generation and asynchronous media jobs are out
-of scope for this rollout.
-
-```sql
-SELECT ai_complete('Explain columnar storage.', provider := 'mimo',
-  request_options := '{"thinking":{"type":"disabled"}}', max_tokens := 256);
-```
-
-This page gives one simple end-to-end example for each supported provider.
-Examples assume the extension is installed and loaded:
+This page shows how to configure each supported provider, with one simple
+end-to-end example each. Examples assume the extension is installed and loaded:
 
 ```sql
 INSTALL ai FROM community;
@@ -109,6 +53,7 @@ LIMIT 1;
 | `huggingface` / `hf` | OpenAI-compatible chat | `openai/gpt-oss-120b` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | Defaults to `https://router.huggingface.co/v1`. |
 | `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat through Tencent TokenHub | `hy3` | `HUNYUAN_API_KEY`, `TOKENHUB_API_KEY`, or `TENCENT_TOKENHUB_API_KEY` | Defaults to `https://tokenhub.tencentmaas.com/v1`; `TOKENHUB_BASE_URL` selects another TokenHub region. |
 | `minimax` | OpenAI-compatible chat | `MiniMax-M2.7` | `MINIMAX_API_KEY` or `MINI_MAX_API_KEY` | Defaults to `https://api.minimax.io/v1`. |
+| `mimo` / `xiaomi` | OpenAI-compatible chat | `mimo-v2.5-pro` | `MIMO_API_KEY` (sent in the `api-key` header) | Defaults to `https://api.xiaomimimo.com/v1`. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
 | `moonshot` / `kimi` | OpenAI-compatible chat | `kimi-k3` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Defaults to `https://api.moonshot.ai/v1`. |
 | `nebius` / `nebius_token_factory` | OpenAI-compatible chat | `meta-llama/Meta-Llama-3.1-70B-Instruct` | `NEBIUS_API_KEY` or `TOKEN_FACTORY_API_KEY` | Defaults to `https://api.tokenfactory.nebius.com/v1`. |
@@ -118,7 +63,7 @@ LIMIT 1;
 | `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
 | `databricks` | OpenAI-compatible chat | `databricks-gpt-oss-120b` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
 | `snowflake` | OpenAI-compatible chat | `claude-sonnet-4-5` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
-| `perplexity` | OpenAI-compatible chat | `sonar` | `PERPLEXITY_API_KEY` | Defaults to `https://api.perplexity.ai`. |
+| `perplexity` / `pplx` | OpenAI-compatible chat; Decisions API for `ai_decide` | `sonar`; decisions use `pplx-decider-v1-27b` | `PERPLEXITY_API_KEY` | Defaults to `https://api.perplexity.ai`. |
 | `poe` | OpenAI-compatible chat | `GPT-5.4` | `POE_API_KEY` | Defaults to `https://api.poe.com/v1`. |
 | `qianfan` / `ernie` | OpenAI-compatible chat | `ernie-4.5-turbo-128k` | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY`, or `BAIDU_API_KEY` | Defaults to `https://qianfan.baidubce.com/v2`. |
 | `sambanova` | OpenAI-compatible chat | `Meta-Llama-3.3-70B-Instruct` | `SAMBANOVA_API_KEY` | Defaults to `https://api.sambanova.ai/v1`. |
@@ -129,7 +74,8 @@ LIMIT 1;
 | `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-2.5-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
 | `volcengine` / `doubao` | OpenAI-compatible chat | `doubao-seed-2-1-pro-260628` | `VOLCENGINE_API_KEY`, `ARK_API_KEY`, or `DOUBAO_API_KEY` | Defaults to `https://ark.cn-beijing.volces.com/api/v3`. |
 | `xai` / `grok` | OpenAI-compatible chat | `grok-4.6` | `XAI_API_KEY` | Defaults to `https://api.x.ai/v1`. |
-| `typesafe` / `jev` | TypeSafe System One evaluation | `jev-latest` | `TYPESAFE_API_KEY` | Defaults to `https://api.typesafe.ai/v1` and calls `/systemone`. |
+| `typesafe` / `jev` | TypeSafe System One decisions | `jev-latest` | `TYPESAFE_API_KEY` | Defaults to `https://api.typesafe.ai/v1` and calls `/systemone`. |
+| `systemone` / `decision` | Any System One decision endpoint | none; pass `model :=` or set `SYSTEMONE_MODEL` | Optional `SYSTEMONE_API_KEY` | Requires `base_url`, `SYSTEMONE_BASE_URL` or secret `BASE_URL`; calls `/v1/systemone`. |
 | `openai_privacy_filter` | Dedicated redaction endpoint | `openai/privacy-filter` | Optional `OPENAI_PRIVACY_FILTER_API_KEY` | Defaults to `http://localhost:8080` and calls `POST /redact`. |
 | `openai_compatible` / `local` | OpenAI-compatible chat and embeddings | `gpt-4o-mini`; embeddings use `text-embedding-3-small` | Optional `OPENAI_COMPATIBLE_API_KEY` | Requires `BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL`. |
 | `llamacpp` / `llama.cpp` | OpenAI-compatible chat and embeddings | `default` (llama-server answers with its loaded model) | Optional `LLAMACPP_API_KEY` (`llama-server --api-key`) | Defaults to `http://localhost:8080/v1`. Embeddings need `llama-server --embeddings`. |
@@ -137,10 +83,67 @@ LIMIT 1;
 For guidance on choosing providers, credentials, logging, cost, throughput, and
 PII workflows, see [Best practices](best-practices.md).
 
+## Native APIs for reasoning providers
+
+This section covers the native APIs of DeepSeek, Qwen, GLM/Z.ai, Kimi,
+MiniMax, Tencent HY3/HY4 and Xiaomi MiMo: reasoning, tool calls and
+Anthropic-style Messages endpoints. The native JSON interface described in the [function reference](functions.md#native-provider-json)
+preserves reasoning and tools across protocol round trips. All model IDs are
+passed through, including account-specific deployments and dated versions.
+Models do not need a built-in pricing/catalog entry to be called.
+
+The table is a documentation snapshot reviewed on **2026-09-14**, not a live
+account availability check. Native transport is tested with mock HTTP for all
+seven providers. Real inference, model limits, regional availability and pricing
+are **not live-verified**. No new hard-coded prices or limits are inferred from
+model names. Check each linked catalog for current lifecycle and account terms.
+
+| Provider | Chat selection | Other documented text APIs and endpoints | Credentials |
+| --- | --- | --- | --- |
+| DeepSeek | `deepseek`; explicit V4 Flash/Pro model IDs | [Thinking/tools](https://api-docs.deepseek.com/guides/thinking_mode), JSON output; FIM uses a separately selected beta endpoint/model | `DEEPSEEK_API_KEY` |
+| Qwen | `qwen` / `dashscope`; explicit Qwen model ID | [Chat/Responses/embeddings](https://docs.qwencloud.com/api-reference/toolkitframework/openai-compatible/overview); Messages at `https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages`; Responses at `https://dashscope-intl.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1/responses` | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` |
+| GLM | `zai`; explicit GLM model ID | [Chat](https://docs.z.ai/api-reference/llm/chat-completion), embeddings; [Messages](https://docs.z.ai/devpack/tool/claude) at `https://api.z.ai/api/anthropic/v1/messages` | `ZAI_API_KEY` |
+| Kimi | `kimi` / `moonshot`; explicit Kimi ID | [Chat/Responses/Messages](https://platform.moonshot.ai/docs/introduction); Messages at `https://api.moonshot.ai/anthropic/v1/messages` | `MOONSHOT_API_KEY` / `KIMI_API_KEY` |
+| MiniMax | `minimax`; explicit MiniMax ID | [Messages](https://platform.minimax.io/docs/api-reference/text-chat-anthropic) at `https://api.minimax.io/anthropic/v1/messages` | `MINIMAX_API_KEY` |
+| Tencent | `hunyuan` / `tencent`; `hy3`, `hy4-preview` | [Chat, Responses, Messages](https://www.tencentcloud.com/document/product/1300/80632); append the respective path to the selected regional host | `HUNYUAN_API_KEY` / `TOKENHUB_API_KEY` |
+| MiMo | `mimo`, `xiaomi`, `xiaomi_mimo`; `mimo-v2.5-pro` default, explicit IDs supported | [Chat](https://mimo.mi.com/docs/en-US/api/chat/openai-api) at `https://api.xiaomimimo.com/v1/chat/completions`; [Messages](https://mimo.mi.com/docs/en-US/api/chat/anthropic-api) at `https://api.xiaomimimo.com/anthropic/v1/messages` | `MIMO_API_KEY` via `api-key` header |
+
+Tencent's documented regional bases are Singapore
+`https://tokenhub-intl.tencentcloudmaas.com/v1`, Guangzhou
+`https://tokenhub.tencentcloudmaas.com/v1`, and US
+`https://tokenhub-us.tencentcloudmaas.tech/v1`. Select the region matching your
+key explicitly. The extension's default, `https://tokenhub.tencentmaas.com/v1`, is
+kept for existing setups.
+HY4 is a preview; activation and model availability are controlled by Tencent.
+
+Qwen native reranking has model-dependent paths and payloads. Use
+[`qwen3-rerank`](https://www.alibabacloud.com/help/en/model-studio/text-rerank-api)
+with the full workspace `/compatible-mode/v1/reranks` endpoint, `api := 'rerank'`,
+and a body containing `model`, `query`, `documents`, and optional `top_n`.
+GTE reranking uses nested `input`/`parameters` and a different endpoint; send its
+documented body unchanged. The existing `ai_rerank` is completion-based scoring,
+not a claim that every provider has a native reranking model. No native embeddings
+or reranking are claimed for providers without a verified public reference.
+
+Reasoning options vary: DeepSeek, GLM and MiMo use `thinking`; Qwen uses
+`enable_thinking` and supports `preserve_thinking` on selected models. Preserve
+returned reasoning state when replying to tool calls. Some Qwen models require
+streaming; use native JSON with `stream:true` and read the buffered event array.
+Use the provider's JSON-object response format when JSON Schema is unsupported,
+then validate the result locally. Coding/subscription keys may require different
+endpoints from general API keys. No automatic account, region or protocol fallback
+is performed. Image, audio, video generation and asynchronous media jobs are out
+of scope for this extension.
+
+```sql
+SELECT ai_complete('Explain columnar storage.', provider := 'mimo',
+  request_options := '{"thinking":{"type":"disabled"}}', max_tokens := 256);
+```
+
 ## Decision models
 
-Decision models answer typed questions about an input with calibrated
-probabilities instead of generating text. Use them for classification,
+Decision models answer typed questions about an input with probabilities
+instead of generating text. Use them for classification,
 routing, moderation and triage at high volume. `ai_decide` sends the same SQL
 to every supported provider; see the [function reference](functions.md#ai_decidestate-questions-)
 for question types and result fields.
@@ -151,7 +154,7 @@ for question types and result fields.
 | Cloudflare Clef | `clef` (also `clef-flash`) | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID`, as for [Workers AI](#cloudflare-workers-ai) |
 | Perplexity | `pplx-decider-v1-27b` | `PERPLEXITY_API_KEY` |
 | Ollama | `nimble` (also `tev1`, `tev1:0.8b`) | Ollama 0.35 or later, no key |
-| Any `/v1/systemone` endpoint | none, `model` is required | `base_url`, optional `SYSTEMONE_API_KEY` |
+| Any `/v1/systemone` endpoint (`systemone`) | none, `model` is required | `base_url := ...` or `SYSTEMONE_BASE_URL`; `model := ...` or `SYSTEMONE_MODEL`; optional `SYSTEMONE_API_KEY` |
 
 ```sql
 -- Local, no API key: ollama pull nimble
@@ -176,16 +179,24 @@ SELECT ai_decide(body, {spam: MAP {'true': 'Spam', 'false': 'Legitimate'}}, secr
 FROM messages;
 ```
 
+Each question field becomes a result field. A choice returns `<field>`
+`VARCHAR` plus `<field>_confidence`, a yes/no question returns `<field>` as the
+probability of yes, and a score returns the level index as a `DOUBLE`, so a
+query can filter on `decision.urgent > 0.5`.
+
 Choosing a decision model for a chat provider does not change that provider's
 chat or embedding behavior: `ai_complete(..., provider := 'cloudflare')` still
-uses Workers AI chat models. Session model settings name chat models, so
-`ai_decide` ignores them. Set the model with `model := ...` or
-`<PROVIDER>_DECISION_MODEL`, for example `CLOUDFLARE_DECISION_MODEL=clef-flash`.
+uses Workers AI chat models. `ai_decide` ignores the session settings
+`duckdb_ai_model` and `duckdb_ai_base_url`, and the `MODEL` of a chat
+provider's secret, because they name chat models. Set the model with
+`model := ...` or `<PROVIDER>_DECISION_MODEL`, for example
+`CLOUDFLARE_DECISION_MODEL=clef-flash` or `OLLAMA_DECISION_MODEL=tev1`.
 
-Only TypeSafe Jev documents structured per-question instructions, so only the
-`typesafe` provider batches several rows into one request. Other providers get
-one request per row. OpenAI announced a Decisions API, but it has no public
-request schema yet, so `ai_decide` does not support it.
+Per-question `instructions` (the `{instructions, criteria}` form) work with
+every provider. Only TypeSafe batches up to 32 rows into one request. Other
+providers send one request per row, concurrently up to
+`max_concurrent_requests`. OpenAI announced a Decisions API, but it has no
+public request schema yet, so `ai_decide` does not support it.
 
 Sources: [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/clef/),
 [Perplexity Decisions API](https://docs.perplexity.ai/docs/decisions/quickstart),
@@ -197,12 +208,10 @@ Sources: [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/c
 Jev evaluates state against typed questions and returns probabilities, choices,
 and rubric scores. It does not generate text or embeddings. Use `typesafe` (or
 its alias `jev`) for the direct TypeSafe API. The supported entry points are
-`ai_decide`, `ai_jev`, `ai_provider_call`, `ai_classify`, and `ai_filter`. Use `ai_jev` for
-typed choices, rubric scores and probabilities with automatic row batching.
-Other AI task functions, including
-`ai_score`, require a completion provider. Generation options such as
-`temperature`, `max_tokens`, and `system_prompt` are rejected. Put task guidance
-in classification `instructions` or in native question instructions.
+`ai_decide`, `ai_jev`, `ai_provider_call`, `ai_classify`, and `ai_filter`.
+Other AI task functions, including `ai_score`, require a completion provider.
+Generation options such as `temperature`, `max_tokens`, and `system_prompt`
+are rejected.
 
 ```sh
 export TYPESAFE_API_KEY='...'
@@ -217,35 +226,34 @@ CREATE OR REPLACE SECRET typesafe_ai (
     MODEL 'jev-latest'
 );
 
+SELECT ai_decide('I was charged twice. Please refund me.', {
+    department: MAP {'billing': 'Payments and refunds', 'other': 'Other requests'},
+    refund_requested: {instructions: 'Does the text explicitly request a refund?',
+                       criteria: MAP {'true': 'Asks for money back', 'false': 'Does not ask for money back'}}
+}, provider := 'typesafe', secret := 'typesafe_ai') AS decision;
+```
+
+Use `decision.department`, `decision.department_confidence` and
+`decision.refund_requested` downstream. With TypeSafe, `ai_decide` batches up
+to 32 rows per request. `ai_jev(text, questions)` is the same call with the
+provider fixed to TypeSafe. Follow the
+[typed decisions cookbook](cookbooks/jev-decisions.md) to save results before
+filtering or exporting them.
+
+`ai_classify` and `ai_filter` also accept `provider := 'typesafe'`:
+classification sends a native choice question, and filtering sends a yes/no
+question and returns `true` when its probability is at least `0.5`. Both send
+one request per row.
+
+```sql
 SELECT ai_classify(
     'I was charged twice.', ['billing', 'technical', 'other'],
     secret := 'typesafe_ai'
 ) AS department;
-
-SELECT ai_filter(
-    'Our production imports are blocked.',
-    'Does the text describe blocked production work?',
-    secret := 'typesafe_ai'
-) AS production_blocked;
 ```
 
-Classification sends a native Choice question. Filtering sends a Noul question
-and returns `true` when its probability is at least `0.5`. Both keep one request
-per row. For typed multi-question results and batches of up to 32 rows, use:
-
-```sql
-SELECT ai_jev('I was charged twice. Please refund me.', {
-    department: MAP {'billing': 'Payments and refunds', 'other': 'Other requests'},
-    refund_requested: MAP {'true': 'Asks for money back', 'false': 'Does not ask for money back'}
-}, secret := 'typesafe_ai') AS decision;
-```
-
-Use `decision.department` and `decision.refund_requested` downstream. Follow the
-[typed Jev cookbook](cookbooks/jev-decisions.md) to save results before filtering
-or exporting them. `ai_jev` does not require DuckDB's JSON extension.
-
-For full probability distributions or custom instructions and shared state,
-use `ai_provider_call`:
+For full probability distributions, the resolved model version or shared
+state, use `ai_provider_call`:
 
 ```sql
 SELECT ai_provider_call(
@@ -283,7 +291,7 @@ tokens. Pin the version when tuning decision thresholds. Choice supports up to
 indices, so a three-level rubric produces values from 0 to 2.
 
 The extension's mock tests check HTTP contracts, not Jev's live latency or
-prediction quality. Follow the [typed Jev cookbook](cookbooks/jev-decisions.md)
+prediction quality. Follow the [typed decisions cookbook](cookbooks/jev-decisions.md)
 to reduce repeated state and calls. See TypeSafe's
 [API reference](https://docs.typesafe.ai/api),
 [models and limits](https://docs.typesafe.ai/models), and
@@ -324,6 +332,11 @@ SELECT ai_embed(
 
 If Ollama runs on a non-default host, set `OLLAMA_HOST` before starting DuckDB or
 add `BASE_URL 'http://host:11434'` to the secret.
+
+Without a model setting, `provider := 'ollama'` uses `llama3.2`, so pull that
+model or set one as shown. For `ai_decide`, also run `ollama pull nimble`
+(Ollama 0.35 or later). `ai_decide` ignores the secret's chat model and uses
+`nimble` unless you pass `model := ...` or set `OLLAMA_DECISION_MODEL`.
 
 ## OpenAI
 

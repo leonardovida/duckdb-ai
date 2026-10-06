@@ -88,18 +88,18 @@ def run(duckdb):
 
         status = 200
         scalar_cases = [
-            ('{"nested":{"embedding":[1,2]},"embedding":[3,4]}', [1, 2], -1, -1),
-            ('{"embedding":{"other":[3,4],"embedding":[5,6]}}', [3, 4], -1, -1),
-            ('{"embedding":[0,"bad",{"embedding":[5,6]}]}', [5, 6], -1, -1),
-            ('{"embedding":[],"embedding":[3,4],"embeddings":[[7,8]]}', [7, 8], -1, -1),
-            ('{"embedding":[],"embedding":[3,4]}', None, -1, -1),
-            ('{"embeddings":[[7,8]]}', [7, 8], -1, -1),
+            ('{"nested":{"embedding":[1,2]},"embedding":[3,4]}', [1, 2], None, None),
+            ('{"embedding":{"other":[3,4],"embedding":[5,6]}}', [3, 4], None, None),
+            ('{"embedding":[0,"bad",{"embedding":[5,6]}]}', [5, 6], None, None),
+            ('{"embedding":[],"embedding":[3,4],"embeddings":[[7,8]]}', [7, 8], None, None),
+            ('{"embedding":[],"embedding":[3,4]}', None, None, None),
+            ('{"embeddings":[[7,8]]}', [7, 8], None, None),
             ('{"embedding":[1,2],"usage":{"prompt_tokens":5,"total_tokens":7},"prompt_tokens":9}', [1, 2], 5, 7),
-            ('{"embedding":[1,2],"prompt_tokens":9223372036854775808,"usage":{"prompt_tokens":5}}', [1, 2], -1, -1),
-            ('{"embedding":[1,2],"usage":{"prompt_tokens":9223372036854775808},"prompt_tokens":5}', [1, 2], 5, -1),
+            ('{"embedding":[1,2],"prompt_tokens":9223372036854775808,"usage":{"prompt_tokens":5}}', [1, 2], None, None),
+            ('{"embedding":[1,2],"usage":{"prompt_tokens":9223372036854775808},"prompt_tokens":5}', [1, 2], 5, None),
             ('{"embedding":[1,2],"prompt_tokens":2.5,"usage":{"prompt_tokens":5,"total_tokens":7}}', [1, 2], 5, 7),
-            ('{"embedding":[1,2]', None, -1, -1),
-            ('null', None, -1, -1),
+            ('{"embedding":[1,2]', None, None, None),
+            ('null', None, None, None),
         ]
         for body, values, prompt_tokens, total_tokens in scalar_cases:
             rows = execute(
@@ -110,7 +110,8 @@ def run(duckdb):
             )
             error = rows[0]["error"]
             if values is None:
-                assert_io_error(error, "AI provider embedding response contained an empty embedding: " + body)
+                # Usage rows hold the plain message, like the HTTP error cases above.
+                assert error == "AI provider embedding response contained an empty embedding: " + body, error
             else:
                 assert error is None, rows
             assert rows == [
@@ -125,8 +126,8 @@ def run(duckdb):
                 else '"embeddings":[[1,2],[3,4]]'
             )
             for usage, expected_prompt in (
-                ('"usage":{"prompt_tokens":5,"total_tokens":7}', [3, 2]),
-                ('"prompt_tokens":9223372036854775808,"usage":{"prompt_tokens":5,"total_tokens":7}', [-1, -1]),
+                ('"usage":{"prompt_tokens":5,"total_tokens":7}', "[3, 2]"),
+                ('"prompt_tokens":9223372036854775808,"usage":{"prompt_tokens":5,"total_tokens":7}', "[NULL, NULL]"),
             ):
                 body = "{" + field + "," + usage + "}"
                 rows = execute(
@@ -134,7 +135,7 @@ def run(duckdb):
                     CREATE TEMP TABLE result AS
                         SELECT i, ai_embed('lookup ' || i, provider := '{provider}', {options}) embedding FROM range(2) t(i);
                     SELECT (SELECT list(embedding ORDER BY i) FROM result) embeddings,
-                           list(prompt_tokens ORDER BY event_id) prompt_tokens,
+                           list(prompt_tokens ORDER BY event_id)::VARCHAR prompt_tokens,
                            list(total_tokens ORDER BY event_id) total_tokens,
                            count(error) errors FROM ai_usage();
                 """
@@ -159,7 +160,7 @@ def run(duckdb):
                 )
                 assert len(rows) == 2 and all(row["successes"] == 0 for row in rows), rows
                 for row in rows:
-                    assert_io_error(row["error"], "AI provider embedding response returned 0 embeddings for 2 inputs")
+                    assert row["error"] == "AI provider embedding response returned 0 embeddings for 2 inputs", rows
                 checks += 1
 
         # Ollama scalar lookup never falls back to the singular field.
@@ -171,7 +172,7 @@ def run(duckdb):
         """
         )
         assert len(rows) == 1 and rows[0]["embedding"] is None, rows
-        assert_io_error(rows[0]["error"], "AI provider embedding response contained an empty embedding: " + body)
+        assert rows[0]["error"] == "AI provider embedding response contained an empty embedding: " + body, rows
         checks += 1
     finally:
         server.shutdown()

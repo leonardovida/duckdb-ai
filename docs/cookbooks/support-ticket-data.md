@@ -3,6 +3,7 @@ sidebar_position: 2
 title: "Create the sample support tickets table"
 sidebar_label: "Sample support tickets table"
 description: "Create the sample support_tickets table used by the DuckDB AI cookbook examples."
+keywords: ["DuckDB sample data", "support tickets dataset", "AI SQL examples"]
 ---
 
 # Create the sample support tickets table
@@ -56,8 +57,8 @@ FROM (
             18000,
             5,
             'nl',
-            'Documentation request',
-            'Customer asks for an example that joins order rows with shipment status.',
+            'Vraag om documentatie',
+            'Kunt u een voorbeeld geven dat orderregels koppelt aan de verzendstatus?',
             'Good candidate for a docs snippet; no production impact.'
         ),
         (
@@ -105,5 +106,10 @@ Expected shape:
 | ticket_count | first_ticket | last_ticket |
 | --- | --- | --- |
 | `4` | `2026-06-28 09:15:00` | `2026-06-30 08:20:00` |
+
+Ticket 1003 is written in Dutch, so the translation examples have something to
+translate. A few cookbooks, such as [chaining AI steps](chain-ai-steps.md) and
+[typed decisions](jev-decisions.md), create their own small tables because
+their tests need fixed inputs.
 
 Next: [enrich support tickets with AI text functions](support-ticket-enrichment.md).

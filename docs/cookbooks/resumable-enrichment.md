@@ -1,8 +1,9 @@
 ---
-sidebar_position: 9
+sidebar_position: 6
 title: "Resume a local enrichment job"
 sidebar_label: "Resumable enrichment"
 description: "Checkpoint DuckDB LLM enrichment jobs in bounded batches and retry failed rows without repeating saved successes."
+keywords: ["resumable LLM batch", "DuckDB checkpoint", "retry failed rows", "ai_try_complete"]
 ---
 
 # Resume a local enrichment job
@@ -34,7 +35,15 @@ source_id,prompt
 ```
 
 Use Python 3 and a DuckDB shell with `ai` installed, or the source build at
-`build/release/duckdb`. After configuring a provider, run one batch:
+`build/release/duckdb`. The command below uses the local Ollama model
+`qwen3.8:27b`. Pull it first, which is a large download, or pass a model you
+already have with `--model`:
+
+```sh
+ollama pull qwen3.8:27b
+```
+
+Then run one batch:
 
 ```sh
 python3 examples/resumable_enrichment.py \
@@ -123,6 +132,9 @@ FROM enrichment_batch_usage GROUP BY config_hash;
   errors before repeatedly running the job, and use a separate remediation queue
   for permanent failures when adapting this example.
 
-For object-storage exports and usage capture, see
-[production batch enrichment](production-batch-enrichment.md) and
+For a SQL-only version of the same idea, where each step table skips rows that
+already succeeded, see [chain several AI steps](chain-ai-steps.md). For
+object-storage exports and usage capture, see
+[production batch enrichment](production-batch-enrichment.md),
+[Postgres and MySQL enrichment](source-database-enrichment.md) and
 [usage monitoring](usage-cost-observability.md).

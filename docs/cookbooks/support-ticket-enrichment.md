@@ -1,5 +1,5 @@
 ---
-sidebar_position: 3
+sidebar_position: 11
 title: "Enrich support tickets with AI text functions"
 sidebar_label: "Enrich text columns"
 description: "Summarize, classify, filter, extract, redact and translate text columns with LLM functions in DuckDB SQL."
@@ -14,8 +14,12 @@ summaries, labels, extraction, redaction, or translations in SQL.
 ## Prerequisites
 
 - Build and load the extension.
-- Configure a completion provider with settings or a `TYPE duckdb_ai` secret.
+- Configure a completion provider with session settings or a `TYPE duckdb_ai`
+  secret. Hosted providers read their key from the environment, for example
+  `OPENAI_API_KEY`. See the [provider guides](../provider-guides.md).
 - Create the [sample `support_tickets` table](support-ticket-data.md).
+
+Every function on this page sends one request per non-NULL row.
 
 ## Summarize each ticket
 
@@ -28,6 +32,8 @@ SELECT
 FROM support_tickets;
 ```
 
+Result: one `ticket_summary VARCHAR` per ticket.
+
 ## Summarize by customer
 
 Use the aggregate form when several rows belong to the same account:
@@ -39,6 +45,8 @@ SELECT
 FROM support_tickets
 GROUP BY customer_id;
 ```
+
+Result: one `summary VARCHAR` per customer.
 
 ## Classify tickets
 
@@ -54,18 +62,32 @@ SELECT
 FROM support_tickets;
 ```
 
+Result: `category VARCHAR`, always one of the listed labels.
+
 ## Filter rows with a natural-language predicate
 
-Use `ai_filter` when keyword logic would be too brittle:
+Use `ai_filter` when keyword logic would be too brittle. Send only the columns
+the model needs: `internal_note` contains an email address, so it stays out of
+the prompt until it has been [redacted](#redact-internal-notes).
 
 ```sql
 SELECT *
 FROM support_tickets
 WHERE ai_filter(
-    subject || chr(10) || body || chr(10) || internal_note,
+    subject || chr(10) || body,
     'mentions urgent production impact or needs engineering follow-up'
 );
 ```
+
+## Answer several questions in one call
+
+The classify and filter steps above each send one request per row. With a
+decision-model provider (`typesafe`, `cloudflare`, `perplexity`, `ollama` 0.35
+or later, or `systemone`), one `ai_decide` call answers both questions and
+returns a confidence for the label and a probability for the yes/no question.
+You then choose the thresholds in SQL. See
+[route rows by decision confidence](decision-routing.md). If you only have a
+chat provider, keep `ai_classify` and `ai_filter`.
 
 ## Extract compact JSON
 
@@ -82,8 +104,12 @@ SELECT
 FROM support_tickets;
 ```
 
-Use [`ai_complete_record`](structured-triage-records.md) instead when you need
-typed DuckDB columns.
+Result: `extracted_json VARCHAR`. The function does not check the JSON against a
+schema.
+
+Use [`ai_extract_record`](../functions.md#ai_extract_recordtext-response_schema-model-provider)
+to get one typed `STRUCT` per row instead. See
+[typed records from model output](structured-triage-records.md).
 
 ## Redact internal notes
 
@@ -96,16 +122,17 @@ SELECT
 FROM support_tickets;
 ```
 
-## Translate customer-facing text
+## Translate customer text
 
 Translate only the rows that need it:
 
 ```sql
 SELECT
     ticket_id,
-    ai_translate(subject || ': ' || body, 'Dutch') AS dutch_update
+    language,
+    ai_translate(subject || ': ' || body, 'English') AS english_text
 FROM support_tickets
-WHERE language = 'en';
+WHERE language <> 'en';
 ```
 
 ## Inspect usage
@@ -113,8 +140,11 @@ WHERE language = 'en';
 After running provider calls, inspect recent usage events:
 
 ```sql
-SELECT provider, model, prompt_tokens, completion_tokens, total_tokens, elapsed_ms
+SELECT function_name, provider, model, prompt_tokens, completion_tokens, total_tokens, elapsed_ms
 FROM ai_usage()
 ORDER BY event_id DESC
 LIMIT 10;
 ```
+
+`ai_usage()` keeps the latest 1,024 events for the current DuckDB instance. See
+[usage and cost monitoring](usage-cost-observability.md) to keep them longer.

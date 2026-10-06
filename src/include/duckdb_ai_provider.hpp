@@ -233,6 +233,10 @@ ProviderConfig ResolveProvider(const CompletionOptions &options);
 void SnapshotEnvironmentOptions(CompletionOptions &options);
 //! Normalize provider aliases such as claude -> anthropic and local -> openai_compatible.
 std::string NormalizeProviderName(const std::string &provider);
+//! False when JSON text nests deeper than the extension parses safely.
+bool JsonNestingWithinLimit(const std::string &input);
+//! Number of Unicode characters in UTF-8 text, as reported in ai_usage() character counts.
+int64_t Utf8CharacterCount(const std::string &text);
 //! Return the default base URL for a supported provider.
 std::string ProviderBaseUrl(const std::string &provider);
 //! Return the provider protocol used for request/response shaping.

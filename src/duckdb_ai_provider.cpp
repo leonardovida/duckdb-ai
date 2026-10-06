@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "duckdb_ai_provider.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -1362,6 +1363,8 @@ struct JsonValue {
 	std::string string_value;
 	std::vector<JsonValue> array_value;
 	std::map<std::string, JsonValue> object_value;
+	//! Object keys in document order, so schema properties keep the order the user wrote.
+	std::vector<std::string> object_keys;
 };
 
 int CompareIntegerText(const std::string &left, const std::string &right) {
@@ -1493,8 +1496,44 @@ std::string YyjsonParseError(const duckdb_yyjson::yyjson_read_err &read_error) {
 	return "malformed JSON at byte " + std::to_string(read_error.pos) + ": " + read_error.msg;
 }
 
+//! Code that walks parsed JSON (conversion, lookups, schema validation) recurses once per nesting level, so a deeply
+//! nested reply, which a looping model can produce, would overflow the stack. Such documents are rejected unparsed.
+constexpr idx_t MAX_JSON_NESTING_DEPTH = 512;
+
+bool JsonNestingWithinLimitInternal(const std::string &input) {
+	idx_t depth = 0;
+	bool in_string = false;
+	bool escaped = false;
+	for (auto c : input) {
+		if (in_string) {
+			if (escaped) {
+				escaped = false;
+			} else if (c == '\\') {
+				escaped = true;
+			} else if (c == '"') {
+				in_string = false;
+			}
+			continue;
+		}
+		if (c == '"') {
+			in_string = true;
+		} else if (c == '[' || c == '{') {
+			if (++depth > MAX_JSON_NESTING_DEPTH) {
+				return false;
+			}
+		} else if ((c == ']' || c == '}') && depth > 0) {
+			depth--;
+		}
+	}
+	return true;
+}
+
 YyjsonDocPtr ReadYyjsonDocument(const std::string &input, std::string &error,
                                 duckdb_yyjson::yyjson_read_flag flags = duckdb_yyjson::YYJSON_READ_NOFLAG) {
+	if (!JsonNestingWithinLimitInternal(input)) {
+		error = "JSON is nested more than " + std::to_string(MAX_JSON_NESTING_DEPTH) + " levels deep";
+		return YyjsonDocPtr(nullptr, duckdb_yyjson::yyjson_doc_free);
+	}
 	duckdb_yyjson::yyjson_read_err read_error;
 	// No in-situ parsing: yyjson copies this input before processing it.
 	auto mutable_input = const_cast<char *>(input.data()); // NOLINT(cppcoreguidelines-pro-type-const-cast)
@@ -1635,7 +1674,11 @@ bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, st
 			if (!ConvertYyjsonValue(value, child, error)) {
 				return false;
 			}
-			target.object_value[YyjsonString(key)] = std::move(child);
+			auto name = YyjsonString(key);
+			if (target.object_value.find(name) == target.object_value.end()) {
+				target.object_keys.push_back(name);
+			}
+			target.object_value[name] = std::move(child);
 		}
 		return true;
 	}
@@ -2047,11 +2090,20 @@ std::string SchemaTypeName(const JsonValue &schema) {
 		return type_schema->string_value;
 	}
 	if (type_schema && type_schema->type == JsonValueType::ARRAY) {
+		std::set<std::string> types;
 		for (auto &entry : type_schema->array_value) {
 			if (entry.type == JsonValueType::STRING && entry.string_value != "null") {
-				return entry.string_value;
+				types.insert(entry.string_value);
 			}
 		}
+		if (types.size() == 1) {
+			return *types.begin();
+		}
+		if (types == std::set<std::string> {"integer", "number"}) {
+			return "number";
+		}
+		// Mixed types such as ["string", "integer"] have no single column type, so keep the JSON text.
+		return types.empty() ? "null" : "json";
 	}
 	if (ObjectField(schema, "properties")) {
 		return "object";
@@ -2062,7 +2114,66 @@ std::string SchemaTypeName(const JsonValue &schema) {
 	return "json";
 }
 
-void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaProperty> &properties) {
+//! Follows a local "$ref" (for example "#/$defs/Address") and unwraps an anyOf or oneOf with one non-null branch,
+//! so {"anyOf": [{"type": "string"}, {"type": "null"}]} maps like {"type": "string"}.
+const JsonValue &ResolveSchemaNode(const JsonValue &root, const JsonValue &schema, idx_t depth = 0) {
+	if (depth > 32 || schema.type != JsonValueType::OBJECT) {
+		return schema;
+	}
+	auto ref = ObjectField(schema, "$ref");
+	if (ref && ref->type == JsonValueType::STRING && !ref->string_value.empty() && ref->string_value[0] == '#') {
+		auto pointer = ref->string_value.substr(1);
+		const JsonValue *node = &root;
+		size_t position = 0;
+		while (node && position < pointer.size()) {
+			if (pointer[position] != '/') {
+				node = nullptr;
+				break;
+			}
+			auto next = pointer.find('/', position + 1);
+			auto token =
+			    pointer.substr(position + 1, next == std::string::npos ? std::string::npos : next - position - 1);
+			std::string unescaped;
+			for (size_t i = 0; i < token.size(); i++) {
+				if (token[i] == '~' && i + 1 < token.size() && (token[i + 1] == '0' || token[i + 1] == '1')) {
+					unescaped += token[i + 1] == '0' ? '~' : '/';
+					i++;
+				} else {
+					unescaped += token[i];
+				}
+			}
+			node = ObjectField(*node, unescaped);
+			position = next == std::string::npos ? pointer.size() : next;
+		}
+		return node ? ResolveSchemaNode(root, *node, depth + 1) : schema;
+	}
+	if (ObjectField(schema, "type") || ObjectField(schema, "properties")) {
+		return schema;
+	}
+	for (auto keyword : {"anyOf", "oneOf"}) {
+		auto branches = ObjectField(schema, keyword);
+		if (!branches || branches->type != JsonValueType::ARRAY) {
+			continue;
+		}
+		const JsonValue *only = nullptr;
+		idx_t non_null = 0;
+		for (auto &branch : branches->array_value) {
+			auto &resolved = ResolveSchemaNode(root, branch, depth + 1);
+			if (SchemaTypeName(resolved) != "null") {
+				only = &resolved;
+				non_null++;
+			}
+		}
+		if (non_null == 1) {
+			return *only;
+		}
+	}
+	return schema;
+}
+
+void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
+                               std::vector<JsonSchemaProperty> &properties) {
+	auto &schema = ResolveSchemaNode(root, schema_p);
 	if (schema.type != JsonValueType::OBJECT) {
 		return;
 	}
@@ -2071,10 +2182,11 @@ void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaPr
 		return;
 	}
 	auto required_schema = ObjectField(schema, "required");
-	for (auto &entry : properties_schema->object_value) {
+	for (auto &name : properties_schema->object_keys) {
+		auto &property_schema = ResolveSchemaNode(root, properties_schema->object_value.at(name));
 		JsonSchemaProperty property;
-		property.name = entry.first;
-		property.type = entry.second.type == JsonValueType::OBJECT ? SchemaTypeName(entry.second) : "json";
+		property.name = name;
+		property.type = property_schema.type == JsonValueType::OBJECT ? SchemaTypeName(property_schema) : "json";
 		property.required = false;
 		if (required_schema && required_schema->type == JsonValueType::ARRAY) {
 			for (auto &required : required_schema->array_value) {
@@ -2084,15 +2196,16 @@ void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaPr
 				}
 			}
 		}
-		if (property.type == "object" && entry.second.type == JsonValueType::OBJECT) {
-			ExtractSchemaPropertyList(entry.second, property.children);
+		if (property.type == "object" && property_schema.type == JsonValueType::OBJECT) {
+			ExtractSchemaPropertyList(root, property_schema, property.children);
 		}
-		if (property.type == "array" && entry.second.type == JsonValueType::OBJECT) {
-			auto items_schema = ObjectField(entry.second, "items");
+		if (property.type == "array" && property_schema.type == JsonValueType::OBJECT) {
+			auto items_schema = ObjectField(property_schema, "items");
 			if (items_schema && items_schema->type == JsonValueType::OBJECT) {
-				property.item_type = SchemaTypeName(*items_schema);
+				auto &item_schema = ResolveSchemaNode(root, *items_schema);
+				property.item_type = SchemaTypeName(item_schema);
 				if (property.item_type == "object") {
-					ExtractSchemaPropertyList(*items_schema, property.item_children);
+					ExtractSchemaPropertyList(root, item_schema, property.item_children);
 				}
 			}
 		}
@@ -3806,8 +3919,8 @@ void ValidateResolvedProviderConfig(const ProviderConfig &config, bool require_a
 		                            "CLOUDFLARE_ACCOUNT_ID.");
 	}
 	if (config.provider == "systemone" && config.base_url.empty()) {
-		throw InvalidInputException("AI provider \"systemone\" requires a base URL. Set base_url, duckdb_ai_base_url, "
-		                            "SYSTEMONE_BASE_URL, or a duckdb_ai secret with BASE_URL.");
+		throw InvalidInputException("AI provider \"systemone\" requires a base URL. Pass base_url := ..., set "
+		                            "SYSTEMONE_BASE_URL, or add BASE_URL to the duckdb_ai secret.");
 	}
 	if (config.provider == "databricks" && config.base_url.empty()) {
 		throw InvalidInputException(
@@ -3866,6 +3979,12 @@ std::string CloudflareDecisionEndpoint(const std::string &base_url, const std::s
 //! ai_decide/ai_jev, so their completion and embedding behavior is unchanged.
 void ApplyDecisionProtocol(ProviderConfig &config, const CompletionOptions &options) {
 	if (config.provider == "typesafe") {
+		// DUCKDB_AI_MODEL usually names a chat model, so only TypeSafe variables override the default.
+		if (options.model.empty()) {
+			auto model = GetEnv("TYPESAFE_DECISION_MODEL");
+			model = model.empty() ? GetEnv("TYPESAFE_MODEL") : model;
+			config.model = model.empty() ? config.default_model : model;
+		}
 		return;
 	}
 	if (config.provider == "systemone") {
@@ -4664,6 +4783,30 @@ std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::y
 	throw IOException("AI provider response did not contain a supported completion text field: %s", body);
 }
 
+//! Reasoning models served by llama.cpp, vLLM, LM Studio and some gateways put their reasoning inline as a leading
+//! <think>...</think> block. It is not part of the answer, so it is removed. An unclosed block means the reply was
+//! all reasoning (usually cut off by max_tokens), which leaves no answer text.
+std::string StripLeadingReasoning(const std::string &text) {
+	static const std::pair<const char *, const char *> tags[] = {
+	    {"<think>", "</think>"}, {"<thinking>", "</thinking>"}, {"<reasoning>", "</reasoning>"}};
+	auto start = text.find_first_not_of(" \t\r\n");
+	if (start == std::string::npos) {
+		return text;
+	}
+	for (auto &tag : tags) {
+		if (text.compare(start, std::strlen(tag.first), tag.first) != 0) {
+			continue;
+		}
+		auto end = text.find(tag.second, start);
+		if (end == std::string::npos) {
+			return std::string();
+		}
+		auto answer = text.find_first_not_of(" \t\r\n", end + std::strlen(tag.second));
+		return answer == std::string::npos ? std::string() : text.substr(answer);
+	}
+	return text;
+}
+
 std::string NativeResponseJson(const std::string &body) {
 	std::string error;
 	auto doc = ReadYyjsonDocument(body, error);
@@ -4850,7 +4993,15 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	if (native && response_error && !duckdb_yyjson::yyjson_is_null(response_error)) {
 		throw IOException("Provider returned an error object");
 	}
-	result.text = native ? body : ExtractCompletionText(config, root, response.body);
+	if (native) {
+		result.text = body;
+	} else {
+		auto text = ExtractCompletionText(config, root, response.body);
+		result.text = StripLeadingReasoning(text);
+		if (result.text.empty() && !text.empty()) {
+			result.finish_reason = "reasoning_only";
+		}
+	}
 	result.raw_response = response.body;
 	result.http_status = response.status;
 	result.elapsed_ms = response.elapsed_ms;
@@ -4883,15 +5034,12 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 			                      std::max<int64_t>(0, result.cache_creation_prompt_tokens);
 		}
 		YyjsonDirectString(root, "stop_reason", result.finish_reason);
-		if (!native && result.finish_reason == "max_tokens") {
-			throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or "
-			                  "request a shorter response");
-		}
 		return result;
 	}
 	if (config.protocol == "ollama_chat") {
 		result.prompt_tokens = YyjsonIntegerOrMissing(root, "prompt_eval_count");
 		result.completion_tokens = YyjsonIntegerOrMissing(root, "eval_count");
+		result.cached_prompt_tokens = YyjsonIntegerOrMissing(root, "prompt_eval_cached_count");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
 			result.total_tokens = result.prompt_tokens + result.completion_tokens;
 		}
@@ -4922,11 +5070,24 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	}
 	auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
 	YyjsonDirectString(first_choice, "finish_reason", result.finish_reason);
-	if (!native && result.finish_reason == "length") {
+	return result;
+}
+
+//! A reply cut off by the output limit, or one that holds only reasoning, has no usable answer. It is reported as an
+//! error after parsing so the usage event keeps the tokens the provider charged for.
+void RequireCompleteAnswer(const CompletionResult &result, bool native) {
+	if (native) {
+		return;
+	}
+	// OpenAI-compatible APIs and Ollama report "length"; Anthropic reports "max_tokens".
+	if (result.finish_reason == "length" || result.finish_reason == "max_tokens") {
 		throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or request a "
 		                  "shorter response");
 	}
-	return result;
+	if (result.finish_reason == "reasoning_only") {
+		throw IOException("AI provider response contained only reasoning and no answer; raise max_tokens or lower the "
+		                  "model's reasoning effort");
+	}
 }
 
 double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionOptions &options,
@@ -5030,6 +5191,15 @@ void PushUsageEvent(ProviderRuntimeState &state, UsageEvent event) {
 	}
 }
 
+//! Usage character counts are Unicode characters, not UTF-8 bytes.
+int64_t Utf8Length(const std::string &text) {
+	int64_t count = 0;
+	for (auto c : text) {
+		count += (static_cast<unsigned char>(c) & 0xC0) != 0x80;
+	}
+	return count;
+}
+
 UsageEvent BaseProviderUsageEvent(const ProviderConfig &config, const CompletionOptions &options,
                                   const std::string &event_name, int64_t prompt_chars, int64_t input_chars) {
 	UsageEvent event {};
@@ -5057,9 +5227,9 @@ UsageEvent BaseProviderUsageEvent(const ProviderConfig &config, const Completion
 }
 
 void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionResult &result,
-                      const CompletionOptions &options) {
-	auto event = BaseProviderUsageEvent(config, options, "ai_completion", static_cast<int64_t>(prompt.size()), -1);
-	event.response_chars = static_cast<int64_t>(result.text.size());
+                      const CompletionOptions &options, const char *error = nullptr) {
+	auto event = BaseProviderUsageEvent(config, options, "ai_completion", Utf8Length(prompt), -1);
+	event.response_chars = Utf8Length(result.text);
 	event.prompt_tokens = result.prompt_tokens;
 	event.completion_tokens = result.completion_tokens;
 	event.total_tokens = result.total_tokens;
@@ -5069,15 +5239,20 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 	event.retries = result.retries;
 	event.http_status = result.http_status;
 	event.cache_hit = result.cache_hit;
-	event.status = "ok";
-	event.error = "";
+	event.status = error ? "error" : "ok";
+	event.error = error ? error : "";
 	event.estimated_cost_usd = EstimateCompletionCostUsd(config, options, result);
 	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
+//! Usage rows hold the plain error message, not DuckDB's serialized exception JSON.
+std::string UsageErrorMessage(const std::exception &ex) {
+	return ErrorData(ex).RawMessage();
+}
+
 void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options,
                             long http_status, const std::string &error, int64_t retries) {
-	auto event = BaseProviderUsageEvent(config, options, "ai_completion", static_cast<int64_t>(prompt.size()), -1);
+	auto event = BaseProviderUsageEvent(config, options, "ai_completion", Utf8Length(prompt), -1);
 	event.retries = retries;
 	event.http_status = http_status;
 	event.status = "error";
@@ -5087,7 +5262,7 @@ void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &pro
 
 void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input, const EmbeddingResult &result,
                                const CompletionOptions &options, int64_t dimensions = -1) {
-	auto input_chars = static_cast<int64_t>(input.size());
+	auto input_chars = Utf8Length(input);
 	auto event = BaseProviderUsageEvent(config, options, "ai_embedding", input_chars, input_chars);
 	event.dimensions = dimensions >= 0 ? dimensions : static_cast<int64_t>(result.values.size());
 	event.prompt_tokens = result.prompt_tokens;
@@ -5105,7 +5280,7 @@ void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &
 void RecordFailedEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input,
                                      const CompletionOptions &options, long http_status, const std::string &error,
                                      int64_t retries) {
-	auto input_chars = static_cast<int64_t>(input.size());
+	auto input_chars = Utf8Length(input);
 	auto event = BaseProviderUsageEvent(config, options, "ai_embedding", input_chars, input_chars);
 	event.retries = retries;
 	event.http_status = http_status;
@@ -5455,7 +5630,7 @@ EmbeddingResult ParseValidatedEmbeddingResult(const ProviderConfig &config, cons
 	try {
 		result = ParseEmbeddingResult(config, response);
 	} catch (std::exception &ex) {
-		record_failure(ex.what());
+		record_failure(UsageErrorMessage(ex));
 		throw;
 	}
 	auto dimension_error = EmbeddingDimensionError(result, capabilities);
@@ -5564,7 +5739,7 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		throw;
 	} catch (std::exception &ex) {
 		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), 0);
 		}
 		throw;
 	}
@@ -5583,7 +5758,8 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		results = ParseEmbeddingResults(config, response, inputs.size());
 	} catch (std::exception &ex) {
 		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
+			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, UsageErrorMessage(ex),
+			                                response.retries);
 		}
 		throw;
 	}
@@ -5606,6 +5782,14 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 }
 
 } // namespace
+
+int64_t Utf8CharacterCount(const std::string &text) {
+	return Utf8Length(text);
+}
+
+bool JsonNestingWithinLimit(const std::string &input) {
+	return JsonNestingWithinLimitInternal(input);
+}
 
 bool ParseJevAnswer(const std::string &response, const std::string &question_key, const std::string &answer_type,
                     std::string &choice, double &probability) {
@@ -5796,7 +5980,8 @@ CompletionResult Complete(const std::string &prompt, const std::string &model, c
 CompletionResult Complete(const std::string &prompt, const CompletionOptions &options,
                           const std::function<void(const CompletionResult &)> &validate_result) {
 	if (prompt.empty()) {
-		throw InvalidInputException("ai_complete prompt must not be empty");
+		throw InvalidInputException("%s input must not be empty",
+		                            options.function_name.empty() ? "ai_complete" : options.function_name);
 	}
 	auto request_options = RequestOperationOptions(options);
 	auto config = ResolveProvider(request_options);
@@ -5824,7 +6009,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		ValidateCompletionRequestLimits(prompt, payload, request_options);
 		EnforceAllowedHost(endpoint, request_options);
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, prompt, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	HttpResponse response;
@@ -5836,7 +6021,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		// Query cancellation is not a provider failure; keep it out of usage error events.
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, prompt, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -5845,8 +6030,11 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		throw IOException("%s", error);
 	}
 	CompletionResult result;
+	bool parsed = false;
 	try {
 		result = ParseCompletionResult(config, response, native);
+		parsed = true;
+		RequireCompleteAnswer(result, native);
 		if (validate_result) {
 			validate_result(result);
 		}
@@ -5856,7 +6044,13 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 			// poisoned entry would fail every later cache hit until ai_clear_cache().
 			RemoveCachedResponse(RuntimeState(request_options), cache_key);
 		}
-		RecordFailedUsageEvent(config, prompt, request_options, response.status, ex.what(), response.retries);
+		if (parsed) {
+			// The provider answered and charged for it, so keep its token counts on the error event.
+			RecordUsageEvent(config, prompt, result, request_options, UsageErrorMessage(ex).c_str());
+		} else {
+			RecordFailedUsageEvent(config, prompt, request_options, response.status, UsageErrorMessage(ex),
+			                       response.retries);
+		}
 		throw;
 	}
 	RecordUsageEvent(config, prompt, result, request_options);
@@ -5881,7 +6075,7 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 		ValidateCompletionRequestLimits(text, payload, request_options);
 		EnforceAllowedHost(endpoint, request_options);
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, text, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	HttpResponse response;
@@ -5892,7 +6086,7 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, text, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -5901,13 +6095,21 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 		throw IOException("%s", error);
 	}
 	CompletionResult result;
+	bool parsed = false;
 	try {
 		result = ParseCompletionResult(config, response);
+		parsed = true;
+		RequireCompleteAnswer(result, false);
 	} catch (std::exception &ex) {
 		if (!cache_key.empty()) {
 			RemoveCachedResponse(RuntimeState(request_options), cache_key);
 		}
-		RecordFailedUsageEvent(config, text, request_options, response.status, ex.what(), response.retries);
+		if (parsed) {
+			RecordUsageEvent(config, text, result, request_options, UsageErrorMessage(ex).c_str());
+		} else {
+			RecordFailedUsageEvent(config, text, request_options, response.status, UsageErrorMessage(ex),
+			                       response.retries);
+		}
 		throw;
 	}
 	RecordUsageEvent(config, text, result, request_options);
@@ -5947,7 +6149,7 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	try {
 		ValidateEmbeddingInputLimits(input, payload.size(), capabilities);
 	} catch (std::exception &ex) {
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, ex.what(), 0);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	auto endpoint = EmbeddingEndpoint(config);
@@ -5961,7 +6163,7 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, ex.what(), 0);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -5995,7 +6197,7 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 		try {
 			ValidateEmbeddingInputLimits(input, EmbeddingPayload(config, input).size(), capabilities);
 		} catch (std::exception &ex) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), 0);
 			throw;
 		}
 	}
@@ -6284,20 +6486,21 @@ bool ExtractJsonSchemaProperties(const std::string &schema, std::vector<JsonSche
 		error = "schema must be a JSON object";
 		return false;
 	}
-	auto root_type = ObjectField(schema_value, "type");
+	auto &root_schema = ResolveSchemaNode(schema_value, schema_value);
+	auto root_type = ObjectField(root_schema, "type");
 	JsonValue object_value;
 	object_value.type = JsonValueType::OBJECT;
 	if (root_type && !SchemaTypeAllows(*root_type, object_value)) {
 		error = "schema root type must allow object";
 		return false;
 	}
-	auto properties_schema = ObjectField(schema_value, "properties");
+	auto properties_schema = ObjectField(root_schema, "properties");
 	if (!properties_schema || properties_schema->type != JsonValueType::OBJECT ||
 	    properties_schema->object_value.empty()) {
 		error = "schema must define at least one top-level object property";
 		return false;
 	}
-	ExtractSchemaPropertyList(schema_value, properties);
+	ExtractSchemaPropertyList(schema_value, root_schema, properties);
 	return true;
 }
 

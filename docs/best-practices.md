@@ -18,10 +18,11 @@ Use the most constrained provider that fits the job:
 | Workload | Recommended path | Why |
 | --- | --- | --- |
 | Local development without hosted credentials | `ollama` | Keeps prompts local and avoids provider costs. |
-| Production chat, extraction, classification, and SQL assistant calls | A managed LLM provider such as `openai`, `azure`, `databricks`, `snowflake`, `anthropic`, `gemini`, `mistral`, `deepseek`, `zai`, or `openrouter` | Gives managed reliability, model access, and governance controls. |
+| Production chat, extraction, classification, and SQL assistant calls | A managed LLM provider such as `openai`, `azure`, `databricks`, `snowflake`, `anthropic`, `gemini`, `mistral`, `deepseek`, `zai`, or `openrouter` | Hosted models with provider-side quotas and access controls. |
 | OpenAI-compatible gateways, vLLM, LM Studio, LiteLLM, or local Ollama `/v1` | `openai_compatible` or `local` | Uses the common chat-completions request shape. |
 | Local llama.cpp `llama-server` | `llamacpp` or `llama.cpp` | Talks to `http://localhost:8080/v1` out of the box; the server answers with its loaded model. |
 | PII redaction where raw text should stay local | `openai_privacy_filter` with local hosting | Sends raw text to a dedicated redaction service instead of a general chat model. |
+| Fixed-choice questions at high volume (routing, triage, moderation) | A decision model through `ai_decide`: `typesafe`, `cloudflare`, `perplexity`, `ollama` 0.35 or later, or `systemone` | Returns labels with confidences and probabilities instead of text, and answers several questions in one request. |
 | PII redaction shared across teams | `openai_privacy_filter` with a private cloud service | Centralizes deployment, auth, scaling, and audit controls while preserving the dedicated redaction contract. |
 
 `ai_redact` behaves differently for `openai_privacy_filter`: it sends the raw
@@ -37,7 +38,7 @@ files, notebooks, CI logs, or shell history.
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'openai',
-    MODEL 'gpt-4o-mini'
+    MODEL 'gpt-5.6-luna'
 );
 
 SELECT ai_complete('hello', secret := 'openai_ai');
@@ -99,7 +100,7 @@ Use global defaults for short interactive sessions:
 
 ```sql
 SET duckdb_ai_provider = 'openai';
-SET duckdb_ai_model = 'gpt-4o-mini';
+SET duckdb_ai_model = 'gpt-5.6-luna';
 SET duckdb_ai_timeout_seconds = 120;
 ```
 
@@ -107,19 +108,16 @@ Use family-specific model settings when different function groups need different
 models:
 
 ```sql
-SET duckdb_ai_completion_model = 'gpt-4o-mini';
-SET duckdb_ai_task_model = 'gpt-4o-mini';
-SET duckdb_ai_sql_assistant_model = 'gpt-4o';
-SET duckdb_ai_aggregate_model = 'gpt-4o-mini';
+SET duckdb_ai_completion_model = 'gpt-5.6-luna';
+SET duckdb_ai_task_model = 'gpt-5.6-luna';
+SET duckdb_ai_sql_assistant_model = 'gpt-5.6';
+SET duckdb_ai_aggregate_model = 'gpt-5.6-luna';
 SET duckdb_ai_embedding_model = 'text-embedding-3-small';
 ```
 
-Precedence is:
-
-1. Per-call `model := ...`
-2. Function-family setting such as `duckdb_ai_embedding_model`
-3. `duckdb_ai_model`
-4. Provider default model
+A per-call `model := ...` or `profile := ...` overrides these settings, and
+the settings override the `MODEL` stored in a secret. The full order is in
+[provider settings and secrets](functions.md#provider-settings-and-secrets).
 
 For repeatable jobs, prefer secrets and explicit per-job settings over relying
 on ambient environment variables.
@@ -166,8 +164,28 @@ model selection, message structure, response-format hints, and provider aliases.
 
 ## Prefer structured output for data pipelines
 
-For pipelines, avoid parsing prose. Use `ai_complete_json` or
-`ai_complete_record` with a JSON Schema:
+For pipelines, avoid parsing prose. For one value per row, use
+`ai_extract_record`, which returns a typed `STRUCT` from a JSON Schema:
+
+```sql
+SELECT ticket_id, r.urgency, r.product_area
+FROM (
+    SELECT ticket_id,
+           ai_extract_record(subject || chr(10) || body, '{
+             "type": "object",
+             "properties": {
+               "urgency": {"type": "string", "enum": ["low", "medium", "high"]},
+               "product_area": {"type": "string"}
+             },
+             "required": ["urgency", "product_area"],
+             "additionalProperties": false
+           }', provider := 'openai') AS r
+    FROM support_tickets
+);
+```
+
+`ai_complete_record` is a table function for one self-contained prompt: its
+arguments must be constants, so it cannot read a column.
 
 ```sql
 SELECT *
@@ -203,8 +221,10 @@ FROM ai_schema_prompt(
 );
 ```
 
-Use `include_tables` and `exclude_tables` aggressively. Avoid sending an entire
+Always pass `include_tables` or `exclude_tables`. Avoid sending an entire
 database catalog when the question only needs one schema or table.
+`sample_rows := N` sends up to N real rows per table to the provider, so omit
+it for sensitive tables.
 
 Generated SQL is validated as one read-only DuckDB `SELECT`, but you should
 still inspect generated queries before using them in important workflows:
@@ -216,15 +236,15 @@ WITH generated AS (
         include_tables := ['main.support_tickets']
     ) AS sql
 )
-SELECT ai_validate_read_only_sql(sql)
+SELECT ai_validate_read_only_sql(sql, true) -- true also checks that it binds
 FROM generated;
 ```
 
 ## Treat redaction as a privacy control, not a proof
 
 Use `openai_privacy_filter` for dedicated PII masking when raw text should not
-be sent to a general chat model. Host it locally for the strongest data-boundary
-story:
+be sent to a general chat model. Host it locally so raw text never leaves the
+machine:
 
 ```sql
 CREATE OR REPLACE SECRET privacy_filter_local (
@@ -245,6 +265,8 @@ cost and latency by:
 
 - Filtering rows before AI calls.
 - Deduplicating repeated input text.
+- Asking several fixed-choice questions about the same text in one `ai_decide`
+  call instead of separate `ai_classify`, `ai_filter` and `ai_score` calls.
 - Using `ai_agg` or `ai_summarize_agg` when one grouped call is enough.
 - Persisting embeddings instead of recomputing pairwise similarity.
 - Setting lower `max_tokens` values for classification and extraction tasks.
@@ -280,7 +302,7 @@ account tier changes:
 CREATE OR REPLACE TABLE ai_provider_limits AS
 SELECT
     'openai' AS provider,
-    'gpt-4o-mini' AS model,
+    'gpt-5.6-luna' AS model,
     200000::BIGINT AS token_limit_per_minute,
     500::BIGINT AS request_limit_per_minute;
 
@@ -295,7 +317,7 @@ SELECT ai_recommended_batch_size(
     request_limit_per_minute
 ) AS recommended_rows_per_minute
 FROM prompt_stats, ai_provider_limits
-WHERE provider = 'openai' AND model = 'gpt-4o-mini';
+WHERE provider = 'openai' AND model = 'gpt-5.6-luna';
 ```
 
 Retries are disabled by default. Enable small retry counts only for transient
@@ -334,7 +356,7 @@ SELECT
     ai_try_complete(
         subject || ': ' || body,
         provider := 'openai',
-        model := 'gpt-4o-mini',
+        model := 'gpt-5.6-luna',
         max_tokens := 200,
         token_limit_per_minute := 200000
     ) AS result
@@ -372,16 +394,21 @@ job runner or provider SDK:
 ```sql
 COPY (
     SELECT
-        ticket_id AS custom_id,
+        'ticket-' || ticket_id AS custom_id,
+        'POST' AS method,
+        '/v1/chat/completions' AS url,
         ai_completion_request_json(
             subject || chr(10) || body,
             provider := 'openai',
-            model := 'gpt-4o-mini',
+            model := 'gpt-5.6-luna',
             system_prompt := 'Summarize this support ticket in one sentence.'
-        ) AS body
+        )::JSON AS body
     FROM support_tickets
 ) TO 'openai-batch-requests.jsonl' (FORMAT json);
 ```
+
+Each line has the `custom_id`, `method`, `url` and `body` object that the
+OpenAI Batch API expects.
 
 Store `custom_id` with the provider response and join it back to the source
 table after the batch finishes. Keep `response_schema` or downstream DuckDB

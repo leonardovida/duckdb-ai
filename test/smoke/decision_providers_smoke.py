@@ -175,6 +175,25 @@ def run(duckdb_path):
         )
         assert requests[-1][0] == "/v1/systemone" and requests[-1][2]["model"] == "nimble", requests
 
+        # A chat model stored in the provider's secret does not leak either; a TypeSafe secret model applies.
+        requests.clear()
+        query(
+            "CREATE SECRET ollama_ai (TYPE duckdb_ai, AI_PROVIDER 'ollama', MODEL 'qwen3.8:27b'); "
+            "CREATE SECRET jev_ai (TYPE duckdb_ai, AI_PROVIDER 'typesafe', MODEL 'jev-1.13.0'); "
+            f"SELECT ai_decide('x', {questions}, provider := 'ollama').team AS a, "
+            f"ai_decide('x', {questions}, secret := 'jev_ai').team AS b;"
+        )
+        assert sorted(r[2]["model"] for r in requests) == ["jev-1.13.0", "nimble"], requests
+
+        # DUCKDB_AI_MODEL names a chat model, so TypeSafe keeps its own default.
+        requests.clear()
+        env["DUCKDB_AI_MODEL"] = "gpt-5.6-luna"
+        try:
+            query(f"SELECT ai_decide('x', {questions}, provider := 'typesafe').team AS team;")
+        finally:
+            del env["DUCKDB_AI_MODEL"]
+        assert requests[-1][2]["model"] == "jev-latest", requests
+
         # Per-question instructions.
         requests.clear()
         rows = decide(

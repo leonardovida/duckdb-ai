@@ -199,6 +199,8 @@ jobs:
           python3 test/smoke/docs_coverage_smoke.py
           python3 test/smoke/decision_providers_smoke.py
           python3 test/smoke/chaining_smoke.py
+          python3 test/smoke/native_types_smoke.py
+          python3 test/smoke/output_parsing_smoke.py
           python3 test/smoke/extension_upload_smoke.py
           python3 test/smoke/resumable_enrichment_smoke.py
           python3 test/smoke/jev_batch_evaluation_smoke.py

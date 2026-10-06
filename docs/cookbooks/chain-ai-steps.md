@@ -1,5 +1,5 @@
 ---
-sidebar_position: 13
+sidebar_position: 3
 title: "Chain several AI steps in SQL"
 sidebar_label: "Chain AI steps"
 description: "Run multi-step LLM pipelines in DuckDB SQL: avoid repeated model calls, skip rows that failed upstream, branch with CASE, and checkpoint each step so reruns only retry what is missing."
@@ -13,9 +13,15 @@ a ticket, then triage it, then write a note for the urgent ones. Every step is
 plain SQL, and every step is saved, so a rerun only calls the model for rows
 that are new, changed, or failed last time.
 
-The examples assume a completion provider configured with session settings
-(see the [quickstart](../index.md#first-query)) and a local Ollama decision
-model for `ai_decide` (`ollama pull nimble`).
+Prerequisites:
+
+- Steps 1 and 3 use the completion provider and model from your session
+  settings (see the [quickstart](../index.md#first-query)). For a hosted
+  provider, set its key in the environment, for example `OPENAI_API_KEY`.
+- Step 2 uses a different model: the local Ollama decision model `nimble`
+  through `ai_decide`. It needs Ollama 0.35 or later and `ollama pull nimble`.
+  `ai_decide` ignores the session model settings, so the chat model from steps
+  1 and 3 is never sent to it.
 
 ## How chained calls behave
 
@@ -35,7 +41,7 @@ Avoid these patterns:
 | --- | --- | --- |
 | `(ai_try_complete(x)).response, (ai_try_complete(x)).error` | Two calls per row. | Call once in a subquery and read both fields outside it. |
 | `SELECT ai_redact(x) AS clean, ai_summarize(clean)` | Binder error: an alias with side effects cannot be reused in the same `SELECT`. | Compute `clean` in a subquery or an earlier step table. |
-| `ai_summarize(coalesce(x, ''))` | An empty prompt is an error, not a skip. | Pass NULL through; NULL inputs are skipped for free. |
+| `ai_summarize(coalesce(x, ''))` | An empty string still sends a paid request (only `ai_complete` raises an error for it). | Pass NULL through. NULL inputs make no call. |
 | `... LIMIT 100 OFFSET 1000` on the outer query | `OFFSET` can still call the model for the skipped rows. | Page inside the input subquery. |
 | Rerunning a `CREATE OR REPLACE TABLE ... AS SELECT ai_...` | Every row is sent again. | Insert only rows missing from the step table, as below. |
 
@@ -44,9 +50,11 @@ Avoid these patterns:
 Every step costs one request per row, so first check whether one call can do
 the work of several:
 
-- `ai_decide` answers several typed questions (team, urgency, sentiment) in
-  one request instead of separate `ai_classify`, `ai_filter` and `ai_score`
-  calls.
+- [`ai_decide`](../functions.md#ai_decidestate-questions-) answers several
+  typed questions (team, urgency, sentiment) in one request instead of separate
+  `ai_classify`, `ai_filter` and `ai_score` calls. See
+  [typed decisions](jev-decisions.md) and
+  [routing by confidence](decision-routing.md).
 - `ai_extract_record` with a multi-field JSON Schema returns a category, a
   score and a short summary in one call.
 
@@ -54,6 +62,9 @@ Keep a step separate when its input must be different: for example, run
 `ai_redact` on its own so that raw text never reaches a general model.
 
 ## Create sample data
+
+This page uses its own small `tickets` table with a non-English row and a NULL
+body, so you can see both cases being handled.
 
 ```sql
 CREATE OR REPLACE TABLE tickets AS
@@ -112,7 +123,10 @@ FROM (
 ## Step 2: answer several questions in one call
 
 `ai_decide` reads only rows that step 1 translated successfully, and asks two
-questions in a single request per row.
+questions in a single request per row. `team` comes back as a label with
+`team_confidence`, and `urgent` as the probability of yes. With
+`on_error := 'null'`, a failed request leaves `team` NULL, so the next run
+retries that row.
 
 ```sql
 CREATE TABLE IF NOT EXISTS step_triage (
@@ -173,11 +187,18 @@ FROM (
 
 ## Read the results and check progress
 
+The first query joins the step tables back to the current ticket text, so a
+ticket whose body changed shows only its latest result. The second counts the
+model calls of this run by function.
+
 ```sql
 SELECT n.ticket_id, n.english, tr.team, tr.urgent, e.note, n.error
 FROM step_normalize n
 LEFT JOIN step_triage tr USING (ticket_id, input_hash, version)
 LEFT JOIN step_escalation e USING (ticket_id, input_hash, version)
+SEMI JOIN tickets t
+    ON t.ticket_id = n.ticket_id
+   AND md5(t.body) = n.input_hash
 WHERE n.version = getvariable('pipeline_version')
 ORDER BY n.ticket_id;
 
@@ -190,19 +211,29 @@ ORDER BY function_name;
 
 Run the same statements again to continue. Rows that already succeeded are not
 sent again, so a second run only retries failed rows and picks up new tickets.
-`ai_usage()` lives in memory for the current DuckDB instance; copy it into a
-table if you need cost history across runs, as in
-[usage and cost monitoring](usage-cost-observability.md).
+`ai_usage()` lives in memory for the current DuckDB instance and keeps only the
+latest 1,024 events. Copy it into a table after each run if you need cost
+history, as in [usage and cost monitoring](usage-cost-observability.md).
 
 ## Options per step
 
 - Shared options, such as the provider, timeouts and retries, belong in
   session settings (`SET duckdb_ai_retry_count = 2`).
 - Options that differ by step go on the call. To change them without editing
-  the query, read them from a variable: `max_tokens := getvariable('summary_tokens')`.
+  the query, read them from a variable: run `SET VARIABLE summary_tokens = 120;`
+  first, then pass `max_tokens := getvariable('summary_tokens')`. An unset
+  variable is NULL, and `max_tokens` rejects NULL.
 - `CREATE EXTERNAL MODEL` profiles bundle a provider, model and credential under
   one name, so each step can use `profile := 'small_model'` or
   `profile := 'large_model'`.
 
 For a Python driver that loops over batches and stops on a budget, see
-[resumable enrichment](resumable-enrichment.md).
+[resumable enrichment](resumable-enrichment.md). Before a large run, check the
+prompts and models on a labeled sample as shown in
+[evaluate before a batch run](evaluate-before-batch.md).
+
+## Clean up
+
+The step tables are meant to persist between runs. To start over, or to remove
+the example, run `DROP TABLE IF EXISTS step_escalation, step_triage,
+step_normalize, tickets;` in the same database.
