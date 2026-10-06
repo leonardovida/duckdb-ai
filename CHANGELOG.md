@@ -7,6 +7,16 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ## Unreleased
 
+### Added
+
+- `ai_decide(state, questions, provider := ...)` answers typed questions with
+  any supported decision model and returns the same typed `STRUCT` as `ai_jev`.
+  It supports TypeSafe Jev, Cloudflare Clef and Clef-flash on Workers AI,
+  Perplexity `pplx-decider-v1-27b`, local Ollama decision models such as
+  `nimble` and `tev1`, and any `/v1/systemone` endpoint through the new
+  `systemone` provider. Questions can carry their own `instructions`.
+  `ai_jev` is unchanged and remains available as the TypeSafe-only form.
+
 ### Maintenance
 
 - Build and test against DuckDB 1.5.6 and matching extension CI tooling. This

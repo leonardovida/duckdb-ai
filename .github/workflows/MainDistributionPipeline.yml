@@ -194,6 +194,7 @@ jobs:
         run: |
           python3 test/smoke/mock_provider_smoke.py
           python3 test/smoke/docs_coverage_smoke.py
+          python3 test/smoke/decision_providers_smoke.py
           python3 test/smoke/extension_upload_smoke.py
           python3 test/smoke/resumable_enrichment_smoke.py
           python3 test/smoke/jev_batch_evaluation_smoke.py

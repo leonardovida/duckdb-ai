@@ -25,7 +25,8 @@ FROM ai_usage();
 | Function | Type | Description |
 | --- | --- | --- |
 | `ai_complete(prompt[, model[, provider]])` | Scalar | Calls a completion model and returns text. |
-| `ai_jev(text, questions[, ...])` | Scalar | Returns a typed STRUCT of Jev decisions, batching up to 32 rows per request. |
+| `ai_decide(state, questions[, ...])` | Scalar | Answers typed questions with a decision model (Jev, Clef, Perplexity, Ollama, any `/v1/systemone` endpoint) and returns a typed STRUCT. |
+| `ai_jev(text, questions[, ...])` | Scalar | `ai_decide` with the provider fixed to TypeSafe Jev. |
 | `ai_provider_call(request_json, provider := ...)` | Scalar | Sends a native JSON body and returns full JSON or buffered SSE events. |
 | `ai_try_complete(prompt[, model[, provider]])` | Scalar | Calls a completion model and returns `STRUCT(response, error)` for row-level failure capture. |
 | `ai_complete_json(prompt[, model[, provider]])` | Scalar | Calls a completion model and validates the response as a JSON object or array. |
@@ -143,7 +144,84 @@ continues to return final text. See [provider coverage](provider-guides.md#text-
 
 ## Completion functions
 
+#### `ai_decide(state, questions[, ...])`
+
+Description: Answers named, typed questions about each row with a decision
+model and returns a typed `STRUCT`. Decision models return calibrated
+probabilities over answers you define instead of generating text, so the
+result needs no parsing. The same SQL works with every supported provider:
+
+| Provider | Models | Endpoint | Credentials |
+| --- | --- | --- | --- |
+| `typesafe` (alias `jev`) | `jev-latest`, `jev-1.13.0` | `/v1/systemone` | `TYPESAFE_API_KEY` |
+| `cloudflare` | `clef` (default), `clef-flash` | Workers AI `/ai/run/@cf/cloudflare/<model>` | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` |
+| `perplexity` | `pplx-decider-v1-27b` (default) | `/v1/decisions` | `PERPLEXITY_API_KEY` |
+| `ollama` | `nimble` (default), `tev1`, `tev1:0.8b` | local `/v1/systemone` (Ollama 0.35 or later) | none |
+| `systemone` | any; `model` is required | `<base_url>/v1/systemone` | optional `SYSTEMONE_API_KEY` |
+
+The provider comes from `provider := ...`, a `secret`/`profile`, or
+`duckdb_ai_provider`. Session model settings such as `duckdb_ai_model` name
+chat models, so they are ignored. Pass `model := ...` or set
+`<PROVIDER>_DECISION_MODEL` (for example `OLLAMA_DECISION_MODEL`) to choose a
+decision model. OpenAI's Decisions API is not supported until OpenAI publishes
+its request schema.
+
+Example:
+
+```sql
+SELECT ticket_id, d.team, d.team_confidence, d.severity, d.urgent
+FROM (
+    SELECT ticket_id,
+           ai_decide(body, {
+               team: MAP {'billing': 'Payments and refunds', 'technical': 'Errors and outages'},
+               severity: ['Routine', 'Degraded', 'Blocked'],
+               urgent: MAP {'true': 'Needs action now', 'false': 'Can wait'},
+               refund: {instructions: 'Is the customer asking for money back?',
+                        criteria: MAP {'true': 'Asks for a refund', 'false': 'Does not'}}
+           }, provider := 'cloudflare', model := 'clef-flash') AS d
+    FROM support_tickets
+);
+```
+
+Result shape:
+
+```text
+STRUCT(team VARCHAR, team_confidence DOUBLE, severity DOUBLE, severity_confidence DOUBLE,
+       urgent DOUBLE, refund DOUBLE)
+```
+
+Each field of `questions` is one question. Its value selects the question type:
+
+| Value | Question | Result fields |
+| --- | --- | --- |
+| `MAP {'label': 'description', ...}` | Choice among 1 to 255 labels | `<field> VARCHAR`, `<field>_confidence DOUBLE` |
+| `['lowest level', ..., 'highest level']` | Score over 2 to 10 ordered levels | `<field> DOUBLE` from 0 to levels minus 1, `<field>_confidence DOUBLE` |
+| `MAP {'true': 'yes criterion', 'false': 'no criterion'}` | Yes/no ("noul") | `<field> DOUBLE`, the probability of yes |
+| `{instructions: '...', criteria: <one of the above>}` | Any of the above with a question-specific instruction | as above |
+
+Questions must be constant. Providers enforce their own limits, for example
+Ollama accepts at most 26 options or levels and 64 questions per request.
+
+Batching: TypeSafe Jev accepts several rows per request, so `ai_decide` with
+`typesafe` batches up to `batch_size` rows (default and maximum 32) exactly as
+`ai_jev` does. Other providers receive one request per non-null row, with the
+row text as `state`, and run concurrently up to `max_concurrent_requests`.
+`max_request_bytes` (default 48000) caps every request body.
+
+Options: `provider`, `model`, `secret`, `profile`, `base_url`, `batch_size`,
+`max_request_bytes`, `on_error` (`fail` or `null`), `timeout_seconds`,
+`retry_count`, `retry_backoff_ms`, `max_concurrent_requests`,
+`min_request_interval_ms`, `token_limit_per_minute`, `allowed_hosts` and
+`cache`. Generation options such as `temperature` are rejected. NULL input
+returns a NULL struct without a request. `ai_usage()` records one `ai_decide`
+event per request.
+
 #### `ai_jev(text, questions[, ...])`
+
+`ai_jev` is `ai_decide` with the provider fixed to TypeSafe Jev. It accepts the
+same criteria (without the `{instructions, criteria}` form) and the same
+options except `provider` and `profile`. Existing queries keep working
+unchanged.
 
 Description: Evaluates named Jev decisions and returns a typed `STRUCT`. No JSON
 extension or response parsing is needed. The provider is always TypeSafe. Use

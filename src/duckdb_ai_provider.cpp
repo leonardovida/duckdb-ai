@@ -202,6 +202,9 @@ std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	if (provider == "jev") {
 		return "typesafe";
 	}
+	if (provider == "system_one" || provider == "decision") {
+		return "systemone";
+	}
 	if (provider == "xiaomi" || provider == "xiaomi_mimo") {
 		return "mimo";
 	}
@@ -667,6 +670,11 @@ bool EndsWith(const std::string &value, const std::string &suffix) {
 	return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+bool IsDecisionProtocol(const std::string &protocol) {
+	return protocol == "typesafe_jev" || protocol == "systemone" || protocol == "cloudflare_decision" ||
+	       protocol == "perplexity_decisions";
+}
+
 bool StartsWith(const std::string &value, const std::string &prefix) {
 	return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
 }
@@ -917,6 +925,10 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "Jev input tokens only", "2026-09-18"},
 	    {"typesafe", "jev-1.13.0", "completion", 0.042, 0.00, "https://docs.typesafe.ai/models.md",
 	     "Jev input tokens only", "2026-09-18"},
+	    {"cloudflare", "clef", "completion", 0.24, 0.00, "https://developers.cloudflare.com/workers-ai/models/clef/",
+	     "Clef decision model input tokens only", "2026-10-06"},
+	    {"perplexity", "pplx-decider-v1-27b", "completion", 0.04, 0.00,
+	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-06"},
 	    {"openai", "gpt-6-astra", "completion", 10.00, 50.00,
 	     "https://developers.openai.com/api/docs/models/gpt-6-astra", "standard text pricing up to 272K input tokens",
 	     "2026-09-30"},
@@ -3166,6 +3178,7 @@ std::string ProviderSpecificEnvPrefix(const std::string &provider) {
 const std::vector<ProviderSpec> &ProviderCatalog() {
 	static const std::vector<ProviderSpec> providers {
 	    {"typesafe", "typesafe_jev", "jev-latest", "", "https://api.typesafe.ai/v1", "TYPESAFE_API_KEY", true},
+	    {"systemone", "systemone", "", "", "", "SYSTEMONE_API_KEY", false},
 	    {"ollama", "ollama_chat", "llama3.2", "nomic-embed-text", "http://localhost:11434", "OLLAMA_API_KEY", false},
 	    {"openai", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "https://api.openai.com/v1",
 	     "OPENAI_API_KEY", true},
@@ -3247,7 +3260,7 @@ std::string SupportedProvidersList() {
 		}
 		result += ProviderCatalog()[i].provider;
 	}
-	result += ", claude, gcp, google, zhipu, azure_openai, databricks_ai, local, llama.cpp, "
+	result += ", jev, system_one, claude, gcp, google, zhipu, azure_openai, databricks_ai, local, llama.cpp, "
 	          "hugging_face, x.ai, nvidia_nim, aws_bedrock, google_vertex, workers_ai, qwen, alibaba, "
 	          "nebius_token_factory, sambanova_ai, silicon_flow, vercel_ai_gateway, kimi, baidu, ernie, "
 	          "tencent_hunyuan, step, mini_max, doubao, ark";
@@ -3792,6 +3805,10 @@ void ValidateResolvedProviderConfig(const ProviderConfig &config, bool require_a
 		                            "CLOUDFLARE_BASE_URL, CLOUDFLARE_WORKERS_AI_BASE_URL, or "
 		                            "CLOUDFLARE_ACCOUNT_ID.");
 	}
+	if (config.provider == "systemone" && config.base_url.empty()) {
+		throw InvalidInputException("AI provider \"systemone\" requires a base URL. Set base_url, duckdb_ai_base_url, "
+		                            "SYSTEMONE_BASE_URL, or a duckdb_ai secret with BASE_URL.");
+	}
 	if (config.provider == "databricks" && config.base_url.empty()) {
 		throw InvalidInputException(
 		    "AI provider \"databricks\" requires a base URL. Set duckdb_ai_base_url, DATABRICKS_BASE_URL, or "
@@ -3812,6 +3829,80 @@ void ValidateResolvedProviderConfig(const ProviderConfig &config, bool require_a
 		                            "VERTEX_BASE_URL, VERTEX_AI_BASE_URL, GOOGLE_VERTEX_BASE_URL, or "
 		                            "GOOGLE_CLOUD_PROJECT.");
 	}
+}
+
+bool IsDecisionFunction(const std::string &function_name) {
+	return function_name == "ai_decide" || function_name == "ai_jev";
+}
+
+std::string DecisionModel(const ProviderConfig &config, const CompletionOptions &options, const char *fallback) {
+	if (!options.model.empty()) {
+		return options.model;
+	}
+	// Chat model defaults (for example OLLAMA_MODEL) name text models, so decision models use their own variable.
+	auto model = GetEnv(ProviderSpecificEnvPrefix(config.provider) + "_DECISION_MODEL");
+	return model.empty() ? fallback : model;
+}
+
+std::string CloudflareDecisionEndpoint(const std::string &base_url, const std::string &route) {
+	if (base_url.empty() || base_url.find("/ai/run/") != std::string::npos ||
+	    base_url.find("/@cf/") != std::string::npos) {
+		return base_url;
+	}
+	if (EndsWith(base_url, "/ai/v1")) {
+		return base_url.substr(0, base_url.size() - 2) + "run/" + route;
+	}
+	if (EndsWith(base_url, "/workers-ai/v1")) {
+		return base_url.substr(0, base_url.size() - 2) + route;
+	}
+	if (EndsWith(base_url, "/workers-ai")) {
+		return base_url + "/" + route;
+	}
+	return base_url + "/ai/run/" + route;
+}
+
+//! Decision models share one request shape (model, state, typed questions) but differ in endpoint, response
+//! envelope and default model. Chat providers that also host a decision model switch protocol only for
+//! ai_decide/ai_jev, so their completion and embedding behavior is unchanged.
+void ApplyDecisionProtocol(ProviderConfig &config, const CompletionOptions &options) {
+	if (config.provider == "typesafe") {
+		return;
+	}
+	if (config.provider == "systemone") {
+		// A generic endpoint has no default model, and DUCKDB_AI_MODEL usually names a chat model.
+		config.model = options.model.empty() ? GetEnv("SYSTEMONE_MODEL") : options.model;
+		if (config.model.empty()) {
+			throw InvalidInputException("AI provider \"systemone\" requires a model. Pass model := ..., set "
+			                            "SYSTEMONE_MODEL, or add MODEL to the duckdb_ai secret.");
+		}
+		return;
+	}
+	if (config.provider == "ollama") {
+		config.protocol = "systemone";
+		config.model = DecisionModel(config, options, "nimble");
+		return;
+	}
+	if (config.provider == "perplexity") {
+		config.protocol = "perplexity_decisions";
+		config.model = DecisionModel(config, options, "pplx-decider-v1-27b");
+		return;
+	}
+	if (config.provider == "cloudflare") {
+		static const std::string prefix = "@cf/cloudflare/";
+		auto model = DecisionModel(config, options, "clef");
+		config.protocol = "cloudflare_decision";
+		config.model = StartsWith(model, prefix) ? model.substr(prefix.size()) : model;
+		config.base_url =
+		    CloudflareDecisionEndpoint(config.base_url, StartsWith(model, "@cf/") ? model : prefix + model);
+		return;
+	}
+	if (config.provider == "openai") {
+		throw InvalidInputException("OpenAI has not published a Decisions API schema yet; ai_decide supports "
+		                            "typesafe, cloudflare, perplexity, ollama, and systemone");
+	}
+	throw InvalidInputException("AI provider \"%s\" has no supported decision model API; ai_decide supports "
+	                            "typesafe, cloudflare, perplexity, ollama, and systemone",
+	                            config.provider);
 }
 
 ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool require_api_key) {
@@ -3840,12 +3931,27 @@ ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool requ
 		}
 		config.base_url = TrimTrailingSlash(options.base_url);
 	}
+	if (IsDecisionFunction(options.function_name)) {
+		ApplyDecisionProtocol(config, options);
+	}
 	ValidateResolvedProviderConfig(config, require_api_key);
 	return config;
 }
 
 std::string RequestEndpoint(const ProviderConfig &config) {
-	if (config.protocol == "typesafe_jev") {
+	if (config.protocol == "cloudflare_decision") {
+		return config.base_url;
+	}
+	if (config.protocol == "perplexity_decisions") {
+		if (EndsWith(config.base_url, "/decisions")) {
+			return config.base_url;
+		}
+		if (EndsWith(config.base_url, "/v1")) {
+			return config.base_url + "/decisions";
+		}
+		return config.base_url + "/v1/decisions";
+	}
+	if (config.protocol == "typesafe_jev" || config.protocol == "systemone") {
 		if (EndsWith(config.base_url, "/systemone")) {
 			return config.base_url;
 		}
@@ -4142,18 +4248,24 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 }
 
 std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
-	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
+	const bool decision = IsDecisionProtocol(config.protocol);
+	const bool native = options.function_name == "ai_provider_call" || decision;
 	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
 	    options.function_name != "ai_classify" && options.function_name != "ai_filter" &&
-	    options.function_name != "ai_jev") {
+	    !IsDecisionFunction(options.function_name)) {
 		throw InvalidInputException(
-		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, ai_filter, and ai_jev");
+		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, ai_filter, ai_decide, and ai_jev");
 	}
-	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
+	if (decision && config.protocol != "typesafe_jev" && options.function_name != "ai_provider_call" &&
+	    !IsDecisionFunction(options.function_name)) {
+		throw InvalidInputException("AI provider \"%s\" decision API only supports ai_decide and ai_provider_call",
+		                            config.provider);
+	}
+	if (decision && options.function_name != "ai_provider_call" &&
 	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
 	     !options.response_schema.empty() || !options.response_format.empty())) {
-		throw InvalidInputException("TypeSafe Jev does not support generation options; use classification instructions "
-		                            "or native question instructions instead");
+		throw InvalidInputException("Decision models do not support generation options; use classification "
+		                            "instructions or native question instructions instead");
 	}
 	if (options.function_name == "ai_provider_call" &&
 	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
@@ -4706,8 +4818,33 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	if (native && (!root || !duckdb_yyjson::yyjson_is_obj(root))) {
 		throw IOException("Provider response must be a JSON object");
 	}
+	if (native && config.protocol == "cloudflare_decision") {
+		// Workers AI wraps model output in {"result": ..., "success": ..., "errors": [...]}.
+		auto success = YyjsonObjectGet(root, "success");
+		if (success && duckdb_yyjson::yyjson_is_false(success)) {
+			throw IOException("Cloudflare Workers AI response reported success=false");
+		}
+		auto inner = YyjsonObjectGet(root, "result");
+		if (inner && duckdb_yyjson::yyjson_is_obj(inner)) {
+			size_t length = 0;
+			auto json = duckdb_yyjson::yyjson_val_write(inner, 0, &length);
+			if (!json) {
+				throw IOException("Cloudflare Workers AI result could not be serialized");
+			}
+			body.assign(json, length);
+			free(json);
+			doc = ReadYyjsonDocument(body, error);
+			root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+		}
+	}
 	if (native && config.protocol == "typesafe_jev" && !ValidateJevResponse(root)) {
 		throw IOException("TypeSafe Jev response must contain valid model and answers");
+	}
+	if (native && IsDecisionProtocol(config.protocol)) {
+		auto answers = YyjsonObjectGet(root, "answers");
+		if (!answers || !duckdb_yyjson::yyjson_is_obj(answers)) {
+			throw IOException("Decision model response must contain an answers object");
+		}
 	}
 	auto response_error = YyjsonObjectGet(root, "error");
 	if (native && response_error && !duckdb_yyjson::yyjson_is_null(response_error)) {
@@ -4724,7 +4861,7 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.total_tokens = -1;
 	result.cached_prompt_tokens = -1;
 	result.cache_creation_prompt_tokens = -1;
-	if (config.protocol == "typesafe_jev") {
+	if (IsDecisionProtocol(config.protocol)) {
 		auto usage = YyjsonObjectGet(root, "usage");
 		result.prompt_tokens = YyjsonIntegerOrMissing(usage, "input_tokens");
 		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
@@ -5663,7 +5800,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	}
 	auto request_options = RequestOperationOptions(options);
 	auto config = ResolveProvider(request_options);
-	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
+	const bool native = options.function_name == "ai_provider_call" || IsDecisionProtocol(config.protocol);
 	auto endpoint = native && !options.api.empty() && options.api != "chat" ? config.base_url : RequestEndpoint(config);
 	std::string payload;
 	try {

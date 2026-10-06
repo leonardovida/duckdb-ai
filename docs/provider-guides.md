@@ -137,12 +137,67 @@ LIMIT 1;
 For guidance on choosing providers, credentials, logging, cost, throughput, and
 PII workflows, see [Best practices](best-practices.md).
 
+## Decision models
+
+Decision models answer typed questions about an input with calibrated
+probabilities instead of generating text. Use them for classification,
+routing, moderation and triage at high volume. `ai_decide` sends the same SQL
+to every supported provider; see the [function reference](functions.md#ai_decidestate-questions-)
+for question types and result fields.
+
+| Provider | Default model | Setup |
+| --- | --- | --- |
+| [TypeSafe Jev](#typesafe-jev) | `jev-latest` | `TYPESAFE_API_KEY` |
+| Cloudflare Clef | `clef` (also `clef-flash`) | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID`, as for [Workers AI](#cloudflare-workers-ai) |
+| Perplexity | `pplx-decider-v1-27b` | `PERPLEXITY_API_KEY` |
+| Ollama | `nimble` (also `tev1`, `tev1:0.8b`) | Ollama 0.35 or later, no key |
+| Any `/v1/systemone` endpoint | none, `model` is required | `base_url`, optional `SYSTEMONE_API_KEY` |
+
+```sql
+-- Local, no API key: ollama pull nimble
+SELECT ai_decide('Checkout fails for every customer', {
+    team: MAP {'billing': 'Payments and refunds', 'technical': 'Errors and outages'},
+    urgent: MAP {'true': 'Needs action now', 'false': 'Can wait'}
+}, provider := 'ollama') AS decision;
+
+-- Cloudflare Workers AI
+SELECT ai_decide(body, {team: MAP {'billing': 'Payments', 'technical': 'Errors'}},
+                 provider := 'cloudflare', model := 'clef-flash') AS decision
+FROM support_tickets;
+
+-- A self-hosted Clef or another System One compatible service
+CREATE OR REPLACE SECRET decisions (
+    TYPE duckdb_ai,
+    AI_PROVIDER 'systemone',
+    BASE_URL 'https://decisions.internal.example',
+    MODEL 'clef'
+);
+SELECT ai_decide(body, {spam: MAP {'true': 'Spam', 'false': 'Legitimate'}}, secret := 'decisions')
+FROM messages;
+```
+
+Choosing a decision model for a chat provider does not change that provider's
+chat or embedding behavior: `ai_complete(..., provider := 'cloudflare')` still
+uses Workers AI chat models. Session model settings name chat models, so
+`ai_decide` ignores them. Set the model with `model := ...` or
+`<PROVIDER>_DECISION_MODEL`, for example `CLOUDFLARE_DECISION_MODEL=clef-flash`.
+
+Only TypeSafe Jev documents structured per-question instructions, so only the
+`typesafe` provider batches several rows into one request. Other providers get
+one request per row. OpenAI announced a Decisions API, but it has no public
+request schema yet, so `ai_decide` does not support it.
+
+Sources: [Cloudflare Clef](https://developers.cloudflare.com/workers-ai/models/clef/),
+[Perplexity Decisions API](https://docs.perplexity.ai/docs/decisions/quickstart),
+[Ollama decision models](https://ollama.com/blog/ollama-now-supports-jev-style-decision-models),
+[TypeSafe API reference](https://docs.typesafe.ai/api).
+
 ## TypeSafe Jev
 
 Jev evaluates state against typed questions and returns probabilities, choices,
 and rubric scores. It does not generate text or embeddings. Use `typesafe` (or
 its alias `jev`) for the direct TypeSafe API. The supported entry points are
-`ai_jev`, `ai_provider_call`, `ai_classify`, and `ai_filter`. Use `ai_jev` for
+`ai_decide`, `ai_jev`, `ai_provider_call`, `ai_classify`, and `ai_filter`. Use `ai_jev` for
 typed choices, rubric scores and probabilities with automatic row batching.
 Other AI task functions, including
 `ai_score`, require a completion provider. Generation options such as

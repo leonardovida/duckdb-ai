@@ -1608,6 +1608,49 @@ SELECT answer IS NULL, answer.team IS NULL, answer.rating IS NULL FROM decisions
 ----
 true	true	true
 
+# ai_decide shares ai_jev's typed result and adds per-question instructions and a provider choice.
+query I
+SELECT typeof(ai_decide(NULL, {team: MAP {'a':'A'}, rating: ['low','high'],
+  urgent: {instructions: 'Is it urgent?', criteria: MAP {'true':'yes','false':'no'}}}, provider := 'ollama'));
+----
+STRUCT(team VARCHAR, team_confidence DOUBLE, rating DOUBLE, rating_confidence DOUBLE, urgent DOUBLE)
+
+statement error
+SELECT ai_decide('text', {u: {criteria: ['a', 'b'], hint: 'x'}});
+----
+accepts only instructions VARCHAR and criteria
+
+statement error
+SELECT ai_decide('text', {u: {instructions: 'Rate it'}});
+----
+requires criteria
+
+statement error
+SELECT ai_decide('text', {u: ['only one level']});
+----
+ai_decide score criteria requires 2 to 10 levels
+
+statement error
+SELECT ai_decide('text', {u: ['a', 'b']}, temperature := 0.1);
+----
+Unsupported ai_decide option: temperature
+
+# ai_jev stays pinned to TypeSafe, so it does not accept a provider.
+statement error
+SELECT ai_jev('text', {u: ['a', 'b']}, provider := 'ollama');
+----
+Unsupported ai_jev option: provider
+
+statement error
+SELECT ai_decide('text', {u: ['a', 'b']}, provider := 'anthropic');
+----
+has no supported decision model API
+
+statement error
+SELECT ai_decide('text', {u: ['a', 'b']}, provider := 'openai');
+----
+OpenAI has not published a Decisions API schema yet
+
 # Classifier labels must stay unique under the normalization used by prompts.
 statement error
 SELECT ai_build_classifier('sample', ['alpha', ' ALPHA '], optimization := 'minimize_cost');
