@@ -105,6 +105,10 @@ SET duckdb_ai_embedding_model = 'nomic-embed-text';
 SELECT ai_complete('Describe DuckDB in one sentence.');
 ```
 
+Without a model setting, `provider := 'ollama'` uses `llama3.2`, so pull that
+model or set one as shown. For `ai_decide`, also run `ollama pull nimble`
+(Ollama 0.35 or later).
+
 The extension calls Ollama at `http://localhost:11434`. Set `OLLAMA_HOST`, or
 pass `base_url := ...`, if it runs elsewhere. For llama.cpp, vLLM, LM Studio or
 LiteLLM, see
@@ -122,6 +126,11 @@ export OPENAI_API_KEY='...'
 
 ```sql
 LOAD ai;
+
+-- If you ran the Ollama quickstart in this session, clear its settings first:
+-- session settings outrank the provider and model stored in a secret.
+RESET duckdb_ai_provider;
+RESET duckdb_ai_model;
 
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
@@ -144,14 +153,20 @@ incur charges.
 
 ### How settings combine
 
-You can configure the provider and model in three places. For a single call,
-the most specific one wins:
+For each call, the extension picks the provider and model from the first place
+that sets them:
 
-1. Named options on the call: `provider := ...`, `model := ...`, `secret := ...`
-2. A named secret or `CREATE EXTERNAL MODEL` profile passed with `secret :=` or `profile :=`
-3. Session settings: `SET duckdb_ai_provider`, `duckdb_ai_model`, and the
-   family-specific `duckdb_ai_completion_model`, `duckdb_ai_task_model`,
-   `duckdb_ai_embedding_model`, `duckdb_ai_sql_assistant_model`
+1. Named options on the call: `provider := ...`, `model := ...`
+2. A `CREATE EXTERNAL MODEL` profile passed with `profile := ...`
+3. Session settings: the family setting (`duckdb_ai_completion_model`,
+   `duckdb_ai_task_model`, `duckdb_ai_embedding_model`,
+   `duckdb_ai_sql_assistant_model`), then `duckdb_ai_provider` and `duckdb_ai_model`
+4. The `AI_PROVIDER` and `MODEL` stored in a `TYPE duckdb_ai` secret
+5. Provider environment variables, such as `OPENAI_MODEL`, then the provider default
+
+A secret always supplies the API key, but its model only applies when nothing
+above sets one. `ai_decide` is the exception: it ignores `duckdb_ai_model`
+and uses a decision model (see [typed decisions](#typed-decisions)).
 
 Completion and embedding models are configured separately, so set an embedding
 model before using `ai_embed` or `ai_similarity`. The full resolution order is
@@ -171,7 +186,7 @@ in [provider settings and secrets](docs/functions.md#provider-settings-and-secre
 | Summarize groups | `ai_agg`, `ai_summarize_agg` (aggregates) | text per group |
 | Prepare documents for RAG | `ai_generate_chunks`, `ai_prep_search`, `ai_parse_document` | chunk tables |
 | Text-to-SQL | `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` | SQL text; query results |
-| Typed decisions at scale | `ai_decide` ([decision models](docs/provider-guides.md#decision-models): Jev, Clef, Perplexity, Ollama) | `STRUCT` of choices, scores and probabilities |
+| Typed decisions with confidence | `ai_decide` ([decision models](docs/provider-guides.md#decision-models): Jev, Clef, Perplexity, Ollama) | `STRUCT` of choices, scores and probabilities |
 | Raw provider APIs | `ai_provider_call` | full provider JSON (tools, reasoning, streaming events) |
 | Preview without calling a model | `ai_completion_request_json`, `ai_embedding_request_json`, `ai_count_tokens` | request JSON; approximate token count |
 | Usage, cost and caches | `ai_usage()`, `ai_usage_summary()`, `ai_usage_totals()`, `ai_query_cache_stats()` | tables |
@@ -205,6 +220,33 @@ SELECT ticket_id,
        ai_translate(body, 'Italian') AS body_it
 FROM support_tickets;
 ```
+
+### Typed decisions
+
+`ai_decide` sends a row to a decision model and asks several fixed-choice
+questions in one request. Each answer comes back as a typed field with a
+confidence, so you choose the threshold:
+
+```sql
+-- Needs a decision model: Ollama 0.35 or later and `ollama pull nimble`,
+-- or TypeSafe, Cloudflare, Perplexity or a systemone endpoint.
+SELECT ticket_id, d.team, d.team_confidence, d.urgent
+FROM (
+    SELECT ticket_id,
+           ai_decide(body, {
+               team: MAP {'billing': 'Payments, invoices and refunds',
+                          'performance': 'Slow queries or imports',
+                          'other': 'Anything else'},
+               urgent: MAP {'true': 'Blocks the customer now', 'false': 'Can wait'}
+           }, provider := 'ollama') AS d
+    FROM support_tickets
+);
+```
+
+`team` is a `VARCHAR` label with `team_confidence`, and `urgent` is the
+probability of `true`. See
+[`ai_decide`](docs/functions.md#ai_decidestate-questions-) and the
+[decision cookbook](docs/cookbooks/jev-decisions.md).
 
 ### Extract typed fields
 
@@ -274,7 +316,7 @@ FROM ai_query_data(
 );
 ```
 
-`include_tables` limits which schemas are described to the model. Add
+`include_tables` limits which tables are described to the model. Add
 `sample_rows := N` only when it is acceptable to send sample data to the
 provider.
 
@@ -319,12 +361,12 @@ reasoning output. The extension never executes tools; your code runs them and
 sends the results back.
 
 ```sql
-SELECT ai_complete('Explain the proof.', provider := 'deepseek',
+SELECT ai_complete('Explain the proof.', provider := 'deepseek', model := 'deepseek-v4-flash',
                    request_options := '{"reasoning_effort":"high"}');
 ```
 
 See [native provider JSON](docs/functions.md#native-provider-json) and
-[text API coverage](docs/provider-guides.md#text-api-coverage) for what each
+[native APIs for reasoning providers](docs/provider-guides.md#native-apis-for-reasoning-providers) for what each
 provider supports.
 
 ## Using the extension from an agent
@@ -386,7 +428,7 @@ names, aliases, credentials, endpoints, default models and embedding support.
 | Local and self-hosted | Ollama, llama.cpp, any OpenAI-compatible server (vLLM, LM Studio, LiteLLM), OpenAI Privacy Filter |
 | Hosted models | OpenAI, Anthropic Claude, Google Gemini, Mistral, DeepSeek, xAI, Cohere, Perplexity, Groq, Cerebras, Fireworks AI, Together AI, DeepInfra, Hugging Face, NVIDIA NIM, Nebius, SambaNova, SiliconFlow |
 | Cloud platforms and gateways | Azure OpenAI, Amazon Bedrock, Google Vertex AI, Cloudflare Workers AI, Databricks, Snowflake Cortex, OpenRouter, Vercel AI Gateway, Poe |
-| Additional model platforms | Alibaba DashScope (Qwen), Moonshot (Kimi), MiniMax, Z.ai (GLM), Tencent Hunyuan, Baidu Qianfan (ERNIE), StepFun, Volcengine (Doubao) |
+| Additional model platforms | Alibaba DashScope (Qwen), Moonshot (Kimi), MiniMax, Z.ai (GLM), Tencent Hunyuan, Baidu Qianfan (ERNIE), StepFun, Volcengine (Doubao), Xiaomi MiMo |
 | Decision models, through `ai_decide` | TypeSafe Jev, Cloudflare Clef, Perplexity Decider, Ollama (Nimble, Tev1), any `/v1/systemone` endpoint |
 
 Provider capabilities differ: not every provider offers embeddings, JSON
@@ -446,9 +488,14 @@ keys. Contributors and coding agents working on the source should read
   gateway provider.
 - [Cookbooks](docs/cookbooks/index.md): batch enrichment from Parquet or S3,
   Postgres and MySQL inputs, typed records, document intake, embeddings,
-  semantic search with Lance, Jev decisions and text-to-SQL.
+  semantic search with Lance, typed decisions, chained steps, evaluation and
+  text-to-SQL.
+- [Best practices](docs/best-practices.md): choosing functions, controlling
+  cost and running large jobs.
 - [Runtime behavior](docs/runtime-behavior.md): caching, concurrency, retries,
   cancellation, token limits and context sizes.
+- [Security and data flow](docs/security-data-flow.md): what each function
+  sends to a provider and how to restrict it.
 - [Changelog](CHANGELOG.md) and [releases](https://github.com/leonardovida/duckdb-ai/releases).
 
 Licensed under the [MIT license](LICENSE).

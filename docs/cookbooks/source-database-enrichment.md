@@ -1,8 +1,9 @@
 ---
-sidebar_position: 9
+sidebar_position: 7
 title: "Enrich rows from Postgres or MySQL safely"
 sidebar_label: "Postgres and MySQL enrichment"
 description: "Enrich Postgres or MySQL rows with LLMs from DuckDB safely: attach read-only, materialize local batches and write to reviewed staging tables."
+keywords: ["DuckDB Postgres LLM", "MySQL enrichment", "read-only ATTACH", "ai_try_complete"]
 ---
 
 # Enrich rows from Postgres or MySQL safely
@@ -14,7 +15,9 @@ set, run AI enrichment locally, and write results to an explicit staging target.
 ## Prerequisites
 
 - Use read-only database credentials for the source attachment.
-- Configure a completion provider with a `TYPE duckdb_ai` secret.
+- Set `OPENAI_API_KEY` in the environment before starting DuckDB. The
+  `openai_ai` secret below stores the provider and model, not the key. See the
+  [provider guides](../provider-guides.md).
 - Configure object-storage credentials if the enriched output will be exported to
   S3-compatible storage.
 - Decide whether enriched rows should be exported to files or inserted into a
@@ -23,6 +26,8 @@ set, run AI enrichment locally, and write results to an explicit staging target.
 ```sql
 INSTALL ai FROM community;
 LOAD ai;
+INSTALL json;
+LOAD json;
 
 INSTALL postgres;
 LOAD postgres;
@@ -36,7 +41,7 @@ LOAD aws;
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'openai',
-    MODEL 'gpt-4o-mini'
+    MODEL 'gpt-5.6-luna'
 );
 
 CREATE OR REPLACE SECRET s3_prod (
@@ -46,6 +51,9 @@ CREATE OR REPLACE SECRET s3_prod (
 );
 
 SET VARIABLE run_id = 'source-enrichment-2026-07-07T100000Z';
+
+-- Start the job with an empty usage buffer, so the usage snapshot covers only this run.
+SELECT * FROM ai_clear_usage();
 ```
 
 ## Attach source databases read-only
@@ -125,7 +133,8 @@ Use `mysql_clear_cache()` for attached MySQL sources.
 ## Enrich the local batch
 
 Run provider calls only after the batch is local. Use `ai_try_complete` so bad
-rows become rejected rows instead of aborting the whole job.
+rows become rejected rows instead of aborting the whole job. `result` is a
+`STRUCT` with `response` and `error`.
 
 ```sql
 CREATE OR REPLACE TEMP TABLE source_ticket_attempts AS
@@ -149,10 +158,24 @@ SELECT
 FROM source_ticket_batch;
 ```
 
+`risk_level` is a fixed scale. With a decision provider, you can skip the JSON
+parsing for that field:
+`ai_decide(body, {risk_level: ['low', 'medium', 'high']}, provider := 'ollama', on_error := 'null')`
+returns `risk_level DOUBLE` (0 to 2) and `risk_level_confidence`. `ai_decide`
+has no capture mode, so treat a NULL result as rejected. See
+[route rows by decision confidence](decision-routing.md). Keep
+`ai_try_complete` for free-text fields such as `summary` and `next_action`.
+
 ## Export or stage the output
 
 For the lowest-risk production path, export success and rejection files and let a
 separate application-owned process load them into the source system.
+
+`response_format := 'json_object'` asks for JSON but does not check the reply.
+A reply that is not valid JSON has `error = NULL`, and casting it to `JSON`
+fails the whole statement. The `json_valid` filters below route such rows to
+the rejected file. `PARTITION_BY (run_id)` writes each run to its own
+`run_id=<value>/` folder.
 
 ```sql
 COPY (
@@ -165,9 +188,10 @@ COPY (
         now() AS loaded_at
     FROM source_ticket_attempts
     WHERE result.error IS NULL
+      AND json_valid(result.response)
 )
-TO 's3://support-prod/ai/source_ticket_enriched/run_id=2026-07-07T100000Z/'
-(FORMAT parquet, COMPRESSION zstd, OVERWRITE_OR_IGNORE true);
+TO 's3://support-prod/ai/source_ticket_enriched'
+(FORMAT parquet, COMPRESSION zstd, PARTITION_BY (run_id), OVERWRITE_OR_IGNORE true);
 
 COPY (
     SELECT
@@ -175,13 +199,14 @@ COPY (
         ticket_id,
         customer_id,
         priority,
-        result.error AS error,
+        coalesce(result.error, 'missing or invalid JSON response') AS error,
         now() AS loaded_at
     FROM source_ticket_attempts
     WHERE result.error IS NOT NULL
+       OR NOT coalesce(json_valid(result.response), false)
 )
-TO 's3://support-prod/ai/source_ticket_rejected/run_id=2026-07-07T100000Z/'
-(FORMAT parquet, COMPRESSION zstd, OVERWRITE_OR_IGNORE true);
+TO 's3://support-prod/ai/source_ticket_rejected'
+(FORMAT parquet, COMPRESSION zstd, PARTITION_BY (run_id), OVERWRITE_OR_IGNORE true);
 ```
 
 If you intentionally write back to Postgres or MySQL, use a separate writable
@@ -207,7 +232,7 @@ ATTACH '' AS app_pg_write (
 CREATE TABLE IF NOT EXISTS app_pg_write.public.ai_ticket_triage_staging (
     run_id VARCHAR,
     ticket_id BIGINT,
-    customer_id BIGINT,
+    customer_id VARCHAR,
     response_json JSON,
     loaded_at TIMESTAMP
 );
@@ -220,7 +245,8 @@ SELECT
     result.response::JSON AS response_json,
     now() AS loaded_at
 FROM source_ticket_attempts
-WHERE result.error IS NULL;
+WHERE result.error IS NULL
+  AND json_valid(result.response);
 ```
 
 Do not write provider output directly into customer-facing source columns until
@@ -228,16 +254,31 @@ you have a review, backfill, and rollback plan.
 
 ## Capture usage
 
-Persist usage events with the same run id:
+Persist usage events with the same run id. `ai_usage()` keeps only the latest
+1,024 events, so check `dropped_events` first. If it is above 0, the snapshot is
+incomplete: use smaller batches and snapshot after each one. `ai_usage_totals()`
+keeps its counters even when events are dropped.
 
 ```sql
+SELECT max(dropped_events) AS dropped_events
+FROM ai_usage_summary();
+
 COPY (
     SELECT getvariable('run_id') AS run_id, now() AS captured_at, *
     FROM ai_usage()
 )
-TO 's3://support-prod/ai/source_ticket_usage/run_id=2026-07-07T100000Z/'
-(FORMAT parquet, COMPRESSION zstd, OVERWRITE_OR_IGNORE true);
+TO 's3://support-prod/ai/source_ticket_usage'
+(FORMAT parquet, COMPRESSION zstd, PARTITION_BY (run_id), OVERWRITE_OR_IGNORE true);
+
+SELECT getvariable('run_id') AS run_id, * FROM ai_usage_totals();
 ```
+
+## Related cookbooks
+
+- [Run production batch enrichment from S3 or Parquet](production-batch-enrichment.md)
+- [Write audited AI outputs to lakehouse tables](audited-lakehouse-output.md)
+- [Monitor AI usage, failures, and cost](usage-cost-observability.md)
+- [Resume a local enrichment job](resumable-enrichment.md)
 
 ## Learn more
 

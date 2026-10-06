@@ -54,10 +54,13 @@ libcurl protocols.
 | Function family | Data sent |
 | --- | --- |
 | `ai_complete`, `ai_try_complete`, `ai_complete_json`, `ai_rerank`, task wrappers, aggregates, and SQL assistant functions | Prompt text, configured system prompt, model name, response-format hints, and provider options needed by the selected provider API. |
-| `ai_complete_record` | Prompt text plus the supplied JSON Schema. |
+| `ai_complete_record`, `ai_extract_record`, `ai_complete_json` | Prompt or row text plus the supplied JSON Schema. |
+| `ai_decide`, `ai_jev`, and `ai_classify`/`ai_filter` with `typesafe` | Row text as `state`, plus question labels, descriptions and instructions. TypeSafe batches up to 32 rows per request; other decision providers receive one row per request. |
+| `ai_provider_call` | The full request body you supply. |
 | `ai_embed`, `ai_similarity`, and optimized classification | Input text to embed and model name. Inputs with the same options are packed by count, estimated tokens, and bytes. `ai_similarity` uses a bounded query-local cache to send each distinct value once across vector chunks. |
 | `ai_redact` with `openai_privacy_filter` | Raw input text and model name to `POST /redact`. |
 | `ai_generate_chunks`, `ai_prep_search(..., enrich := false)`, `ai_completion_request_json`, `ai_embedding_request_json`, `ai_schema_prompt`, `ai_is_read_only_sql`, `ai_validate_read_only_sql`, `ai_count_tokens`, `ai_recommended_batch_size`, metadata functions, and catalog table functions | No provider network call. |
+| `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` with `sample_rows := N` | Up to N real rows per included table are added to the schema context. Omit `sample_rows` for sensitive tables, or build a table without the sensitive columns, for example `CREATE TABLE tickets_for_sql AS SELECT * EXCLUDE (internal_note) FROM support_tickets;`. Views are not described by `ai_schema_prompt`. |
 | `ai_query_data` | The natural-language question and generated schema context are sent during bind; generated SQL is validated as one read-only DuckDB `SELECT` before execution. SQL assistant schema context is sent in the provider system message when the provider protocol supports it. Successful generated SQL is cached in memory for repeated binds with the same question, schema context, and output-affecting options. |
 | `ai_parse_document` | Binary document content encoded as base64, MIME type, parser profile, and optional page selection are sent to `DUCKDB_AI_CONTROL_PLANE_URL`. |
 | Endpoint provisioning functions | Safe external-model metadata, operation IDs, and explicit spend ceilings are sent to `DUCKDB_AI_CONTROL_PLANE_URL`. Cloud credentials are not read or sent by the extension. |

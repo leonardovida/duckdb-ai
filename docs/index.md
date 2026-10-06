@@ -60,6 +60,10 @@ SELECT ticket,
 FROM (VALUES ('I was charged twice.'), ('My query got slow.')) AS t(ticket);
 ```
 
+Without a model setting, `provider := 'ollama'` uses `llama3.2`, so pull that
+model or set one as shown. For `ai_decide`, also run `ollama pull nimble`
+(Ollama 0.35 or later).
+
 To use a hosted provider, put its API key in an environment variable and
 follow the [provider guides](provider-guides.md).
 
@@ -70,6 +74,7 @@ follow the [provider guides](provider-guides.md).
 | Look up a function, option or setting | [SQL function reference](functions.md) |
 | Configure a local or hosted model | [Provider guides](provider-guides.md) |
 | Copy a working workflow | [Cookbooks](cookbooks/index.md) |
+| Get typed answers with confidence from a decision model | [`ai_decide`](functions.md#ai_decidestate-questions-) and [typed decisions](cookbooks/jev-decisions.md) |
 | Write SQL for this extension from an agent | [Agent guide](agent-guide.md) |
 | Run AI enrichment in production | [Best practices](best-practices.md) |
 | Understand retries, caching and concurrency | [Runtime behavior](runtime-behavior.md) |

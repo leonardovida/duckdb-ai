@@ -20,6 +20,25 @@ SELECT *
 FROM ai_usage();
 ```
 
+## Inputs and types
+
+- Text inputs accept any DuckDB type. Numbers, dates, UUIDs, BLOBs, lists,
+  structs and whole rows are sent as their text form, so
+  `ai_complete(t) FROM tickets t` sends the row as `{'id': 1, 'body': ...}`.
+  `ai_provider_call` is the exception: its body must be JSON text.
+- Positional model and provider arguments can be columns or macro parameters,
+  so each row can use a different model: `ai_complete(prompt, model_column)`.
+- Named options must be constant, but they can come from `getvariable(...)`,
+  macro parameters and prepared-statement parameters (`model := $1`). A NULL
+  option, for example an unset variable, leaves the session or provider
+  default in place.
+- JSON-valued options (`response_schema`, `request_options`, `metadata`,
+  `label_descriptions`, `examples`) accept JSON text or a `STRUCT`, `MAP` or
+  list, which is converted to JSON:
+  `ai_extract_record(body, {type: 'object', properties: {urgency: {type: 'integer'}}})`.
+- `include_tables` and `exclude_tables` accept a list, a single table name or a
+  comma-separated string.
+
 ## Function overview
 
 | Function | Type | Description |
@@ -140,31 +159,29 @@ SELECT ai_complete('Explain the proof.', provider := 'deepseek',
 ```
 
 Use `ai_provider_call` for tools and reasoning-only responses. `ai_complete`
-continues to return final text. See [provider coverage](provider-guides.md#text-api-coverage).
+continues to return final text. See [native APIs for reasoning providers](provider-guides.md#native-apis-for-reasoning-providers).
 
 ## Completion functions
 
 #### `ai_decide(state, questions[, ...])`
 
 Description: Answers named, typed questions about each row with a decision
-model and returns a typed `STRUCT`. Decision models return calibrated
-probabilities over answers you define instead of generating text, so the
-result needs no parsing. The same SQL works with every supported provider:
+model and returns a typed `STRUCT`. Decision models return probabilities over
+answers you define instead of generating text, so the result needs no parsing.
+One call can ask several questions, which replaces separate `ai_classify`,
+`ai_filter` and `ai_score` calls on the same text. The same SQL works with
+every supported provider:
 
 | Provider | Models | Endpoint | Credentials |
 | --- | --- | --- | --- |
-| `typesafe` (alias `jev`) | `jev-latest`, `jev-1.13.0` | `/v1/systemone` | `TYPESAFE_API_KEY` |
+| `typesafe` (alias `jev`) | `jev-latest` (default), `jev-1.13.0` | `/v1/systemone` | `TYPESAFE_API_KEY` |
 | `cloudflare` | `clef` (default), `clef-flash` | Workers AI `/ai/run/@cf/cloudflare/<model>` | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` |
 | `perplexity` | `pplx-decider-v1-27b` (default) | `/v1/decisions` | `PERPLEXITY_API_KEY` |
 | `ollama` | `nimble` (default), `tev1`, `tev1:0.8b` | local `/v1/systemone` (Ollama 0.35 or later) | none |
 | `systemone` | any; `model` is required | `<base_url>/v1/systemone` | optional `SYSTEMONE_API_KEY` |
 
-The provider comes from `provider := ...`, a `secret`/`profile`, or
-`duckdb_ai_provider`. Session model settings such as `duckdb_ai_model` name
-chat models, so they are ignored. Pass `model := ...` or set
-`<PROVIDER>_DECISION_MODEL` (for example `OLLAMA_DECISION_MODEL`) to choose a
-decision model. OpenAI's Decisions API is not supported until OpenAI publishes
-its request schema.
+OpenAI's Decisions API is not supported until OpenAI publishes its request
+schema.
 
 Example:
 
@@ -190,43 +207,88 @@ STRUCT(team VARCHAR, team_confidence DOUBLE, severity DOUBLE, severity_confidenc
        urgent DOUBLE, refund DOUBLE)
 ```
 
-Each field of `questions` is one question. Its value selects the question type:
+Each field of `questions` is one question, and the field name becomes the
+result field name. Its value selects the question type:
 
 | Value | Question | Result fields |
 | --- | --- | --- |
-| `MAP {'label': 'description', ...}` | Choice among 1 to 255 labels | `<field> VARCHAR`, `<field>_confidence DOUBLE` |
-| `['lowest level', ..., 'highest level']` | Score over 2 to 10 ordered levels | `<field> DOUBLE` from 0 to levels minus 1, `<field>_confidence DOUBLE` |
-| `MAP {'true': 'yes criterion', 'false': 'no criterion'}` | Yes/no ("noul") | `<field> DOUBLE`, the probability of yes |
-| `{instructions: '...', criteria: <one of the above>}` | Any of the above with a question-specific instruction | as above |
+| `MAP {'label': 'description', ...}` | Choice among 1 to 255 labels | `<field> VARCHAR`, the chosen label, and `<field>_confidence DOUBLE` |
+| `['lowest level', ..., 'highest level']` | Score over 2 to 10 ordered levels | `<field> DOUBLE`, the level index from 0 to levels minus 1, and `<field>_confidence DOUBLE` |
+| `MAP {'true': 'yes criterion', 'false': 'no criterion'}` | Yes/no question (TypeSafe calls it a Noul) | `<field> DOUBLE`, the probability of yes |
+| `{instructions: '...', criteria: <one of the above>}` | Any of the above with its own instruction | as above |
 
-Questions must be constant. Providers enforce their own limits, for example
-Ollama accepts at most 26 options or levels and 64 questions per request.
+Rules:
 
-Batching: TypeSafe Jev accepts several rows per request, so `ai_decide` with
-`typesafe` batches up to `batch_size` rows (default and maximum 32) exactly as
-`ai_jev` does. Other providers receive one request per non-null row, with the
-row text as `state`, and run concurrently up to `max_concurrent_requests`.
-`max_request_bytes` (default 48000) caps every request body.
+- Questions must be constant, so the result type is known when the query is
+  planned. Map keys, descriptions and list entries must be non-null strings.
+- Only a map with exactly the lowercase keys `true` and `false` is a yes/no
+  question. Other maps are choices.
+- The descriptions define the task. Field names are SQL names and are not sent
+  as instructions; use `{instructions, criteria}` to add one.
+- Field names, including the generated `_confidence` names, must be unique
+  ignoring ASCII case.
+- Confidence is NULL when the provider omits it. NULL input returns a NULL
+  struct without a request.
+- Providers enforce their own limits. For example, Ollama accepts at most 26
+  options or levels and 64 questions per request.
 
-Options: `provider`, `model`, `secret`, `profile`, `base_url`, `batch_size`,
-`max_request_bytes`, `on_error` (`fail` or `null`), `timeout_seconds`,
-`retry_count`, `retry_backoff_ms`, `max_concurrent_requests`,
-`min_request_interval_ms`, `token_limit_per_minute`, `allowed_hosts` and
-`cache`. Generation options such as `temperature` are rejected. NULL input
-returns a NULL struct without a request. `ai_usage()` records one `ai_decide`
-event per request.
+Model and endpoint: the provider comes from `provider := ...`, a
+`secret`/`profile`, or `duckdb_ai_provider`. The session settings
+`duckdb_ai_model` and `duckdb_ai_base_url` name chat models and endpoints, so
+`ai_decide` ignores them, and it also ignores the `MODEL` of a chat provider's
+secret (for example an Ollama secret that names `qwen3.8:27b`). The model
+comes from, in order:
+
+1. `model := ...` or a `profile`.
+2. `<PROVIDER>_DECISION_MODEL`, for example `OLLAMA_DECISION_MODEL`,
+   `CLOUDFLARE_DECISION_MODEL`, `PERPLEXITY_DECISION_MODEL` or
+   `TYPESAFE_DECISION_MODEL`.
+3. For TypeSafe, `TYPESAFE_MODEL` or the `MODEL` of a TypeSafe secret. For
+   systemone, `SYSTEMONE_MODEL` or the `MODEL` of a systemone secret.
+4. The provider default in the table above.
+
+Batching: TypeSafe accepts several rows per request, so `ai_decide` with
+`typesafe` batches up to `batch_size` rows (default and maximum 32). Other
+providers receive one request per non-null row, with the row text as `state`,
+and run concurrently up to `max_concurrent_requests`. `max_request_bytes`
+(default 48000) caps every request body and splits batches without
+truncating data. A row too large for the cap fails, or becomes NULL with
+`on_error := 'null'`. The byte cap does not guarantee a fit within model token
+limits.
+
+Errors: invalid choices, scores, probabilities and missing answers fail the
+affected request. With `on_error := 'null'`, every row in that request is
+NULL. `capture` is not supported. Retries repeat the whole request.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `provider`, `profile`, `secret` | Session provider | Select the decision provider and credentials. |
+| `model` | See above | Pin a model version to keep results stable. |
+| `base_url` | Provider default | Endpoint override; required for `systemone`. |
+| `batch_size` | `32` | Rows per TypeSafe request, from 1 to 32. No effect on other providers. |
+| `max_request_bytes` | `48000` | Request body cap, from 1024 to 1000000. |
+| `on_error` | `fail` | `fail` stops the query, `null` returns NULL for affected rows. |
+
+The transport options `timeout_seconds`, `retry_count`, `retry_backoff_ms`,
+`max_concurrent_requests`, `min_request_interval_ms`, `token_limit_per_minute`,
+`allowed_hosts` and `cache` work as in [Named options](#named-options).
+Generation options such as `temperature` are rejected. `ai_usage()` records
+one `ai_decide` event per request, so a TypeSafe batch of 32 rows is one event.
+
+Save results with `CREATE TABLE ... AS SELECT ...` before reading several
+fields or exporting them. See [typed decisions](cookbooks/jev-decisions.md)
+for a table-to-Parquet workflow and
+[route rows by decision confidence](cookbooks/decision-routing.md) for
+thresholds and fallbacks. Use `ai_provider_call` for the raw probability
+distribution and resolved model metadata.
 
 #### `ai_jev(text, questions[, ...])`
 
-`ai_jev` is `ai_decide` with the provider fixed to TypeSafe Jev. It accepts the
-same criteria (without the `{instructions, criteria}` form) and the same
-options except `provider` and `profile`. Existing queries keep working
-unchanged.
-
-Description: Evaluates named Jev decisions and returns a typed `STRUCT`. No JSON
-extension or response parsing is needed. The provider is always TypeSafe. Use
-`TYPESAFE_API_KEY` or a `TYPE duckdb_ai` secret. Criteria and options must be
-constant so the result's field types are known when the query is planned.
+Description: `ai_jev(text, questions, ...)` is
+`ai_decide(text, questions, provider := 'typesafe', ...)`. It does not accept
+the `{instructions, criteria}` form or the `provider`, `profile` and
+`secret_name` options. Existing queries keep working unchanged, and
+`ai_usage()` records its events as `ai_jev`.
 
 Example:
 
@@ -245,52 +307,6 @@ STRUCT(team VARCHAR, team_confidence DOUBLE,
        severity DOUBLE, severity_confidence DOUBLE, urgent DOUBLE)
 ```
 
-| Criteria for each field | Meaning | Result |
-| --- | --- | --- |
-| `MAP {'label': 'description', ...}` | Choice among 1 to 255 unique, nonempty labels | `VARCHAR` plus `<field>_confidence DOUBLE` |
-| `['lowest level', ..., 'highest level']` | Score over 2 to 10 ordered levels | `DOUBLE` from 0 to number of levels minus 1, plus confidence |
-| `MAP {'true': 'yes criterion', 'false': 'no criterion'}` | Noul, probability of yes | `DOUBLE` from 0 to 1 |
-
-Map keys and descriptions and list entries must be non-null strings. Only a map
-with exactly the lowercase keys `true` and `false` is a Noul; other maps are
-Choices. Descriptions define the task. Question field names are SQL names and are
-not used as model instructions. Field names, including generated confidence
-names, must be unique ignoring ASCII case. Confidence is NULL if omitted by the
-provider. NULL text yields a NULL struct with no request.
-
-| Option | Default | Behavior |
-| --- | --- | --- |
-| `model` | Secret or TypeSafe environment/default resolution | Set an explicit Jev version to stabilize the model selection. |
-| `secret` | Provider-scoped secret lookup | Existing `duckdb_ai` secret name. |
-| `base_url` | Secret or TypeSafe environment/default resolution | Existing provider endpoint override. |
-| `batch_size` | `32` | Maximum non-null rows per request, from 1 to 32. |
-| `max_request_bytes` | `48000` | Serialized UTF-8 JSON body cap, from 1024 to 1000000. Splits batches, never truncates data. |
-| `on_error` | Existing runtime policy, normally `fail` | `fail` aborts the query, `null` returns NULL for affected rows. `capture` is unsupported. |
-
-Transport options `timeout_seconds`, `retry_count`, `retry_backoff_ms`,
-`max_concurrent_requests`, `min_request_interval_ms`, `token_limit_per_minute`,
-`allowed_hosts` and `cache` use their existing meanings in
-[Named options](#named-options). Other named options are rejected. The function
-inherits common runtime transport settings but ignores generic SQL model,
-provider, endpoint and generation defaults. Its model and endpoint come from
-explicit arguments, TypeSafe secrets or the existing provider environment
-resolution (including generic `DUCKDB_AI_*` fallbacks).
-
-Batching is confined to each DuckDB execution chunk. Each input row creates one
-question per field, and answers are mapped by generated keys rather than order.
-Invalid choices, scores, probabilities and mismatched or missing answers fail
-the affected batch. With `on_error := 'null'`, all rows in that batch are NULL.
-A row too large for `max_request_bytes` fails or becomes NULL on its own, according
-to the error policy. The byte cap does not guarantee a fit within model token
-limits. Retries repeat a complete batch. `ai_usage()` records one `ai_jev` event
-per request operation, with usage counted once rather than once per row.
-
-Save results with `CREATE TABLE ... AS SELECT ...` before reading multiple fields
-or exporting them. See [typed Jev decisions](cookbooks/jev-decisions.md) for a
-complete table-to-Parquet workflow. This function does not generate arbitrary
-text or extract open-ended strings. Use `ai_provider_call` for raw distributions,
-resolved model metadata, custom instructions and shared state.
-
 #### `ai_complete(prompt[, model[, provider]])`
 
 Description: Calls a configured completion provider and returns the completion
@@ -302,7 +318,7 @@ Example:
 SELECT ai_complete(
     'Write one sentence about DuckDB.',
     provider := 'openai',
-    model := 'gpt-4o-mini'
+    model := 'gpt-5.6-luna'
 );
 ```
 
@@ -377,7 +393,10 @@ Result: one row with columns derived from `response_schema`
 Description: Scalar function that calls a completion provider for each input row
 and returns a typed `STRUCT` projected from the top-level object properties in
 `response_schema`. The schema must be constant so DuckDB can bind the return
-type.
+type. Fields follow the order of the schema properties. Local `$ref`/`$defs`
+are followed and an `anyOf`/`oneOf` with one non-null branch maps like that
+branch, so pydantic-generated schemas work. A property with several types
+becomes `VARCHAR`. JSON inside a code fence or after a sentence is accepted.
 
 Integer fields preserve exact `BIGINT` values. Schema or projection failures
 follow `on_error`/`fail_on_error`; with `fail_on_error := false`, the entire
@@ -421,7 +440,7 @@ Example:
 SELECT ai_completion_request_json(
     'Summarize this text.',
     provider := 'openai',
-    model := 'gpt-4o-mini',
+    model := 'gpt-5.6-luna',
     temperature := 0.2
 );
 ```
@@ -445,6 +464,10 @@ SELECT ai_embed(
 ```
 
 Result: `DOUBLE[]`
+
+`list_cosine_similarity` works on the result directly. DuckDB's `array_*`
+distance functions and the VSS extension need a fixed-size array, so cast
+first, for example `ai_embed(body)::FLOAT[1536]` for a 1536-dimension model.
 
 #### `ai_embedding_request_json(text[, model[, provider]])`
 
@@ -486,7 +509,9 @@ Result: `DOUBLE`
 #### `ai_rerank(query, candidate[, model[, provider]])`
 
 Description: Uses a completion model to score how relevant `candidate` is for
-`query`. The provider response must be a single numeric score from `0` to `1`.
+`query`. The reply must contain one decimal score from `0` to `1`. A
+`Score:` label, markdown, a trailing explanation or a `{"score": ...}` object
+are accepted; other replies raise an error or follow `on_error`.
 Use it when you want LLM-based reranking over a short candidate set; use
 `ai_similarity` for embedding-based semantic comparison at larger scale.
 
@@ -536,6 +561,8 @@ Result: `VARCHAR`
 #### `ai_sentiment(text[, model[, provider]])`
 
 Description: Convenience wrapper for `ai_classify(text, 'positive, neutral, negative')`.
+It always returns `positive`, `neutral` or `negative`; any other reply raises an
+error or follows `on_error`.
 
 Example:
 
@@ -594,18 +621,26 @@ Result: `VARCHAR`
 #### `ai_classify(text, labels[, model[, provider]])`
 
 Description: Classifies text into exactly one label from `labels`. `labels` can
-be a comma-separated `VARCHAR` or a `VARCHAR[]`; use `VARCHAR[]` when labels may
-contain commas. Use constant `label_descriptions :=`, `instructions :=`, and
-`examples :=` strings to add label semantics, global rules, and few-shot
-examples without changing the return type. Configured labels must be non-empty
-and unique. The returned value is validated against the configured set and
-canonicalized to its original spelling.
+be a list or fixed-size array (`['billing', 'support']`, also per row from a
+column), a comma-separated or JSON-array string, or a constant
+`MAP {'label': 'description', ...}` whose descriptions are added to the prompt.
+Use a list when labels may contain commas. Use constant
+`label_descriptions :=`, `instructions :=`, and `examples :=` to add label
+semantics, global rules, and few-shot examples without changing the return
+type. Labels must be non-empty, non-NULL and unique ignoring case; an invalid
+label set fails (or returns NULL with `on_error := 'null'`) before any request
+is sent. The returned value is validated against the configured set and
+canonicalized to its original spelling. Replies that wrap the label in
+markdown or quotes, put it after a `Label:` prefix, or follow it with
+punctuation or an explanation still match. A reply that names no label raises
+an error or follows `on_error`.
 
 With `provider := 'typesafe'` (alias `jev`), this sends a native Jev Choice
 question rather than generating a label as text. Jev accepts at most 255 options.
-Use `ai_jev` for typed decisions with row batching. Use `ai_provider_call` when
-you also need the probability distribution or want to
-bundle several questions against the same input.
+To answer several questions about the same text in one call and get a
+confidence per label, use [`ai_decide`](#ai_decidestate-questions-) with a
+decision-model provider. Use `ai_provider_call` for the raw probability
+distribution.
 
 Example:
 
@@ -629,8 +664,10 @@ Result: `VARCHAR`
 
 Description: Classifies text into zero or more labels from `labels`. `labels`
 can be a comma-separated `VARCHAR` or a `VARCHAR[]`; use `VARCHAR[]` when labels
-may contain commas. The model must return a JSON array containing only unique
-members of the configured label set.
+may contain commas. The model is asked for a JSON array of labels from the
+configured set. Unquoted arrays (`[billing, other]`), a single bare label and a
+bullet list are also accepted, and repeated labels are returned once. A reply
+with a label outside the set raises an error or follows `on_error`.
 
 Example:
 
@@ -673,6 +710,10 @@ threshold. It calls the fallback completion profile only when the artifact is
 unusable, embedding fails, or the margin is too small. Embeddings are packed and
 deduplicated by model options across each DuckDB vector chunk.
 
+The `support_model` profile and `classifier_artifacts` table come from the
+[`ai_build_classifier`](#ai_build_classifiertext-labels-) example; profiles are created with
+[`CREATE EXTERNAL MODEL`](#create-external-model-and-ai_models).
+
 Example:
 
 ```sql
@@ -708,11 +749,13 @@ Result: `VARCHAR`
 #### `ai_filter(text, predicate[, model[, provider]])`
 
 Description: Evaluates whether `text` matches a natural-language predicate. The
-model output must parse as true or false. With `provider := 'typesafe'` (alias
-`jev`), this sends a native Noul question and returns `true` for a probability
-of at least `0.5`. Invalid or out-of-range probabilities raise an error. Use
-`ai_provider_call` to retain the probability and apply a workload-specific
-threshold in SQL.
+reply must start with true, false, yes or no; punctuation, markdown, quotes and
+a following reason are accepted. With `provider := 'typesafe'` (alias
+`jev`), this sends a native yes/no question and returns `true` for a probability
+of at least `0.5`. Invalid or out-of-range probabilities raise an error. To
+keep the probability and choose your own threshold, use
+[`ai_decide`](#ai_decidestate-questions-) with a
+`MAP {'true': ..., 'false': ...}` question.
 
 Example:
 
@@ -782,6 +825,9 @@ are marked unusable even when `quality_threshold := 0`. Reported accuracy
 measures agreement with the labeling model on this sample; validate the artifact
 against separately labeled, representative data before production use.
 
+The `support_model` and `support_embeddings` profiles in this example are created with
+[`CREATE EXTERNAL MODEL`](#create-external-model-and-ai_models).
+
 Example:
 
 ```sql
@@ -827,6 +873,15 @@ FROM ai_generate_chunks(
 );
 ```
 
+To chunk every row of a table, call it with a lateral join. Options may then
+also come from columns, for example a per-document `source_id`:
+
+```sql
+SELECT d.id, c.chunk_index, c.chunk
+FROM documents AS d,
+     ai_generate_chunks(d.body, source_id := 'doc-' || d.id, chunk_size := 1000) AS c;
+```
+
 Result columns: `source_id`, `chunk_id`, `chunk_index`, `start_offset`,
 `end_offset`, `chunk_length`, `estimated_tokens`, `chunk`.
 
@@ -841,6 +896,10 @@ Markdown table rows intact when a row fits the configured chunk size.
 `enrich := false` is fully local and deterministic. `enrich := true` makes one
 model call for concise document-level context and captures a row-level error
 when `fail_on_error := false`.
+
+Like `ai_generate_chunks`, it accepts a column through a lateral join:
+`FROM documents AS d, ai_prep_search(d.body, title := d.title)`. With
+`enrich := true`, each document costs one completion request.
 
 Example:
 
@@ -920,11 +979,12 @@ current DuckDB database instance for repeated binds with the same question,
 schema context, resolved provider credentials, model profile, and output-affecting
 options. The cache retains at most 1,024 entries and 64 MiB of key/SQL text, evicting
 least recently used entries; oversized entries bypass caching. Use `on_error := 'null'` to return
-an empty error-shaped relation instead of failing the bind.
+an empty error-shaped relation instead of failing the bind; the error is
+recorded in `ai_usage()`.
 
 With `fix_attempts := N` (0 to 5, default 0), the function verifies the
 generated SQL binds against the current catalog before returning it. When
-binding fails — a hallucinated column, a wrong function name, a typo — the
+binding fails (a hallucinated column, a wrong function name, a typo), the
 DuckDB bind error is fed back to the model for up to `N` correction rounds.
 Each correction is a regular model call and appears in `ai_usage()` alongside an
 `ai_query_data_fix_attempt` event. Cached SQL is re-verified on cache hits when
@@ -935,10 +995,11 @@ Example:
 
 ```sql
 SELECT *
-FROM ai_query_data(
-    'count orders by status',
-    schema_context := (SELECT summary FROM ai_schema_prompt(include_tables := ['main.orders']))
-);
+FROM ai_query_data('count orders by status', include_tables := ['main.orders']);
+
+-- Table function arguments cannot be subqueries, so store a custom context in a variable first
+SET VARIABLE orders_ctx = (SELECT summary FROM ai_schema_prompt(include_tables := ['main.orders']));
+SELECT * FROM ai_query_data('count orders by status', schema_context := getvariable('orders_ctx'));
 ```
 
 Example with self-correction (useful in views, scheduled queries, and other
@@ -997,10 +1058,11 @@ Result: one `explanation VARCHAR` column
 Description: Table function that asks the model to rewrite a broken query as one
 corrected read-only DuckDB `SELECT` statement. With `mode := 'line'`, it rewrites
 only the line identified by an error message and returns the detected line number
-plus replacement line.
+plus replacement line. An error that points past the last line of the query
+fails before any request is sent.
 
 In query mode, pass `error :=` to include the failure message in the correction
-prompt — the error text is usually what makes the fix reliable. Passing `error`
+prompt. The error text is usually what makes the fix reliable. Passing `error`
 without an explicit `mode` selects line mode for backward compatibility, so
 combine it with `mode := 'query'` for full-query rewrites. Query mode also
 accepts `fix_attempts := N` (0 to 5, default 0) to verify the corrected SQL
@@ -1047,7 +1109,7 @@ Line-mode result: `line_number BIGINT`, `replacement_line VARCHAR`
 
 Description: Returns whether `sql` parses as exactly one read-only DuckDB
 `SELECT` statement. With `check_binding` set to `true`, the statement must also
-bind against the current catalog — hallucinated tables, columns, or functions
+bind against the current catalog: hallucinated tables, columns, or functions
 return `false` even when the SQL parses. The bind check runs in the current
 session, so temporary tables are visible, and nothing is executed.
 
@@ -1150,16 +1212,20 @@ ORDER BY event_id DESC;
 Result columns: `event_id`, `created_at`, `event`, `function_name`, `query_id`,
 `operation_id`, `parent_operation_id`, `provider`, `protocol`, `model`, character counts, token counts,
 cached-token counts, elapsed time, retry count, HTTP status, cache hit flag,
-status, error, and estimated cost.
+status, error, and estimated cost. Counts the provider did not report, and
+`http_status` for events without an HTTP call, are `NULL`. Character counts
+are Unicode characters. A reply that fails validation still records its token
+counts, with `status = 'error'` and the reason in `error`.
 
 #### `ai_usage_summary()`
 
 Description: Groups the retained usage buffer by `query_id`. `calls` counts
-per-input events (one event per request for `ai_jev`), while `batch_count` counts distinct provider request operation
+per-input events (one event per request for `ai_decide` and `ai_jev`), while `batch_count` counts distinct provider request operation
 IDs, so packed embedding execution is visible without losing row-level token and
 error details. The result also includes retries, cache hits, total tokens,
 elapsed time, estimated cost, retained events, and counters for usage or log
-events dropped from bounded buffers.
+events dropped from bounded buffers. `total_tokens` and `estimated_cost_usd`
+are `NULL` when no call in the group reported tokens or had a price.
 
 Example:
 
@@ -1359,7 +1425,7 @@ not from direct API key arguments.
 | `profile`, `secret`, `secret_name` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | DuckDB secret name or profile. |
 | `temperature` | `DOUBLE` | Completion, SQL assistant, aggregate | Optional sampling temperature between 0 and 2. When omitted, the provider or model default is used. |
 | `system_prompt` | `VARCHAR` | Completion, SQL assistant, aggregate | Optional system message for providers that support chat-style payloads. |
-| `max_tokens` | `BIGINT` | Completion, SQL assistant, aggregate | Maximum provider output tokens. Must be greater than 0. OpenAI, Cloudflare, MiniMax, Moonshot/Kimi, and Snowflake requests emit the current `max_completion_tokens` API field; other compatible providers retain `max_tokens`. |
+| `max_tokens` | `BIGINT` | Completion, SQL assistant, aggregate | Maximum provider output tokens. Must be greater than 0. OpenAI, Cloudflare, MiniMax, Moonshot/Kimi, Xiaomi MiMo, and Snowflake requests emit the current `max_completion_tokens` API field; other compatible providers retain `max_tokens`. |
 | `base_url` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Provider or gateway base URL override. |
 | `timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP timeout. Must be greater than 0. |
 | `connect_timeout_seconds` | `BIGINT` | Completion, embedding, SQL assistant, aggregate | HTTP connection timeout from 1 to 31536000 seconds. It must be less than or equal to the total timeout when a provider call runs. |
@@ -1376,7 +1442,7 @@ not from direct API key arguments.
 | `on_error` | `VARCHAR` | Completion, embedding, SQL assistant, aggregate | Error handling mode: `fail`, `null`, or `capture`. `capture` is used by `ai_try_complete`; scalar/table functions that cannot return an error field use `NULL` behavior. |
 | `fail_on_error` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Compatibility alias: `true` maps to `on_error := 'fail'`, `false` maps to `on_error := 'null'`. |
 | `response_format` | `VARCHAR` | Completion and SQL assistant | `text`, `json_object`, or `json_schema`. Poe's Chat Completions API ignores this field, so non-text formats are rejected for that provider. |
-| `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for provider-enforced structured output where supported, including OpenAI-compatible APIs, Anthropic, Cohere, llama.cpp, and Ollama, plus local response validation. Poe is excluded because its Chat Completions API ignores `response_format`. |
+| `response_schema`, `json_schema` | `VARCHAR` | Completion and SQL assistant | JSON Schema object for provider-enforced structured output where supported, including OpenAI-compatible APIs, Anthropic, Cohere, llama.cpp, and Ollama. `ai_complete_json`, `ai_complete_record` and `ai_extract_record` also validate the response locally; `ai_complete` and `ai_try_complete` return the text as received. Poe is excluded because its Chat Completions API ignores `response_format`. |
 | `input_token_price_per_million` | `DOUBLE` | Completion, embedding, SQL assistant, aggregate | Manual input-token price for cost estimation. |
 | `output_token_price_per_million` | `DOUBLE` | Completion, SQL assistant, aggregate | Manual output-token price for cost estimation. |
 | `use_builtin_model_prices` | `BOOLEAN` | Completion, embedding, SQL assistant, aggregate | Enables lookup from `ai_model_prices()` when manual prices are not supplied. |
@@ -1434,41 +1500,47 @@ Supported provider names and aliases are:
 | `openai` | none | Yes | Yes | `gpt-5.6-luna` |
 | `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
 | `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
-| `bedrock` | `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b` |
+| `bedrock` | `aws`, `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b` |
 | `cerebras` | `cerebras_cloud` | Yes | No | `gpt-oss-120b` |
 | `cloudflare` | `workers_ai`, `cloudflare_workers_ai`, `cloudflare_ai` | Yes | Yes | `@cf/zai-org/glm-4.7-flash` |
 | `cohere` | `cohere_ai` | Yes | Yes | `command-a-plus-05-2026` |
-| `dashscope` | `qwen`, `alibaba`, `alibaba_model_studio`, `model_studio` | Yes | Yes | `qwen-plus` |
+| `dashscope` | `qwen`, `alibaba`, `alibaba_cloud`, `alibaba_model_studio`, `model_studio` | Yes | Yes | `qwen-plus` |
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-gpt-oss-120b` |
 | `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo` |
 | `deepseek` | none | Yes | No | `deepseek-v4-flash` |
 | `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/gpt-oss-20b` |
 | `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.7-flash` |
 | `groq` | `groqcloud`, `groq_cloud` | Yes | No | `openai/gpt-oss-20b` |
-| `huggingface` | `hf`, `hugging_face`, `huggingface_hub` | Yes | No | `openai/gpt-oss-120b` |
+| `huggingface` | `hf`, `hugging_face`, `huggingface_hub`, `hf_inference` | Yes | No | `openai/gpt-oss-120b` |
 | `hunyuan` | `tencent`, `tencent_hunyuan` | Yes | No | `hy3` |
 | `minimax` | `mini_max` | Yes | No | `MiniMax-M2.7` |
+| `mimo` | `xiaomi`, `xiaomi_mimo` | Yes | No | `mimo-v2.5-pro` |
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
 | `moonshot` | `kimi`, `moonshot_ai`, `kimi_api` | Yes | No | `kimi-k3` |
-| `nebius` | `nebius_token_factory`, `token_factory` | Yes | No | `meta-llama/Meta-Llama-3.1-70B-Instruct` |
+| `nebius` | `nebius_ai`, `nebius_token_factory`, `token_factory` | Yes | No | `meta-llama/Meta-Llama-3.1-70B-Instruct` |
 | `nvidia` | `nvidia_nim`, `nim` | Yes | No | `nvidia/nemotron-3-super-120b-a12b` |
 | `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
 | `perplexity` | `pplx` | Yes | No | `sonar` |
 | `poe` | `poe_api` | Yes | No | `GPT-5.4` |
 | `qianfan` | `baidu`, `baidu_qianfan`, `ernie`, `wenxin` | Yes | No | `ernie-4.5-turbo-128k` |
-| `sambanova` | `sambanova_ai`, `samba_nova`, `sambacloud` | Yes | No | `Meta-Llama-3.3-70B-Instruct` |
+| `sambanova` | `sambanova_ai`, `samba_nova`, `sambacloud`, `samba_cloud` | Yes | No | `Meta-Llama-3.3-70B-Instruct` |
 | `siliconflow` | `silicon_flow` | Yes | No | `Qwen/Qwen2.5-72B-Instruct` |
 | `snowflake` | none | Yes | No | `claude-sonnet-4-5` |
-| `stepfun` | `step`, `step_fun` | Yes | No | `step-3.5-flash` |
+| `stepfun` | `step`, `step_fun`, `stepfun_ai` | Yes | No | `step-3.5-flash` |
 | `together` | `together_ai` | Yes | Yes | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
 | `vercel` | `vercel_ai_gateway`, `vercel_gateway`, `ai_gateway` | Yes | Yes | `openai/gpt-4o-mini` |
 | `vertex` | `google_vertex`, `vertex_ai`, `gcp_vertex` | Yes | No | `google/gemini-2.5-flash` |
-| `volcengine` | `volcano_engine`, `volcengine_ark`, `doubao`, `ark` | Yes | No | `doubao-seed-2-1-pro-260628` |
+| `volcengine` | `volcano`, `volcano_engine`, `volcengine_ark`, `doubao`, `ark` | Yes | No | `doubao-seed-2-1-pro-260628` |
 | `xai` | `x.ai`, `x-ai`, `grok` | Yes | No | `grok-4.6` |
 | `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |
 | `openai_privacy_filter` | `privacy_filter`, `pii_filter`, `opf` | Redaction only | No | `openai/privacy-filter` |
 | `openai_compatible` | `local`, `openai-compatible`, `local_openai`, `local-models`, `local_models` | Yes | Yes | `gpt-4o-mini` |
 | `llamacpp` | `llama.cpp`, `llama-cpp`, `llama_cpp`, `llama-server`, `llama_server` | Yes | Yes | `default` (llama-server answers with its loaded model) |
+| `typesafe` | `jev` | Decisions only (`ai_decide`, `ai_jev`, `ai_classify`, `ai_filter`) | No | `jev-latest` |
+| `systemone` | `system_one`, `decision` | Decisions only (`ai_decide`) | No | none; pass `model :=` or set `SYSTEMONE_MODEL` |
+
+Most multi-word aliases also accept a hyphen in place of the underscore, for
+example `aws-bedrock` or `together-ai`. Names are case-insensitive.
 
 Session defaults can be configured with DuckDB settings:
 
@@ -1502,7 +1574,7 @@ extension default applies. To list the settings in your installed version, run
 | `duckdb_ai_connect_timeout_seconds` | `BIGINT` | Connection timeout from 1 to 31536000 seconds. |
 | `duckdb_ai_retry_count` | `BIGINT` | Retries from 0 to 10 for transport failures and retryable HTTP statuses. |
 | `duckdb_ai_retry_backoff_ms` | `BIGINT` | Base retry backoff from 0 to 60000 milliseconds. |
-| `duckdb_ai_max_concurrent_requests` | `BIGINT` | Concurrent provider requests from 0 to 64. `0` disables the limit. |
+| `duckdb_ai_max_concurrent_requests` | `BIGINT` | Concurrent provider requests from 0 to 64. `0` removes the explicit cap; each chunk then uses up to min(CPU threads, 8) workers. |
 | `duckdb_ai_min_request_interval_ms` | `BIGINT` | Minimum interval between request starts, from 0 to 60000 milliseconds. |
 | `duckdb_ai_token_limit_per_minute` | `BIGINT` | Estimated token cap per rolling minute. `0` disables the limit. |
 | `duckdb_ai_on_error` | `VARCHAR` | Error handling: `fail`, `null`, or `capture`. |
@@ -1516,7 +1588,7 @@ extension default applies. To list the settings in your installed version, run
 | `duckdb_ai_output_token_price_per_million` | `DOUBLE` | Output token price for estimated usage cost. `-1` disables manual pricing. |
 | `duckdb_ai_use_builtin_model_prices` | `BOOLEAN` | Estimate cost from the built-in `ai_model_prices()` catalog. |
 | `duckdb_ai_log_endpoint` | `VARCHAR` | HTTP endpoint for privacy-minimized usage logs. |
-| `duckdb_ai_log_format` | `VARCHAR` | Usage log payload format: `generic_json` or `otlp_json`. |
+| `duckdb_ai_log_format` | `VARCHAR` | Usage log payload format: `generic_json` (aliases `generic`, `json`) or `otlp_json` (alias `otlp`). |
 | `duckdb_ai_log_tags` | `VARCHAR` | Tag string included in usage logs. |
 | `duckdb_ai_log_sample_rate` | `DOUBLE` | Usage log sampling rate from 0 to 1. |
 | `duckdb_ai_log_include_text` | `BOOLEAN` | Include prompt and response text in usage logs. |
@@ -1534,13 +1606,29 @@ highest precedence:
 | `duckdb_ai_sql_assistant_model` | `ai_sql`, `ai_query_data`, `ai_explain_sql`, `ai_fix_sql` |
 | `duckdb_ai_embedding_model` | `ai_embed`, `ai_embedding_request_json`, `ai_similarity`, `ai_build_classifier`, `ai_classify_optimized` |
 
-Model resolution order is:
+Provider and model resolution order is:
 
-1. Per-call `model := ...`
+1. Per-call `provider := ...` and `model := ...`
 2. External model selected through `profile := ...`
-3. Matching function-family setting
-4. `duckdb_ai_model`
-5. Provider default model
+3. Session settings: the matching function-family model setting, then
+   `duckdb_ai_provider` and `duckdb_ai_model`
+4. `AI_PROVIDER` and `MODEL` stored in a `TYPE duckdb_ai` secret (named with
+   `secret := ...`, or found by provider scope). A secret only fills what the
+   steps above left unset, but it always supplies the API key.
+5. Provider environment variables, such as `OPENAI_MODEL`, then
+   `DUCKDB_AI_MODEL`
+6. Provider default model
+
+A secret for a different provider than the resolved one is skipped, or raises
+an error when it was named with `secret :=`. If session settings select Ollama
+and you call a hosted model through a secret, pass `provider := ...` and
+`model := ...` on the call or `RESET duckdb_ai_provider; RESET duckdb_ai_model;`
+first. `ai_decide` and `ai_jev` resolve models differently; see
+[`ai_decide`](#ai_decidestate-questions-).
+
+Runtime defaults when nothing is set: a 120-second total timeout per request
+(`DUCKDB_AI_TIMEOUT_SECONDS` overrides it), no retries, and up to
+min(CPU threads, 8) concurrent requests per execution chunk.
 
 Credentials should use environment variables or DuckDB secrets:
 

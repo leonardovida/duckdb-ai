@@ -1562,7 +1562,7 @@ field names must be unique
 statement error
 SELECT ai_jev('text', {category: 42});
 ----
-MAP(VARCHAR, VARCHAR) or VARCHAR[]
+MAP of label to description or a list of levels
 
 statement error
 SELECT ai_jev('text', {category: NULL});
@@ -1618,7 +1618,7 @@ STRUCT(team VARCHAR, team_confidence DOUBLE, rating DOUBLE, rating_confidence DO
 statement error
 SELECT ai_decide('text', {u: {criteria: ['a', 'b'], hint: 'x'}});
 ----
-accepts only instructions VARCHAR and criteria
+accepts only instructions and criteria
 
 statement error
 SELECT ai_decide('text', {u: {instructions: 'Rate it'}});

@@ -213,14 +213,14 @@ SELECT COALESCE((SELECT sum(batch_count) FROM ai_usage_summary() WHERE provider 
        count(*) FILTER (WHERE status = 'ok' AND prompt_tokens >= 0)::BIGINT AS prompt_token_events,
        count(*) FILTER (WHERE status = 'ok' AND completion_tokens >= 0)::BIGINT AS completion_token_events,
        count(*) FILTER (WHERE status = 'ok' AND total_tokens >= 0)::BIGINT AS total_token_events,
-       CASE WHEN count(*) FILTER (WHERE status != 'ok' OR prompt_tokens < 0) > 0 THEN NULL
+       CASE WHEN count(*) FILTER (WHERE status != 'ok' OR prompt_tokens IS NULL) > 0 THEN NULL
             ELSE sum(prompt_tokens)::BIGINT END AS prompt_tokens,
-       CASE WHEN count(*) FILTER (WHERE status != 'ok' OR completion_tokens < 0) > 0 THEN NULL
+       CASE WHEN count(*) FILTER (WHERE status != 'ok' OR completion_tokens IS NULL) > 0 THEN NULL
             ELSE sum(completion_tokens)::BIGINT END AS completion_tokens,
-       CASE WHEN count(*) FILTER (WHERE status != 'ok' OR total_tokens < 0) > 0 THEN NULL
+       CASE WHEN count(*) FILTER (WHERE status != 'ok' OR total_tokens IS NULL) > 0 THEN NULL
             ELSE sum(total_tokens)::BIGINT END AS total_tokens,
        count(*) FILTER (WHERE status = 'error')::BIGINT AS failures,
-       count(*) > 0 AND count(*) FILTER (WHERE status != 'ok' OR prompt_tokens < 0 OR completion_tokens < 0 OR total_tokens < 0) = 0
+       count(*) > 0 AND count(*) FILTER (WHERE status != 'ok' OR prompt_tokens IS NULL OR completion_tokens IS NULL OR total_tokens IS NULL) = 0
            AS tokens_complete
 FROM usage;
 """

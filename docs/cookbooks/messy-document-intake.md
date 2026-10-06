@@ -1,8 +1,9 @@
 ---
-sidebar_position: 12
+sidebar_position: 10
 title: "Normalize messy documents into structured records"
 sidebar_label: "Messy document intake"
 description: "Normalize mixed JSON, Avro, Excel and CSV inputs into one typed table with LLM extraction in DuckDB SQL."
+keywords: ["LLM document extraction", "DuckDB JSON Avro Excel", "structured records", "ai_try_complete"]
 ---
 
 # Normalize messy documents into structured records
@@ -20,13 +21,17 @@ The production pattern is:
 
 ## Prerequisites
 
-- Configure a completion provider with a `TYPE duckdb_ai` secret.
+- Set `OPENAI_API_KEY` in the environment before starting DuckDB. The
+  `openai_ai` secret below stores the provider and model, not the key. See the
+  [provider guides](../provider-guides.md).
 - Install file-format extensions used by your sources.
 - Use object-storage secrets when reading files from S3-compatible storage.
 
 ```sql
 INSTALL ai FROM community;
 LOAD ai;
+INSTALL json;
+LOAD json;
 
 INSTALL httpfs;
 LOAD httpfs;
@@ -38,7 +43,7 @@ LOAD excel;
 CREATE OR REPLACE SECRET openai_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'openai',
-    MODEL 'gpt-4o-mini'
+    MODEL 'gpt-5.6-luna'
 );
 
 SET VARIABLE run_id = 'document-intake-2026-07-07T100000Z';
@@ -46,29 +51,29 @@ SET VARIABLE run_id = 'document-intake-2026-07-07T100000Z';
 
 ## Read JSON documents
 
-For newline-delimited JSON, keep the source filename for lineage:
+For newline-delimited JSON, keep the source filename for lineage. Documents
+without an `id` get one from a hash of their file name and content, so the same
+document gets the same id on every rerun. A row number would change when files
+are read in a different order.
 
 ```sql
 CREATE OR REPLACE TEMP TABLE raw_json_documents AS
-WITH raw AS (
-    SELECT
-        *,
-        row_number() OVER () AS source_row_number
-    FROM read_json(
-        's3://support-prod/raw/documents/*.jsonl',
-        format = 'newline_delimited',
-        filename = true,
-        union_by_name = true
-    )
-)
 SELECT
-    coalesce(id::VARCHAR, md5(filename || ':' || source_row_number::VARCHAR)) AS document_id,
+    coalesce(
+        id::VARCHAR,
+        md5(filename || chr(10) || coalesce(title::VARCHAR, '') || chr(10) || coalesce(body::VARCHAR, ''))
+    ) AS document_id,
     filename AS source_uri,
     'json' AS source_type,
     title::VARCHAR AS title,
     body::VARCHAR AS body,
     created_at::TIMESTAMP AS created_at
-FROM raw;
+FROM read_json(
+    's3://support-prod/raw/documents/*.jsonl',
+    format = 'newline_delimited',
+    filename = true,
+    union_by_name = true
+);
 ```
 
 ## Read Avro documents
@@ -116,7 +121,9 @@ FROM read_xlsx(
 ## Normalize the document stream
 
 Keep only rows with enough text for extraction. Store the original source and
-type so rejected rows can be traced back.
+type so rejected rows can be traced back. A source that does not exist makes
+the whole `UNION ALL` fail, so keep only the `SELECT` lines for the sources you
+actually created above.
 
 ```sql
 CREATE OR REPLACE TEMP TABLE normalized_documents AS
@@ -142,7 +149,8 @@ WHERE length(coalesce(title, '') || coalesce(body, '')) >= 20;
 ## Extract structured records
 
 Ask for JSON and preserve row-level errors. Keep the response schema beside the
-prompt contract in source control.
+prompt contract in source control. `result` is a `STRUCT` with `response` and
+`error`.
 
 ```sql
 CREATE OR REPLACE TEMP TABLE document_extract_attempts AS
@@ -165,7 +173,10 @@ SELECT
 FROM document_batch;
 ```
 
-Project successful JSON into typed columns:
+Project successful JSON into typed columns. `response_format := 'json_object'`
+asks for JSON but does not check the reply. A reply that is not valid JSON has
+`error = NULL`, and casting it to `JSON` fails the whole statement, so filter
+with `json_valid` and send those rows to the rejected table:
 
 ```sql
 CREATE OR REPLACE TEMP TABLE document_records AS
@@ -181,7 +192,8 @@ SELECT
     result.response::JSON AS response_json,
     now() AS loaded_at
 FROM document_extract_attempts
-WHERE result.error IS NULL;
+WHERE result.error IS NULL
+  AND json_valid(result.response);
 ```
 
 Capture rejected rows:
@@ -193,25 +205,37 @@ SELECT
     document_id,
     source_uri,
     source_type,
-    result.error AS error,
+    coalesce(result.error, 'missing or invalid JSON response') AS error,
     now() AS loaded_at
 FROM document_extract_attempts
-WHERE result.error IS NOT NULL;
+WHERE result.error IS NOT NULL
+   OR NOT coalesce(json_valid(result.response), false);
 ```
 
 ## Export structured records
 
-Persist records and rejected rows separately:
+Persist records and rejected rows separately. `PARTITION_BY (run_id)` writes
+each run to its own `run_id=<value>/` folder:
 
 ```sql
 COPY document_records
-TO 's3://support-prod/ai/document_records/run_id=2026-07-07T100000Z/'
-(FORMAT parquet, COMPRESSION zstd, OVERWRITE_OR_IGNORE true);
+TO 's3://support-prod/ai/document_records'
+(FORMAT parquet, COMPRESSION zstd, PARTITION_BY (run_id), OVERWRITE_OR_IGNORE true);
 
 COPY document_rejected_rows
-TO 's3://support-prod/ai/document_rejected/run_id=2026-07-07T100000Z/'
-(FORMAT parquet, COMPRESSION zstd, OVERWRITE_OR_IGNORE true);
+TO 's3://support-prod/ai/document_rejected'
+(FORMAT parquet, COMPRESSION zstd, PARTITION_BY (run_id), OVERWRITE_OR_IGNORE true);
 ```
+
+To get typed fields without parsing JSON yourself, use
+[`ai_extract_record`](structured-triage-records.md) with a JSON Schema. It
+returns one `STRUCT` per row.
+
+## Related cookbooks
+
+- [Run production batch enrichment from S3 or Parquet](production-batch-enrichment.md)
+- [Write audited AI outputs to lakehouse tables](audited-lakehouse-output.md)
+- [Monitor AI usage, failures, and cost](usage-cost-observability.md)
 
 ## Learn more
 

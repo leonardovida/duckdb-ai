@@ -1,8 +1,9 @@
 ---
-sidebar_position: 11
+sidebar_position: 9
 title: "Monitor AI usage, failures, and cost"
 sidebar_label: "Usage, failures and cost"
 description: "Monitor DuckDB AI provider calls: latency, retries, failures, cache hits, token counts and estimated cost with ai_usage()."
+keywords: ["LLM cost monitoring", "ai_usage", "token usage DuckDB", "AI observability"]
 ---
 
 # Monitor AI usage, failures, and cost
@@ -11,11 +12,15 @@ Use this cookbook when a production job needs basic operational visibility:
 calls, latency, failures, retries, cache hits, token counts, and estimated cost.
 
 `ai_usage()` is in-process state for the current DuckDB database instance, so
-capture it before the process exits or before you call `ai_clear_usage()`.
+capture it before the process exits or before you call `ai_clear_usage()`. It
+keeps only the latest 1,024 events. For larger jobs, snapshot it after each
+batch, check `dropped_events` in `ai_usage_summary()`, and record
+`ai_usage_totals()`, whose counters survive dropped events.
 
 ## Prerequisites
 
-- Configure provider credentials.
+- Configure provider credentials in the environment, for example
+  `OPENAI_API_KEY`. See the [provider guides](../provider-guides.md).
 - Set a run id before provider calls.
 - Decide where usage snapshots should be persisted.
 
@@ -27,23 +32,26 @@ SET VARIABLE run_id = 'usage-monitoring-2026-07-07T100000Z';
 SET duckdb_ai_use_builtin_model_prices = true;
 ```
 
-If the built-in price catalog is not appropriate for your provider contract,
-pass explicit prices on the production calls instead:
+`SELECT * FROM ai_model_prices()` lists the built-in prices. A model with no
+row there gets `estimated_cost_usd = NULL`. If the built-in prices do not match
+your provider contract, pass explicit prices on the production calls instead.
+Replace the example numbers with your own:
 
 ```sql
 SELECT ai_complete(
     'Summarize one production incident.',
     provider := 'openai',
-    model := 'gpt-4o-mini',
-    input_token_price_per_million := 0.15,
-    output_token_price_per_million := 0.60
+    model := 'gpt-5.6-luna',
+    input_token_price_per_million := 0.20,
+    output_token_price_per_million := 1.20
 );
 ```
 
 ## Add job tags to outbound logs
 
 Outbound logs are optional. They omit prompt, input, and response text by
-default.
+default. Replace the endpoint below with your own collector: once it is set,
+every later call in the session tries to send a log event there.
 
 ```sql
 SET duckdb_ai_log_endpoint = 'https://collector.example/ai-usage';
@@ -53,11 +61,12 @@ SET duckdb_ai_log_strict = false;
 ```
 
 Use strict logging only when the SQL query should fail if the collector is
-unavailable.
+unavailable. To stop sending logs, run `RESET duckdb_ai_log_endpoint;`.
 
 ## Snapshot local usage events
 
-Capture events after each production run:
+Capture events after each production run, or after each batch for jobs with
+more than 1,024 calls:
 
 ```sql
 CREATE TABLE IF NOT EXISTS ai_usage_events AS
@@ -74,14 +83,25 @@ SELECT
     now() AS captured_at,
     *
 FROM ai_usage();
+
+SELECT max(dropped_events) AS dropped_events
+FROM ai_usage_summary();
 ```
 
-Persist the snapshot before clearing the usage buffer:
+If `dropped_events` is above 0, some events were evicted before the snapshot,
+so the totals below are low. Snapshot more often.
+
+Persist this run's snapshot before clearing the usage buffer. `PARTITION_BY
+(run_id)` writes it to its own `run_id=<value>/` folder:
 
 ```sql
-COPY ai_usage_events
-TO 's3://support-prod/ai/observability/usage/run_id=2026-07-07T100000Z/'
-(FORMAT parquet, COMPRESSION zstd, OVERWRITE_OR_IGNORE true);
+COPY (
+    SELECT *
+    FROM ai_usage_events
+    WHERE run_id = getvariable('run_id')
+)
+TO 's3://support-prod/ai/observability/usage'
+(FORMAT parquet, COMPRESSION zstd, PARTITION_BY (run_id), OVERWRITE_OR_IGNORE true);
 
 SELECT * FROM ai_clear_usage();
 ```
@@ -108,7 +128,7 @@ GROUP BY ALL
 ORDER BY estimated_cost_usd DESC NULLS LAST;
 ```
 
-Find rows that failed or retried:
+Find calls that failed or retried:
 
 ```sql
 SELECT
@@ -152,6 +172,14 @@ Alert when `failure_rate` or `estimated_cost_usd` crosses your job budget.
 Usage events are call-level, while output rows are job-level. Store both with the
 same run id so they can be reconciled later.
 
+This query assumes you ran the
+[audited lakehouse output](audited-lakehouse-output.md) cookbook earlier in the
+same DuckDB session and kept its `run_id` (skip this page's
+`SET VARIABLE run_id`), so that its `ai_ticket_enriched` table and this page's
+`ai_usage_events` table share run ids. On its own, it fails because
+`ai_ticket_enriched` does not exist. With different run ids, it returns no
+rows.
+
 ```sql
 SELECT
     output.run_id,
@@ -172,6 +200,25 @@ JOIN (
     ON output.run_id = usage.run_id
 GROUP BY output.run_id, usage.calls, usage.failed_calls, usage.estimated_cost_usd;
 ```
+
+## Clean up
+
+Stop sending outbound logs when you are done:
+
+```sql
+RESET duckdb_ai_log_endpoint;
+RESET duckdb_ai_log_format;
+RESET duckdb_ai_log_tags;
+RESET duckdb_ai_log_strict;
+```
+
+## Related cookbooks
+
+- [Run production batch enrichment from S3 or Parquet](production-batch-enrichment.md)
+- [Enrich rows from Postgres or MySQL](source-database-enrichment.md)
+- [Write audited AI outputs to lakehouse tables](audited-lakehouse-output.md)
+- [Evaluate before a batch run](evaluate-before-batch.md), which uses
+  `ai_usage()` to compare the cost of candidate prompts and models
 
 ## Learn more
 

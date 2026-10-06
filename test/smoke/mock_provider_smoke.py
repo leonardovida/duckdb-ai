@@ -180,6 +180,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = '["outside"]' if "return unknown labels" in prompt else '["billing, overdue","performance"]'
             elif "class_a" in full_prompt and "class_b" in full_prompt:
                 content = "class_a" if "alpha" in prompt else "class_b"
+            elif "Classify the following text into exactly one" in full_prompt and "neutral" in full_prompt:
+                content = "Positive."
             elif "Classify the following text into exactly one" in full_prompt:
                 content = "outside" if "return unknown label" in prompt else "billing, overdue"
             elif "Score candidate relevance to the search query" in full_prompt:

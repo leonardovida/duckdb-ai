@@ -235,7 +235,7 @@ def run(duckdb_override=None):
             assert all(run["elapsed_query_wall_ms"] >= 0 for run in report["runs"])
             assert runs[1]["rows"][10]["prediction"] is None
 
-            # Missing usage is encoded as -1 by ai_usage(), even on successful calls.
+            # Missing usage is NULL in ai_usage(), even on successful calls.
             for text, complete in (("row-0 café", False), ("row-2", True)):
                 single = directory / "single.csv"
                 single.write_text(f"id,text,label\n0,{text},a'b\n", encoding="utf-8")
