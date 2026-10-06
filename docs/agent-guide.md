@@ -118,6 +118,30 @@ rate limits, caching, and cancellation.
 - Use `ai_count_tokens` and `ai_recommended_batch_size` to size batches before
   calling a rate-limited provider.
 
+## Chain several AI steps
+
+When a task needs more than one model call per row:
+
+- First try to merge steps: `ai_decide` answers several typed questions in one
+  request, and `ai_extract_record` returns several fields in one call. Keep
+  `ai_redact` as its own step.
+- Call each model function once per row in a subquery, then read its fields
+  outside: `SELECT r.response, r.error FROM (SELECT ai_try_complete(x) AS r ...)`.
+  Writing `(ai_try_complete(x)).response, (ai_try_complete(x)).error` calls the
+  model twice.
+- Do not reuse a model call's alias in the same `SELECT`
+  (`SELECT ai_redact(x) AS clean, ai_summarize(clean)` is a binder error). Use a
+  subquery or a step table.
+- Pass NULL to skip a row: NULL inputs make no call. `coalesce(x, '')` turns a
+  skip into an error.
+- Feed the next step only successful rows (`WHERE error IS NULL`), and put
+  conditional steps behind `CASE` or `WHERE`; only matching rows are sent.
+- Save every step to a table keyed by row, input hash and a version string, and
+  insert only missing rows, so reruns do not pay again.
+
+The [chain AI steps cookbook](cookbooks/chain-ai-steps.md) has a complete,
+tested pipeline.
+
 ## Machine-readable documentation
 
 The documentation site publishes two plain-text files for LLMs and agents,

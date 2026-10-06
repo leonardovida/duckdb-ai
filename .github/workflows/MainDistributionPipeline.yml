@@ -5,6 +5,7 @@
 # and deterministic provider smokes. The Jev cookbook is included because its
 # SQL is executed by the mock smoke suite. The function reference is included
 # because docs_coverage_smoke.py checks it against the registered functions.
+# The chaining cookbook is included because chaining_smoke.py runs its SQL.
 # macOS/Windows and owned-code sanitizers run on every change; the full
 # distribution matrix remains manual.
 #
@@ -29,6 +30,7 @@ on:
       - 'scripts/**'
       - 'docs/cookbooks/jev-decisions.md'
       - 'docs/functions.md'
+      - 'docs/cookbooks/chain-ai-steps.md'
   push:
     branches:
       - main
@@ -49,6 +51,7 @@ on:
       - 'scripts/**'
       - 'docs/cookbooks/jev-decisions.md'
       - 'docs/functions.md'
+      - 'docs/cookbooks/chain-ai-steps.md'
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
@@ -195,6 +198,7 @@ jobs:
           python3 test/smoke/mock_provider_smoke.py
           python3 test/smoke/docs_coverage_smoke.py
           python3 test/smoke/decision_providers_smoke.py
+          python3 test/smoke/chaining_smoke.py
           python3 test/smoke/extension_upload_smoke.py
           python3 test/smoke/resumable_enrichment_smoke.py
           python3 test/smoke/jev_batch_evaluation_smoke.py

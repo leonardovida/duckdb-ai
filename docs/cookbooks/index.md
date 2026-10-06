@@ -20,6 +20,9 @@ duckdb-ai with DuckDB storage, file, and database extensions.
 
 ## Production workflows
 
+- [Chain several AI steps in SQL](chain-ai-steps.md): translate, triage and
+  summarize in separate saved steps, skip failed rows downstream, and rerun
+  without paying twice.
 - [Resume a local enrichment job](resumable-enrichment.md): checkpoint bounded
   batches in DuckDB and retry failed rows without repeating saved successes.
 

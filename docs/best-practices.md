@@ -354,6 +354,14 @@ WHERE result.error IS NOT NULL;
 Use the same rejected-row `SELECT` inside `COPY (...) TO 'failed_rows.parquet'`
 or an `s3://...` target when failures should live outside the DuckDB database.
 
+## Chain steps without paying twice
+
+Multi-step pipelines multiply calls per row. Merge steps where one call can
+answer several questions (`ai_decide`, multi-field `ai_extract_record`), call
+each model function once per row in a subquery, send only successful rows
+downstream, and save every step to a table so reruns retry only missing rows.
+See [chain AI steps](cookbooks/chain-ai-steps.md).
+
 ## Export provider-native batch requests for offline jobs
 
 The `ai` extension runs provider calls synchronously inside the DuckDB query. For

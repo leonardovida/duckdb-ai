@@ -25,6 +25,7 @@ const sidebars: SidebarsConfig = {
       },
       items: [
         'cookbooks/support-ticket-data',
+        'cookbooks/chain-ai-steps',
         'cookbooks/production-batch-enrichment',
         'cookbooks/resumable-enrichment',
         'cookbooks/source-database-enrichment',
