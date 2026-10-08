@@ -361,7 +361,7 @@ reasoning output. The extension never executes tools; your code runs them and
 sends the results back.
 
 ```sql
-SELECT ai_complete('Explain the proof.', provider := 'deepseek', model := 'deepseek-v4-flash',
+SELECT ai_complete('Explain the proof.', provider := 'deepseek', model := 'deepseek-flash',
                    request_options := '{"reasoning_effort":"high"}');
 ```
 

@@ -130,7 +130,7 @@ def run(duckdb_path):
                 "Bearer cf-mock-key",
                 "clef-flash",
             ),
-            ("perplexity", "", "/v1/decisions", "Bearer pplx-mock-key", "pplx-decider-v1-27b"),
+            ("perplexity", "", "/v1/decisions", "Bearer pplx-mock-key", "pplx-decider-v1.1-27b"),
             ("systemone", ", model := 'clm-latest'", "/v1/systemone", "Bearer s1-mock-key", "clm-latest"),
         ]
         for provider, extra, path, auth, model in cases:
