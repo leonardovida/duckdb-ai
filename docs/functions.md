@@ -176,7 +176,7 @@ every supported provider:
 | --- | --- | --- | --- |
 | `typesafe` (alias `jev`) | `jev-latest` (default), `jev-1.13.0` | `/v1/systemone` | `TYPESAFE_API_KEY` |
 | `cloudflare` | `clef` (default), `clef-flash` | Workers AI `/ai/run/@cf/cloudflare/<model>` | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID` |
-| `perplexity` | `pplx-decider-v1-27b` (default) | `/v1/decisions` | `PERPLEXITY_API_KEY` |
+| `perplexity` | `pplx-decider-v1.1-27b` (default), `pplx-decider-v1-27b` | `/v1/decisions` | `PERPLEXITY_API_KEY` |
 | `ollama` | `nimble` (default), `tev1`, `tev1:0.8b` | local `/v1/systemone` (Ollama 0.35 or later) | none |
 | `systemone` | any; `model` is required | `<base_url>/v1/systemone` | optional `SYSTEMONE_API_KEY` |
 
@@ -1498,8 +1498,8 @@ Supported provider names and aliases are:
 | --- | --- | --- | --- | --- |
 | `ollama` | none | Yes | Yes | `llama3.2` |
 | `openai` | none | Yes | Yes | `gpt-5.6-luna` |
-| `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-4o` |
-| `anthropic` | `claude` | Yes | No | `claude-haiku-4-5` |
+| `azure` | `azure_openai`, `azure-openai` | Yes | Yes | `gpt-5.6-luna` |
+| `anthropic` | `claude` | Yes | No | `claude-haiku-5-5` |
 | `bedrock` | `aws`, `aws_bedrock`, `amazon_bedrock`, `bedrock_mantle` | Yes | No | `openai.gpt-oss-120b` |
 | `cerebras` | `cerebras_cloud` | Yes | No | `gpt-oss-120b` |
 | `cloudflare` | `workers_ai`, `cloudflare_workers_ai`, `cloudflare_ai` | Yes | Yes | `@cf/zai-org/glm-4.7-flash` |
@@ -1507,29 +1507,29 @@ Supported provider names and aliases are:
 | `dashscope` | `qwen`, `alibaba`, `alibaba_cloud`, `alibaba_model_studio`, `model_studio` | Yes | Yes | `qwen-plus` |
 | `databricks` | `mosaic`, `mosaic_ai`, `databricks_ai` | Yes | No | `databricks-gpt-oss-120b` |
 | `deepinfra` | `deepinfra_ai` | Yes | Yes | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo` |
-| `deepseek` | none | Yes | No | `deepseek-v4-flash` |
-| `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/gpt-oss-20b` |
-| `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.7-flash` |
+| `deepseek` | none | Yes | No | `deepseek-flash` |
+| `fireworks` | `fireworks_ai` | Yes | Yes | `accounts/fireworks/models/gpt-oss-120b` |
+| `gemini` | `gcp`, `google`, `google_gemini` | Yes | Yes | `gemini-3.8-flash` |
 | `groq` | `groqcloud`, `groq_cloud` | Yes | No | `openai/gpt-oss-20b` |
 | `huggingface` | `hf`, `hugging_face`, `huggingface_hub`, `hf_inference` | Yes | No | `openai/gpt-oss-120b` |
 | `hunyuan` | `tencent`, `tencent_hunyuan` | Yes | No | `hy3` |
 | `minimax` | `mini_max` | Yes | No | `MiniMax-M2.7` |
-| `mimo` | `xiaomi`, `xiaomi_mimo` | Yes | No | `mimo-v2.5-pro` |
+| `mimo` | `xiaomi`, `xiaomi_mimo` | Yes | No | `mimo-v2.6-flash` |
 | `mistral` | none | Yes | Yes | `mistral-small-latest` |
 | `moonshot` | `kimi`, `moonshot_ai`, `kimi_api` | Yes | No | `kimi-k3` |
-| `nebius` | `nebius_ai`, `nebius_token_factory`, `token_factory` | Yes | No | `meta-llama/Meta-Llama-3.1-70B-Instruct` |
+| `nebius` | `nebius_ai`, `nebius_token_factory`, `token_factory` | Yes | No | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
 | `nvidia` | `nvidia_nim`, `nim` | Yes | No | `nvidia/nemotron-3-super-120b-a12b` |
 | `openrouter` | none | Yes | Yes | `openai/gpt-4o-mini` |
 | `perplexity` | `pplx` | Yes | No | `sonar` |
 | `poe` | `poe_api` | Yes | No | `GPT-5.4` |
-| `qianfan` | `baidu`, `baidu_qianfan`, `ernie`, `wenxin` | Yes | No | `ernie-4.5-turbo-128k` |
+| `qianfan` | `baidu`, `baidu_qianfan`, `ernie`, `wenxin` | Yes | No | `ernie-5.1` |
 | `sambanova` | `sambanova_ai`, `samba_nova`, `sambacloud`, `samba_cloud` | Yes | No | `Meta-Llama-3.3-70B-Instruct` |
 | `siliconflow` | `silicon_flow` | Yes | No | `Qwen/Qwen2.5-72B-Instruct` |
 | `snowflake` | none | Yes | No | `claude-sonnet-4-5` |
 | `stepfun` | `step`, `step_fun`, `stepfun_ai` | Yes | No | `step-3.5-flash` |
 | `together` | `together_ai` | Yes | Yes | `meta-llama/Llama-3.3-70B-Instruct-Turbo` |
 | `vercel` | `vercel_ai_gateway`, `vercel_gateway`, `ai_gateway` | Yes | Yes | `openai/gpt-4o-mini` |
-| `vertex` | `google_vertex`, `vertex_ai`, `gcp_vertex` | Yes | No | `google/gemini-2.5-flash` |
+| `vertex` | `google_vertex`, `vertex_ai`, `gcp_vertex` | Yes | No | `google/gemini-3.8-flash` |
 | `volcengine` | `volcano`, `volcano_engine`, `volcengine_ark`, `doubao`, `ark` | Yes | No | `doubao-seed-2-1-pro-260628` |
 | `xai` | `x.ai`, `x-ai`, `grok` | Yes | No | `grok-4.6` |
 | `zai` | `zhipu` | Yes | Yes | `glm-4.7-flash` |

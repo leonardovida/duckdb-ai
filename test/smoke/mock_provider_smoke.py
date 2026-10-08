@@ -300,7 +300,12 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "output_tokens": 4,
                 },
             }
-            if self.claude_requests[-1].get("model") in {"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"}:
+            if self.claude_requests[-1].get("model") in {
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
+            }:
                 payload["usage"] = {
                     "input_tokens": 70,
                     "cache_read_input_tokens": 20,
@@ -693,7 +698,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SELECT ai_complete(
             'deepseek builtin pricing smoke',
             provider := 'deepseek',
-            model := 'deepseek-v4-flash',
+            model := 'deepseek-flash',
             base_url := '{base_url}',
             use_builtin_model_prices := true
         ) AS deepseek_completion;
@@ -1464,6 +1469,7 @@ def run_duckdb_new_model_pricing(duckdb_path: Path, base_url: str) -> str:
         ("anthropic", "claude-fable-5-1"),
         ("anthropic", "claude-opus-5-5"),
         ("anthropic", "claude-sonnet-5-5"),
+        ("anthropic", "claude-haiku-5-5"),
     )
     calls = "\n".join(
         f"SELECT ai_complete('new model pricing', provider := '{provider}', model := '{model}', "
@@ -1473,7 +1479,7 @@ def run_duckdb_new_model_pricing(duckdb_path: Path, base_url: str) -> str:
     )
     sql = f"""
         {calls}
-        SELECT count(*) = 7 AND bool_and(status = 'ok') AND bool_and(total_tokens = 105) AND
+        SELECT count(*) = 8 AND bool_and(status = 'ok') AND bool_and(total_tokens = 105) AND
                bool_and(cache_creation_prompt_tokens = 10) AND
                bool_and(abs(estimated_cost_usd - CASE model
                    WHEN 'gpt-6-astra' THEN 0.001095
@@ -1482,7 +1488,8 @@ def run_duckdb_new_model_pricing(duckdb_path: Path, base_url: str) -> str:
                    WHEN 'gpt-6-luna' THEN 0.00001095
                    WHEN 'claude-fable-5-1' THEN 0.001080
                    WHEN 'claude-opus-5-5' THEN 0.000434
-                   WHEN 'claude-sonnet-5-5' THEN 0.000219
+                   WHEN 'claude-sonnet-5-5' THEN 0.000217
+                   WHEN 'claude-haiku-5-5' THEN 0.00001095
                END) < 0.000000000001) AS pricing_matches
         FROM ai_usage();
     """
@@ -1506,7 +1513,7 @@ def run_duckdb_new_model_pricing(duckdb_path: Path, base_url: str) -> str:
 def assert_new_model_pricing(output: str):
     if "pricing_matches" not in output or "true" not in output:
         raise AssertionError(f"new model pricing did not match catalog: {output}")
-    if len(MockProviderHandler.completion_requests) != 4 or len(MockProviderHandler.claude_requests) != 3:
+    if len(MockProviderHandler.completion_requests) != 4 or len(MockProviderHandler.claude_requests) != 4:
         raise AssertionError("expected one mock request for each new text completion model")
     for request in MockProviderHandler.completion_requests:
         if "temperature" in request or request.get("prompt_cache_options") != {"mode": "explicit"}:
@@ -1762,7 +1769,7 @@ def assert_provider_metadata(output: str):
         '"model":"qwen-plus"',
         '"model":"kimi-k3"',
         '"model":"kimi-k2.7-code-highspeed"',
-        '"model":"accounts/fireworks/models/gpt-oss-20b"',
+        '"model":"accounts/fireworks/models/gpt-oss-120b"',
         '"model":"accounts/fireworks/routers/kimi-k2p6-turbo"',
         '"model":"accounts/example/deployments/custom-chat"',
         '"model":"fireworks/qwen3-embedding-8b"',
@@ -1770,7 +1777,7 @@ def assert_provider_metadata(output: str):
         "fireworks_provider_default_temperature",
         '"model":"doubao-seed-2-1-pro-260628"',
         '"model":"step-3.5-flash"',
-        '"model":"gemini-3.7-flash"',
+        '"model":"gemini-3.8-flash"',
         "gemini_sampling_parameter_omitted",
         '"model":"@cf/baai/bge-base-en-v1.5"',
         '"model":"nvidia/nemotron-3-super-120b-a12b"',
@@ -2006,7 +2013,7 @@ def assert_smoke_result(output: str):
     if gemini_price_request["messages"][-1]["content"] != "gemini builtin pricing smoke":
         raise AssertionError(f"unexpected Gemini pricing prompt: {gemini_price_request}")
     deepseek_price_request = MockProviderHandler.completion_requests[29]
-    if deepseek_price_request.get("model") != "deepseek-v4-flash":
+    if deepseek_price_request.get("model") != "deepseek-flash":
         raise AssertionError(f"unexpected DeepSeek pricing model: {deepseek_price_request}")
     if deepseek_price_request["messages"][-1]["content"] != "deepseek builtin pricing smoke":
         raise AssertionError(f"unexpected DeepSeek pricing prompt: {deepseek_price_request}")
@@ -2231,12 +2238,12 @@ def assert_smoke_result(output: str):
     if gemini_estimated_cost is None or abs(gemini_estimated_cost - 0.0000165) > 0.000000001:
         raise AssertionError(f"unexpected Gemini builtin pricing cost: {gemini_price_log}")
     deepseek_price_log = next(
-        (request for request in completion_logs if request.get("model") == "deepseek-v4-flash"), None
+        (request for request in completion_logs if request.get("model") == "deepseek-flash"), None
     )
     if deepseek_price_log is None:
         raise AssertionError(f"missing DeepSeek builtin pricing log: {completion_logs}")
     deepseek_estimated_cost = deepseek_price_log.get("estimated_cost_usd")
-    if deepseek_estimated_cost is None or abs(deepseek_estimated_cost - 0.00000704) > 0.000000001:
+    if deepseek_estimated_cost is None or abs(deepseek_estimated_cost - 0.0000057) > 0.000000001:
         raise AssertionError(f"unexpected DeepSeek builtin pricing cost: {deepseek_price_log}")
     databricks_log = next(
         (request for request in completion_logs if request.get("model") == "databricks-gpt-oss-120b"), None

@@ -928,8 +928,13 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "Jev input tokens only", "2026-09-18"},
 	    {"cloudflare", "clef", "completion", 0.24, 0.00, "https://developers.cloudflare.com/workers-ai/models/clef/",
 	     "Clef decision model input tokens only", "2026-10-06"},
-	    {"perplexity", "pplx-decider-v1-27b", "completion", 0.04, 0.00,
-	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-06"},
+	    {"cloudflare", "clef-flash", "completion", 0.09, 0.00,
+	     "https://developers.cloudflare.com/workers-ai/models/clef-flash/", "Clef decision model input tokens only",
+	     "2026-10-08"},
+	    {"perplexity", "pplx-decider-v1.1-27b", "completion", 0.02, 0.00,
+	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-08"},
+	    {"perplexity", "pplx-decider-v1-27b", "completion", 0.02, 0.00,
+	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-08"},
 	    {"openai", "gpt-6-astra", "completion", 10.00, 50.00,
 	     "https://developers.openai.com/api/docs/models/gpt-6-astra", "standard text pricing up to 272K input tokens",
 	     "2026-09-30"},
@@ -965,6 +970,9 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "https://platform.claude.com/docs/en/models/opus-5-5/overview", "standard text token pricing", "2026-09-30"},
 	    {"anthropic", "claude-sonnet-5-5", "completion", 2.00, 10.00,
 	     "https://platform.claude.com/docs/en/models/sonnet-5-5/overview", "standard text token pricing", "2026-09-30"},
+	    {"anthropic", "claude-haiku-5-5", "completion", 0.10, 0.50,
+	     "https://platform.claude.com/docs/en/about-claude/pricing",
+	     "standard text token pricing for prompts up to 100K tokens", "2026-10-08"},
 	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
 	    {"anthropic", "claude-sonnet-5", "completion", 2.00, 10.00,
@@ -977,14 +985,18 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
 	    {"gemini", "gemini-3.7-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
+	    {"gemini", "gemini-3.8-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
+	     "standard text token pricing starting 2027-01-01", "2026-10-08"},
 	    {"gemini", "gemini-embedding-2", "embedding", 0.20, -1, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text embedding input tokens only", "2026-07-17"},
 	    {"mistral", "mistral-small-latest", "completion", 0.15, 0.60, "https://mistral.ai/pricing/api/",
 	     "standard text token pricing", "2026-07-08"},
 	    {"mistral", "mistral-embed", "embedding", 0.10, -1, "https://mistral.ai/pricing/",
 	     "embedding input tokens only", "2026-06-30"},
-	    {"deepseek", "deepseek-v4-flash", "completion", 0.44, 1.32, "https://api-docs.deepseek.com/quick_start/pricing",
-	     "peak-hour cache-miss pricing; off-peak rates are 50% lower", "2026-09-04"},
+	    {"deepseek", "deepseek-flash", "completion", 0.30, 1.20, "https://api-docs.deepseek.com/quick_start/pricing",
+	     "peak-hour cache-miss pricing; off-peak rates are 50% lower", "2026-10-08"},
+	    {"deepseek", "deepseek-v4-flash", "completion", 0.30, 1.20, "https://api-docs.deepseek.com/updates",
+	     "retired ID routed to deepseek-flash; peak-hour cache-miss pricing", "2026-10-08"},
 	    {"zai", "glm-4.7-flash", "completion", 0.00, 0.00, "https://docs.z.ai/guides/overview/pricing",
 	     "standard text token pricing", "2026-06-30"},
 	    {"zai", "glm-4.7-flashx", "completion", 0.07, 0.40, "https://docs.z.ai/guides/overview/pricing",
@@ -995,18 +1007,23 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "live model feed pricing", "2026-06-30"},
 	    {"openrouter", "anthropic/claude-haiku-4.5", "completion", 1.00, 5.00, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
+	    {"openrouter", "anthropic/claude-haiku-5.5", "completion", 0.10, 0.50, "https://openrouter.ai/api/v1/models",
+	     "live model feed pricing", "2026-10-08"},
 	    {"openrouter", "z-ai/glm-4.7-flash", "completion", 0.06, 0.40, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
 	    {"xai", "grok-4.5", "completion", 2.00, 6.00, "https://docs.x.ai/developers/models/grok-4.5",
 	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
 	    {"xai", "grok-4.6", "completion", 2.00, 6.00, "https://docs.x.ai/developers/grok-4-6",
 	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
+	    {"xai", "grok-4.7", "completion", 2.00, 6.00, "https://docs.x.ai/docs/models",
+	     "standard text token pricing for prompts below 200K tokens", "2026-10-08"},
 	};
 	return prices;
 }
 
 void ApplyCurrentModelPrice(ModelPrice &price) {
-	if (price.provider == "gemini" && (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash") &&
+	if (price.provider == "gemini" &&
+	    (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash" || price.model == "gemini-3.8-flash") &&
 	    price.operation == "completion" && CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
 		price.input_token_price_per_million = 0.75;
 		price.output_token_price_per_million = 3.75;
@@ -3295,8 +3312,8 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"ollama", "ollama_chat", "llama3.2", "nomic-embed-text", "http://localhost:11434", "OLLAMA_API_KEY", false},
 	    {"openai", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "https://api.openai.com/v1",
 	     "OPENAI_API_KEY", true},
-	    {"azure", "openai_chat", "gpt-4o", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
-	    {"anthropic", "anthropic_messages", "claude-haiku-4-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
+	    {"azure", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
+	    {"anthropic", "anthropic_messages", "claude-haiku-5-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
 	     true},
 	    {"bedrock", "openai_chat", "openai.gpt-oss-120b", "", "", "AWS_BEDROCK_API_KEY", true},
 	    {"cerebras", "openai_chat", "gpt-oss-120b", "", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", true},
@@ -3309,22 +3326,22 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"databricks", "openai_chat", "databricks-gpt-oss-120b", "", "", "DATABRICKS_TOKEN", true},
 	    {"deepinfra", "openai_chat", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "BAAI/bge-large-en-v1.5",
 	     "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY", true},
-	    {"deepseek", "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
-	    {"fireworks", "openai_chat", "accounts/fireworks/models/gpt-oss-20b", "nomic-ai/nomic-embed-text-v1.5",
+	    {"deepseek", "openai_chat", "deepseek-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
+	    {"fireworks", "openai_chat", "accounts/fireworks/models/gpt-oss-120b", "nomic-ai/nomic-embed-text-v1.5",
 	     "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", true},
-	    {"gemini", "openai_chat", "gemini-3.7-flash", "gemini-embedding-2",
+	    {"gemini", "openai_chat", "gemini-3.8-flash", "gemini-embedding-2",
 	     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", true},
 	    {"groq", "openai_chat", "openai/gpt-oss-20b", "", "https://api.groq.com/openai/v1", "GROQ_API_KEY", true},
 	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
 	    {"hunyuan", "openai_chat", "hy3", "", "https://tokenhub.tencentmaas.com/v1", "HUNYUAN_API_KEY", true},
 	    {"llamacpp", "openai_chat", "default", "default", "http://localhost:8080/v1", "LLAMACPP_API_KEY", false},
 	    {"minimax", "openai_chat", "MiniMax-M2.7", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
-	    {"mimo", "openai_chat", "mimo-v2.5-pro", "", "https://api.xiaomimimo.com/v1", "MIMO_API_KEY", true},
+	    {"mimo", "openai_chat", "mimo-v2.6-flash", "", "https://api.xiaomimimo.com/v1", "MIMO_API_KEY", true},
 	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
 	     "MISTRAL_API_KEY", true},
 	    {"moonshot", "openai_chat", "kimi-k3", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
-	    {"nebius", "openai_chat", "meta-llama/Meta-Llama-3.1-70B-Instruct", "",
-	     "https://api.tokenfactory.nebius.com/v1", "NEBIUS_API_KEY", true},
+	    {"nebius", "openai_chat", "Qwen/Qwen3-30B-A3B-Instruct-2507", "", "https://api.tokenfactory.nebius.com/v1",
+	     "NEBIUS_API_KEY", true},
 	    {"nvidia", "openai_chat", "nvidia/nemotron-3-super-120b-a12b", "", "https://integrate.api.nvidia.com/v1",
 	     "NVIDIA_API_KEY", true},
 	    {"openai_privacy_filter", "privacy_filter", "openai/privacy-filter", "", "http://localhost:8080",
@@ -3335,8 +3352,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", true},
 	    {"perplexity", "openai_chat", "sonar", "", "https://api.perplexity.ai", "PERPLEXITY_API_KEY", true},
 	    {"poe", "openai_chat", "GPT-5.4", "", "https://api.poe.com/v1", "POE_API_KEY", true},
-	    {"qianfan", "openai_chat", "ernie-4.5-turbo-128k", "", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY",
-	     true},
+	    {"qianfan", "openai_chat", "ernie-5.1", "", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY", true},
 	    {"sambanova", "openai_chat", "Meta-Llama-3.3-70B-Instruct", "", "https://api.sambanova.ai/v1",
 	     "SAMBANOVA_API_KEY", true},
 	    {"siliconflow", "openai_chat", "Qwen/Qwen2.5-72B-Instruct", "", "https://api.siliconflow.com/v1",
@@ -3347,7 +3363,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "intfloat/multilingual-e5-large-instruct", "https://api.together.xyz/v1", "TOGETHER_API_KEY", true},
 	    {"vercel", "openai_chat", "openai/gpt-4o-mini", "openai/text-embedding-3-small",
 	     "https://ai-gateway.vercel.sh/v1", "AI_GATEWAY_API_KEY", true},
-	    {"vertex", "openai_chat", "google/gemini-2.5-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
+	    {"vertex", "openai_chat", "google/gemini-3.8-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
 	    {"volcengine", "openai_chat", "doubao-seed-2-1-pro-260628", "", "https://ark.cn-beijing.volces.com/api/v3",
 	     "VOLCENGINE_API_KEY", true},
 	    {"xai", "openai_chat", "grok-4.6", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
@@ -4003,7 +4019,7 @@ void ApplyDecisionProtocol(ProviderConfig &config, const CompletionOptions &opti
 	}
 	if (config.provider == "perplexity") {
 		config.protocol = "perplexity_decisions";
-		config.model = DecisionModel(config, options, "pplx-decider-v1-27b");
+		config.model = DecisionModel(config, options, "pplx-decider-v1.1-27b");
 		return;
 	}
 	if (config.provider == "cloudflare") {
@@ -4199,8 +4215,16 @@ std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
 }
 
 bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
-	return config.provider == "gemini" && (config.model == "gemini-3.7-flash" || config.model == "gemini-3.6-flash" ||
-	                                       config.model == "gemini-3.5-flash-lite");
+	std::string model;
+	if (config.provider == "gemini") {
+		model = config.model;
+	} else if (config.provider == "vertex" && StartsWith(config.model, "google/")) {
+		model = config.model.substr(7);
+	} else {
+		return false;
+	}
+	return model == "gemini-3.8-flash" || model == "gemini-3.7-flash" || model == "gemini-3.6-flash" ||
+	       model == "gemini-3.5-flash-lite";
 }
 
 bool OpenAIOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
@@ -4223,7 +4247,8 @@ bool OpenAIOmitsSamplingParameters(const ProviderConfig &config, const Completio
 bool AnthropicOmitsSamplingParameters(const ProviderConfig &config) {
 	return config.protocol == "anthropic_messages" &&
 	       (config.model == "claude-fable-5-1" || config.model == "claude-opus-5-5" ||
-	        config.model == "claude-sonnet-5-5" || config.model == "claude-sonnet-5");
+	        config.model == "claude-sonnet-5-5" || config.model == "claude-haiku-5-5" ||
+	        config.model == "claude-sonnet-5");
 }
 
 bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
@@ -4231,7 +4256,9 @@ bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
 		return false;
 	}
 	auto model = LowerAscii(config.model);
-	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5");
+	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5") ||
+	       EndsWith(model, "claude-sonnet-5-5") || EndsWith(model, "claude-opus-5-5") ||
+	       EndsWith(model, "claude-haiku-5-5") || EndsWith(model, "claude-fable-5-1");
 }
 
 bool ProviderOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
@@ -5126,7 +5153,7 @@ double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionO
 	auto cached_input_multiplier = config.protocol == "anthropic_messages" ? 0.1 : 0.5;
 	if (config.provider == "anthropic" && model == "claude-fable-5-1") {
 		cached_input_multiplier = 0.025;
-	} else if (config.provider == "anthropic" && model == "claude-opus-5-5") {
+	} else if (config.provider == "anthropic" && (model == "claude-opus-5-5" || model == "claude-sonnet-5-5")) {
 		cached_input_multiplier = 0.05;
 	} else if (config.provider == "openai" && model == "gpt-6.1-sol") {
 		cached_input_multiplier = 0.05;

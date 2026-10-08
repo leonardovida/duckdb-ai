@@ -5,6 +5,61 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## 0.8.0 - 2026-10-08
+
+This release refreshes default models and built-in prices for current provider
+catalogs. SQL functions, options and result shapes are unchanged. Calls that
+rely on a provider's default model now use a different model; pass
+`model := ...` or set `MODEL` in a secret to keep the previous one.
+
+### Added
+
+- Built-in pricing and request compatibility for Claude Haiku 5.5
+  (`claude-haiku-5-5`), Gemini 3.8 Flash (`gemini-3.8-flash`, with Google's
+  introductory rate through 2026-12-31), DeepSeek V4.1 Flash (`deepseek-flash`),
+  Grok 4.7, Cloudflare Clef-flash, Perplexity `pplx-decider-v1.1-27b` and
+  OpenRouter `anthropic/claude-haiku-5.5`.
+
+### Changed
+
+- New default models:
+  - `anthropic`: `claude-haiku-5-5` (was `claude-haiku-4-5`). It costs a tenth
+    as much, uses adaptive thinking by default and counts about 30% more tokens
+    for the same text.
+  - `gemini`: `gemini-3.8-flash` (was `gemini-3.7-flash`), at the same price.
+  - `vertex`: `google/gemini-3.8-flash` (was `google/gemini-2.5-flash`, which
+    Vertex retires in October 2026).
+  - `deepseek`: `deepseek-flash` (was `deepseek-v4-flash`, retired by DeepSeek
+    and temporarily routed to `deepseek-flash`).
+  - `azure`: `gpt-5.6-luna` (was `gpt-4o`, which Azure no longer offers to new
+    deployments).
+  - `fireworks`: `accounts/fireworks/models/gpt-oss-120b` (was `gpt-oss-20b`,
+    removed from Fireworks serverless).
+  - `nebius`: `Qwen/Qwen3-30B-A3B-Instruct-2507` (was
+    `meta-llama/Meta-Llama-3.1-70B-Instruct`, no longer served).
+  - `mimo`: `mimo-v2.6-flash` (was `mimo-v2.5-pro`, which retires on 2026-10-21).
+  - `qianfan`: `ernie-5.1` (was `ernie-4.5-turbo-128k`, which retires on
+    2026-10-29).
+  - `ai_decide` with `perplexity`: `pplx-decider-v1.1-27b` (was
+    `pplx-decider-v1-27b`).
+
+### Fixed
+
+- Built-in cost estimates use current rates: DeepSeek Flash at $0.30/$1.20 per
+  million tokens (was $0.44/$1.32), Perplexity decision models at $0.02 per
+  million input tokens (was $0.04), and Claude Sonnet 5.5 cache reads at 5% of
+  the input rate (was 10%).
+- `temperature` is omitted for models that reject non-default sampling
+  parameters: Claude Haiku 5.5, Gemini 3.8 Flash, Gemini 3.x models on Vertex,
+  and Claude 5.5-generation and Fable 5.1 endpoints on Databricks. Previously
+  these requests could fail when `temperature` was set.
+
+### Documentation
+
+- Provider guides list the new defaults and note that Together no longer serves
+  embeddings serverlessly, so its default embedding model needs a dedicated
+  endpoint.
+
 ## 0.7.0 - 2026-10-06
 
 ### Added
