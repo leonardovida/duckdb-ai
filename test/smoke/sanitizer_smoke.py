@@ -11,6 +11,7 @@ from pathlib import Path
 from repository_regression_smoke import run as regressions
 from repository_pass2_smoke import run as pass2
 from response_lookup_smoke import run as response_lookups
+from token_budget_smoke import run as token_budgets
 
 
 def main():
@@ -39,6 +40,7 @@ def main():
         regressions(wrapper)
         pass2(wrapper)
         response_lookups(wrapper)
+        token_budgets(wrapper)
         subprocess.run(
             ["python3", str(Path(__file__).with_name("reliability_smoke.py")), "--duckdb", str(wrapper)], check=True
         )

@@ -5,6 +5,16 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## 0.8.1 - 2026-10-09
+
+### Fixed
+
+- Very large positive `max_tokens` values no longer overflow the estimated
+  input-plus-output token count. Declared context windows reject oversized
+  requests before HTTP, and token pacing reserves the configured window instead
+  of treating an overflowed estimate as zero. Without a declared context window,
+  large positive output limits remain valid and are sent unchanged.
+
 ## 0.8.0 - 2026-10-08
 
 This release refreshes default models and built-in prices for current provider
