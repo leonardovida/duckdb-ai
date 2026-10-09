@@ -2922,6 +2922,7 @@ def main():
     from repository_pass2_smoke import run as run_repository_pass2_smoke
     from volatile_offset_smoke import run as run_volatile_offset_smoke
     from response_lookup_smoke import run as run_response_lookup_smoke
+    from token_budget_smoke import run as run_token_budget_smoke
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2973,6 +2974,7 @@ def main():
         MockProviderHandler.reset()
         run_duckdb_embedding_validation(args.duckdb)
         run_response_lookup_smoke(args.duckdb)
+        run_token_budget_smoke(args.duckdb)
         usage_distribution_output = run_duckdb_embedding_usage_distribution(args.duckdb, f"http://127.0.0.1:{port}")
         assert_embedding_usage_distribution(usage_distribution_output)
         MockProviderHandler.reset()

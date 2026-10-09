@@ -2904,8 +2904,14 @@ int64_t EstimatedCompletionInputTokens(const std::string &prompt, const Completi
 
 int64_t EstimatedCompletionTokens(const std::string &prompt, const CompletionOptions &options) {
 	auto output_estimate = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
-	return EstimatedCompletionInputTokens(prompt, options, GetProviderCapabilities(options).token_estimate_multiplier) +
-	       output_estimate;
+	auto input_estimate =
+	    EstimatedCompletionInputTokens(prompt, options, GetProviderCapabilities(options).token_estimate_multiplier);
+	// Pacing caps reservations at the configured window. Keep a large positive
+	// output limit positive even when the combined estimate cannot fit in BIGINT.
+	if (output_estimate > std::numeric_limits<int64_t>::max() - input_estimate) {
+		return std::numeric_limits<int64_t>::max();
+	}
+	return input_estimate + output_estimate;
 }
 
 int64_t TokenReservation(int64_t estimated_tokens, int64_t token_limit_per_minute) {
@@ -5679,7 +5685,8 @@ void ValidateCompletionRequestLimits(const std::string &prompt, const std::strin
 	}
 	if (capabilities.context_window_tokens > 0) {
 		auto output_tokens = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
-		if (input_tokens + output_tokens > capabilities.context_window_tokens) {
+		if (output_tokens > capabilities.context_window_tokens ||
+		    input_tokens > capabilities.context_window_tokens - output_tokens) {
 			throw InvalidInputException(
 			    "AI completion estimated input plus output exceeds external model context window");
 		}
