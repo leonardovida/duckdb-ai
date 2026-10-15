@@ -210,6 +210,8 @@ balance and long rows before the live comparison. The byte counts exclude
 criteria and request framing, so they do not predict Jev token use or whether
 a row fits `max_request_bytes`. The input and criteria hashes can be compared
 with the later live report to confirm the same sample and criteria were used.
+Quality-gate options (`--min-*` and `--required-label`) require `--allow-live`:
+preflight makes no predictions and cannot measure their quality.
 
 For the live comparison, use a build containing `ai_jev` and configure
 `TYPESAFE_API_KEY` as above. The example requires explicit live-call opt-in

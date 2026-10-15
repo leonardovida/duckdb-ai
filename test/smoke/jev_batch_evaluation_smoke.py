@@ -145,12 +145,13 @@ def run(duckdb_override=None):
         credentials=True,
         preflight=False,
         gate_options=(),
+        duckdb_path=None,
     ):
         command = [
             sys.executable,
             str(script),
             "--duckdb",
-            str(duckdb),
+            str(duckdb_path if duckdb_path is not None else duckdb),
             "--input",
             str(input_path),
             "--criteria",
@@ -191,13 +192,40 @@ def run(duckdb_override=None):
             refused = invoke(input_path, criteria_path, allow_live=False)
             assert refused.returncode != 0 and not requests, refused.stderr
 
-            checked = invoke(input_path, criteria_path, allow_live=False, model=None, credentials=False, preflight=True)
+            def preflight(input_path, criteria_path, **options):
+                return invoke(
+                    input_path,
+                    criteria_path,
+                    allow_live=False,
+                    model=None,
+                    credentials=False,
+                    preflight=True,
+                    duckdb_path=directory / "no-duckdb-build",
+                    **options,
+                )
+
+            checked = preflight(input_path, criteria_path)
             assert checked.returncode == 0 and not requests and not logs, checked.stderr
             summary = json.loads(checked.stdout)
             assert summary["valid"] is True and summary["rows"] == 33 and summary["row_cap"] == 1000
             assert summary["label_counts"] == {"a'b": 17, "b": 16}
             assert summary["text_bytes"] == {"min": 5, "median": 6, "max": len("row-0 café".encode("utf-8"))}
             assert len(summary["input_sha256"]) == 64 and len(summary["criteria_sha256"]) == 64
+
+            # Even-sized Unicode/BOM CSV, with an unused allowed label.
+            balanced = directory / "balanced.csv"
+            balanced.write_text("id,text,label\n1,é,b\n2,x,b\n", encoding="utf-8-sig")
+            checked = preflight(balanced, criteria_path)
+            assert checked.returncode == 0, checked.stderr
+            balanced_summary = json.loads(checked.stdout)
+            assert balanced_summary["label_counts"] == {"a'b": 0, "b": 2}
+            assert balanced_summary["text_bytes"] == {"min": 1, "median": 1.5, "max": 2}
+            assert balanced_summary["input_sha256"] != summary["input_sha256"]
+            both_modes = invoke(input_path, criteria_path, preflight=True)
+            assert both_modes.returncode == 2 and not requests and not logs
+            assert "not allowed with argument" in both_modes.stderr
+            no_model = invoke(input_path, criteria_path, model=None)
+            assert no_model.returncode == 2 and "--model" in no_model.stderr and not requests
 
             completed = invoke(input_path, criteria_path)
             assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -274,7 +302,7 @@ def run(duckdb_override=None):
             requests.clear()
             invalid = invoke(duplicate, criteria_path)
             assert invalid.returncode != 0 and not requests and "duplicate id" in invalid.stderr
-            invalid = invoke(duplicate, criteria_path, allow_live=False, model=None, credentials=False, preflight=True)
+            invalid = preflight(duplicate, criteria_path)
             assert invalid.returncode != 0 and not requests and "duplicate id" in invalid.stderr
             capped = directory / "capped.csv"
             capped.write_text("id,text,label\n" + "".join(f"{n},ok,a'b\n" for n in range(1001)), encoding="utf-8")
@@ -304,6 +332,32 @@ def run(duckdb_override=None):
             duplicate_criteria.write_text('{"a":"one","a":"two"}', encoding="utf-8")
             invalid = invoke(input_path, duplicate_criteria)
             assert invalid.returncode != 0 and not requests
+            for sample, criteria_file in (
+                (capped, criteria_path),
+                (empty, criteria_path),
+                (extra, criteria_path),
+                (whitespace, criteria_path),
+                (input_path, noul),
+                (input_path, too_many),
+                (input_path, duplicate_criteria),
+            ):
+                invalid = preflight(sample, criteria_file)
+                assert invalid.returncode == 2 and not invalid.stdout and not requests, invalid.stderr
+            unknown = directory / "unknown.csv"
+            unknown.write_text("id,text,label\n1,ok,unknown\n", encoding="utf-8")
+            invalid = preflight(unknown, criteria_path)
+            assert invalid.returncode == 2 and "unknown label" in invalid.stderr and not requests
+            no_rows = directory / "no-rows.csv"
+            no_rows.write_text("id,text,label\n", encoding="utf-8")
+            invalid = preflight(no_rows, criteria_path)
+            assert invalid.returncode == 2 and "no rows" in invalid.stderr and not requests
+            capped.write_text("id,text,label\n" + "".join(f"{n},ok,a'b\n" for n in range(1000)), encoding="utf-8")
+            checked = preflight(capped, criteria_path)
+            assert checked.returncode == 0 and json.loads(checked.stdout)["rows"] == 1000 and not requests
+            for gate_options in (("--required-label", "b"), ("--min-accuracy", "0.99"), ("--min-accuracy", "0")):
+                invalid = preflight(input_path, criteria_path, gate_options=gate_options)
+                assert invalid.returncode == 2 and "quality gates require --allow-live" in invalid.stderr
+                assert not invalid.stdout and not requests
             invalid = invoke(input_path, criteria_path, model="   ")
             assert invalid.returncode != 0 and not requests
             for timeout in (0, -1, "nan", "inf"):
@@ -321,6 +375,11 @@ def run(duckdb_override=None):
                 writer = csv.writer(stream)
                 writer.writerow(["id", "text", "label"])
                 writer.writerow(["quoted", quoted_text, "a'b"])
+            checked = preflight(quoted, criteria_path)
+            assert checked.returncode == 0, checked.stderr
+            assert json.loads(checked.stdout)["text_bytes"] == dict.fromkeys(
+                ("min", "median", "max"), len(quoted_text.encode("utf-8"))
+            )
             roundtrip = invoke(quoted, criteria_path)
             assert roundtrip.returncode == 0, roundtrip.stdout + roundtrip.stderr
             for result in json.loads(roundtrip.stdout)["runs"]:

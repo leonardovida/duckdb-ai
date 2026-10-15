@@ -338,6 +338,8 @@ def main(argv=None):
     thresholds = {
         metric: getattr(args, "min_" + metric) for metric in ("accuracy", "macro_f1", "coverage", "class_recall")
     }
+    if args.preflight and (args.required_label or any(value is not None for value in thresholds.values())):
+        parser.error("quality gates require --allow-live; --preflight only validates input data")
     if any(value is not None and (not math.isfinite(value) or value < 0 or value > 1) for value in thresholds.values()):
         parser.error("quality thresholds must be finite numbers between 0 and 1")
     criteria, criteria_sha256 = load_criteria(args.criteria)
