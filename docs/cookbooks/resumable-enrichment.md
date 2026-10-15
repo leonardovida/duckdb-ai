@@ -1,5 +1,9 @@
 ---
-sidebar_position: 9
+sidebar_position: 6
+title: "Resume a local enrichment job"
+sidebar_label: "Resumable enrichment"
+description: "Checkpoint DuckDB LLM enrichment jobs in bounded batches and retry failed rows without repeating saved successes."
+keywords: ["resumable LLM batch", "DuckDB checkpoint", "retry failed rows", "ai_try_complete"]
 ---
 
 # Resume a local enrichment job
@@ -31,7 +35,15 @@ source_id,prompt
 ```
 
 Use Python 3 and a DuckDB shell with `ai` installed, or the source build at
-`build/release/duckdb`. After configuring a provider, run one batch:
+`build/release/duckdb`. The command below uses the local Ollama model
+`qwen3.8:27b`. Pull it first, which is a large download, or pass a model you
+already have with `--model`:
+
+```sh
+ollama pull qwen3.8:27b
+```
+
+Then run one batch:
 
 ```sh
 python3 examples/resumable_enrichment.py \
@@ -91,6 +103,22 @@ new processes, prompt/configuration invalidation, input rejection and rollback
 after killing a process midway through a batch. The crash check also confirms
 that the first provider call is repeated on restart when its result was not committed.
 
+## Persist batch usage
+
+The example also commits `enrichment_batch_usage` with each batch's results. It
+records the configuration hash, completion time, provider row events, transport
+attempts (including retries), failures, cache hits, known reported tokens, and
+unknown-token event counts from `ai_usage_totals()`. These snapshots survive
+reopening and roll back with an uncommitted batch. Treat known tokens as partial
+when unknown events are present; database rollback cannot undo provider charges.
+
+```sql
+SELECT config_hash, sum(request_attempts) AS attempts,
+       sum(known_total_tokens) AS known_tokens,
+       sum(unknown_token_events) AS unknown_events
+FROM enrichment_batch_usage GROUP BY config_hash;
+```
+
 ## Understand the limits
 
 - Run one writer at a time. This example does not coordinate workers or schedule jobs.
@@ -104,6 +132,9 @@ that the first provider call is repeated on restart when its result was not comm
   errors before repeatedly running the job, and use a separate remediation queue
   for permanent failures when adapting this example.
 
-For object-storage exports and usage capture, see
-[production batch enrichment](production-batch-enrichment.md) and
+For a SQL-only version of the same idea, where each step table skips rows that
+already succeeded, see [chain several AI steps](chain-ai-steps.md). For
+object-storage exports and usage capture, see
+[production batch enrichment](production-batch-enrichment.md),
+[Postgres and MySQL enrichment](source-database-enrichment.md) and
 [usage monitoring](usage-cost-observability.md).

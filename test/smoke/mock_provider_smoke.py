@@ -157,7 +157,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             elif "return array violation JSON" in prompt:
                 content = '{"tags":["duck","duck"]}'
             elif "return numeric unique violation JSON" in prompt:
-                content = '[0,-0.0,1]'
+                content = "[0,-0.0,1]"
             elif "return object unique violation JSON" in prompt:
                 content = '[{"a":1,"b":2},{"b":2,"a":1}]'
             elif "return oneOf violation JSON" in prompt:
@@ -180,6 +180,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 content = '["outside"]' if "return unknown labels" in prompt else '["billing, overdue","performance"]'
             elif "class_a" in full_prompt and "class_b" in full_prompt:
                 content = "class_a" if "alpha" in prompt else "class_b"
+            elif "Classify the following text into exactly one" in full_prompt and "neutral" in full_prompt:
+                content = "Positive."
             elif "Classify the following text into exactly one" in full_prompt:
                 content = "outside" if "return unknown label" in prompt else "billing, overdue"
             elif "Score candidate relevance to the search query" in full_prompt:
@@ -192,6 +194,13 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "total_tokens": 10,
                 },
             }
+            if request.get("model") in {"gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"}:
+                payload["usage"] = {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 5,
+                    "total_tokens": 105,
+                    "prompt_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 10},
+                }
             if prompt == "databricks typed content":
                 payload["choices"][0]["message"]["content"] = [
                     {
@@ -291,6 +300,18 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "output_tokens": 4,
                 },
             }
+            if self.claude_requests[-1].get("model") in {
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
+            }:
+                payload["usage"] = {
+                    "input_tokens": 70,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 10,
+                    "output_tokens": 5,
+                }
             self._send_json(payload)
             return
 
@@ -677,7 +698,7 @@ def run_duckdb(duckdb_path: Path, base_url: str) -> str:
         SELECT ai_complete(
             'deepseek builtin pricing smoke',
             provider := 'deepseek',
-            model := 'deepseek-v4-flash',
+            model := 'deepseek-flash',
             base_url := '{base_url}',
             use_builtin_model_prices := true
         ) AS deepseek_completion;
@@ -1439,6 +1460,69 @@ def assert_openai_pricing(output: str):
         raise AssertionError(f"unexpected OpenAI pricing models: {MockProviderHandler.completion_requests}")
 
 
+def run_duckdb_new_model_pricing(duckdb_path: Path, base_url: str) -> str:
+    models = (
+        ("openai", "gpt-6-astra"),
+        ("openai", "gpt-6.1-sol"),
+        ("openai", "gpt-6-sol"),
+        ("openai", "gpt-6-luna"),
+        ("anthropic", "claude-fable-5-1"),
+        ("anthropic", "claude-opus-5-5"),
+        ("anthropic", "claude-sonnet-5-5"),
+        ("anthropic", "claude-haiku-5-5"),
+    )
+    calls = "\n".join(
+        f"SELECT ai_complete('new model pricing', provider := '{provider}', model := '{model}', "
+        f"base_url := '{base_url}', system_prompt := 'stable prefix', prompt_cache := true, "
+        "temperature := 0.2, use_builtin_model_prices := true);"
+        for provider, model in models
+    )
+    sql = f"""
+        {calls}
+        SELECT count(*) = 8 AND bool_and(status = 'ok') AND bool_and(total_tokens = 105) AND
+               bool_and(cache_creation_prompt_tokens = 10) AND
+               bool_and(abs(estimated_cost_usd - CASE model
+                   WHEN 'gpt-6-astra' THEN 0.001095
+                   WHEN 'gpt-6.1-sol' THEN 0.000217
+                   WHEN 'gpt-6-sol' THEN 0.000219
+                   WHEN 'gpt-6-luna' THEN 0.00001095
+                   WHEN 'claude-fable-5-1' THEN 0.001080
+                   WHEN 'claude-opus-5-5' THEN 0.000434
+                   WHEN 'claude-sonnet-5-5' THEN 0.000217
+                   WHEN 'claude-haiku-5-5' THEN 0.00001095
+               END) < 0.000000000001) AS pricing_matches
+        FROM ai_usage();
+    """
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = "openai-test-key"
+    env["ANTHROPIC_API_KEY"] = "anthropic-test-key"
+    result = subprocess.run(
+        [str(duckdb_path), "-c", sql],
+        cwd=repo_root(),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"new model pricing smoke exited with {result.returncode}\n{result.stdout}")
+    return result.stdout
+
+
+def assert_new_model_pricing(output: str):
+    if "pricing_matches" not in output or "true" not in output:
+        raise AssertionError(f"new model pricing did not match catalog: {output}")
+    if len(MockProviderHandler.completion_requests) != 4 or len(MockProviderHandler.claude_requests) != 4:
+        raise AssertionError("expected one mock request for each new text completion model")
+    for request in MockProviderHandler.completion_requests:
+        if "temperature" in request or request.get("prompt_cache_options") != {"mode": "explicit"}:
+            raise AssertionError(f"unsupported GPT-6 request options: {request}")
+    for request in MockProviderHandler.claude_requests:
+        if "temperature" in request or request.get("system", [{}])[0].get("cache_control") != {"type": "ephemeral"}:
+            raise AssertionError(f"unsupported Claude request options: {request}")
+
+
 def run_duckdb_xai_prompt_cache_header(duckdb_path: Path, base_url: str) -> str:
     sql = f"""
         SELECT ai_complete(
@@ -1685,7 +1769,7 @@ def assert_provider_metadata(output: str):
         '"model":"qwen-plus"',
         '"model":"kimi-k3"',
         '"model":"kimi-k2.7-code-highspeed"',
-        '"model":"accounts/fireworks/models/gpt-oss-20b"',
+        '"model":"accounts/fireworks/models/gpt-oss-120b"',
         '"model":"accounts/fireworks/routers/kimi-k2p6-turbo"',
         '"model":"accounts/example/deployments/custom-chat"',
         '"model":"fireworks/qwen3-embedding-8b"',
@@ -1693,7 +1777,7 @@ def assert_provider_metadata(output: str):
         "fireworks_provider_default_temperature",
         '"model":"doubao-seed-2-1-pro-260628"',
         '"model":"step-3.5-flash"',
-        '"model":"gemini-3.7-flash"',
+        '"model":"gemini-3.8-flash"',
         "gemini_sampling_parameter_omitted",
         '"model":"@cf/baai/bge-base-en-v1.5"',
         '"model":"nvidia/nemotron-3-super-120b-a12b"',
@@ -1929,7 +2013,7 @@ def assert_smoke_result(output: str):
     if gemini_price_request["messages"][-1]["content"] != "gemini builtin pricing smoke":
         raise AssertionError(f"unexpected Gemini pricing prompt: {gemini_price_request}")
     deepseek_price_request = MockProviderHandler.completion_requests[29]
-    if deepseek_price_request.get("model") != "deepseek-v4-flash":
+    if deepseek_price_request.get("model") != "deepseek-flash":
         raise AssertionError(f"unexpected DeepSeek pricing model: {deepseek_price_request}")
     if deepseek_price_request["messages"][-1]["content"] != "deepseek builtin pricing smoke":
         raise AssertionError(f"unexpected DeepSeek pricing prompt: {deepseek_price_request}")
@@ -2041,20 +2125,20 @@ def assert_smoke_result(output: str):
         raise AssertionError(f"unexpected packed constant similarity inputs: {constant_similarity_inputs}")
 
     log_deadline = time.time() + 5
-    while len(MockProviderHandler.log_requests) < 50 and time.time() < log_deadline:
+    while len(MockProviderHandler.log_requests) < 45 and time.time() < log_deadline:
         time.sleep(0.05)
-    if len(MockProviderHandler.log_requests) != 50:
+    if len(MockProviderHandler.log_requests) != 45:
         event_counts = {}
         for request in MockProviderHandler.log_requests:
             event = "otlp" if "resourceLogs" in request else request.get("event", "unknown")
             event_counts[event] = event_counts.get(event, 0) + 1
-        raise AssertionError(f"expected 50 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
+        raise AssertionError(f"expected 45 log requests, got {len(MockProviderHandler.log_requests)}: {event_counts}")
     completion_logs = [
         request for request in MockProviderHandler.log_requests if request.get("event") == "ai_completion"
     ]
     embedding_logs = [request for request in MockProviderHandler.log_requests if request.get("event") == "ai_embedding"]
     otlp_logs = [request for request in MockProviderHandler.log_requests if "resourceLogs" in request]
-    if len(completion_logs) != 37 or len(embedding_logs) != 12:
+    if len(completion_logs) != 32 or len(embedding_logs) != 12:
         raise AssertionError(f"unexpected log events: {MockProviderHandler.log_requests}")
     if len(otlp_logs) != 1:
         raise AssertionError(f"expected 1 OTLP log request, got {otlp_logs}")
@@ -2154,12 +2238,12 @@ def assert_smoke_result(output: str):
     if gemini_estimated_cost is None or abs(gemini_estimated_cost - 0.0000165) > 0.000000001:
         raise AssertionError(f"unexpected Gemini builtin pricing cost: {gemini_price_log}")
     deepseek_price_log = next(
-        (request for request in completion_logs if request.get("model") == "deepseek-v4-flash"), None
+        (request for request in completion_logs if request.get("model") == "deepseek-flash"), None
     )
     if deepseek_price_log is None:
         raise AssertionError(f"missing DeepSeek builtin pricing log: {completion_logs}")
     deepseek_estimated_cost = deepseek_price_log.get("estimated_cost_usd")
-    if deepseek_estimated_cost is None or abs(deepseek_estimated_cost - 0.00000704) > 0.000000001:
+    if deepseek_estimated_cost is None or abs(deepseek_estimated_cost - 0.0000057) > 0.000000001:
         raise AssertionError(f"unexpected DeepSeek builtin pricing cost: {deepseek_price_log}")
     databricks_log = next(
         (request for request in completion_logs if request.get("model") == "databricks-gpt-oss-120b"), None
@@ -2337,6 +2421,118 @@ def assert_adaptive_batches(output: str):
         raise AssertionError(
             f"completion context preflight unexpectedly called the provider: {MockProviderHandler.completion_requests}"
         )
+
+
+def run_duckdb_embedding_validation(duckdb_path: Path):
+    requests = []
+    env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
+    env["OPENAI_API_KEY"] = "test-key"
+
+    class Handler(MockProviderHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            inputs = request["input"]
+            inputs = inputs if isinstance(inputs, list) else [inputs]
+            requests.append(inputs)
+            values = [[] if value == "empty validation" else [0.25, -0.5, 1.25] for value in inputs]
+            if self.path == "/api/embed":
+                payload = {"embeddings": values}
+            else:
+                payload = {"data": [{"embedding": value, "index": i} for i, value in enumerate(values)]}
+            payload["usage"] = {"prompt_tokens": 5, "total_tokens": 7}
+            self._send_json(payload)
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for provider in ("openai", "ollama"):
+            requests.clear()
+            profile = f"""
+                CREATE OR REPLACE EXTERNAL MODEL validation_embedding WITH (
+                    provider = '{provider}', model = 'mock-embedding',
+                    location = 'http://127.0.0.1:{server.server_port}', model_type = 'embedding',
+                    options = '{{"embedding_dimensions":DIMENSIONS}}'
+                );
+            """
+            sql = f"""
+                SET duckdb_ai_retry_count = 0;
+                CREATE TEMP TABLE checks(name VARCHAR, passed BOOLEAN);
+                {profile.replace('DIMENSIONS', '4')}
+                INSERT INTO checks SELECT 'scalar dimension rejection',
+                    ai_embed('scalar validation', profile := 'validation_embedding', cache := true,
+                             fail_on_error := false) IS NULL;
+                INSERT INTO checks SELECT 'parse before dimension rejection',
+                    ai_embed('empty validation', profile := 'validation_embedding', cache := true,
+                             fail_on_error := false) IS NULL;
+                INSERT INTO checks SELECT 'parse rejection refetch',
+                    ai_embed('empty validation', profile := 'validation_embedding', cache := true,
+                             fail_on_error := false) IS NULL;
+                INSERT INTO checks SELECT 'scalar failure diagnostics',
+                    count(*) = 3 AND count(*) FILTER (WHERE error =
+                        'AI embedding provider returned 3 dimensions; external model expects 4') = 1
+                    AND count(*) FILTER (WHERE error LIKE '%contained an empty embedding:%') = 2
+                    FROM ai_usage() WHERE status = 'error';
+                {profile.replace('DIMENSIONS', '3')}
+                INSERT INTO checks SELECT 'scalar refetch',
+                    ai_embed('scalar validation', profile := 'validation_embedding', cache := true)[1] = 0.25;
+                INSERT INTO checks SELECT 'batch seed',
+                    sum(ai_embed('batch validation ' || i::VARCHAR,
+                                 profile := 'validation_embedding', cache := true)[1]) = 0.5 FROM range(2) t(i);
+                INSERT INTO checks SELECT 'batch cache replay',
+                    sum(ai_embed('batch validation ' || i::VARCHAR,
+                                 profile := 'validation_embedding', cache := true)[1]) = 0.5 FROM range(2) t(i);
+                INSERT INTO checks SELECT 'cached token attribution',
+                    count(*) = 2 AND list(prompt_tokens ORDER BY event_id) = [3, 2]
+                    AND list(total_tokens ORDER BY event_id) = [4, 3]
+                    AND bool_and(estimated_cost_usd = 0)
+                    FROM ai_usage() WHERE cache_hit;
+                {profile.replace('DIMENSIONS', '4')}
+                INSERT INTO checks SELECT 'cached batch dimension rejection',
+                    count(ai_embed('batch validation ' || i::VARCHAR,
+                                   profile := 'validation_embedding', cache := true,
+                                   fail_on_error := false)) = 0 FROM range(2) t(i);
+                INSERT INTO checks SELECT 'one cached batch failure event',
+                    count(*) = 4 AND count(*) FILTER (WHERE error =
+                        'AI embedding provider returned 3 dimensions; external model expects 4') = 2
+                    FROM ai_usage() WHERE status = 'error';
+                {profile.replace('DIMENSIONS', '3')}
+                INSERT INTO checks SELECT 'evicted batch row refetch',
+                    sum(ai_embed('batch validation ' || i::VARCHAR,
+                                 profile := 'validation_embedding', cache := true)[1]) = 0.5 FROM range(2) t(i);
+                SELECT * FROM checks ORDER BY name;
+            """
+            result = subprocess.run(
+                [str(duckdb_path), "-json", "-c", sql],
+                cwd=repo_root(),
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise AssertionError(f"{provider} embedding validation failed\n{result.stdout}\n{result.stderr}")
+            # External-model DDL also emits JSON results. Inspect the final SELECT.
+            output = result.stdout.lstrip()
+            decoder = json.JSONDecoder()
+            while output:
+                checks, offset = decoder.raw_decode(output)
+                output = output[offset:].lstrip()
+            if len(checks) != 11 or any(check["passed"] is not True for check in checks):
+                raise AssertionError(f"{provider} embedding validation checks failed: {checks}")
+            if requests != [
+                ["scalar validation"],
+                ["empty validation"],
+                ["empty validation"],
+                ["scalar validation"],
+                ["batch validation 0", "batch validation 1"],
+                ["batch validation 0"],
+            ]:
+                raise AssertionError(f"{provider} embedding cache eviction/refetch changed: {requests}")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 def run_duckdb_embedding_usage_distribution(duckdb_path: Path, base_url: str) -> str:
@@ -2722,6 +2918,11 @@ def main():
     from provider_api_smoke import run as run_provider_api_smoke
     from jev_provider_smoke import run as run_jev_provider_smoke
     from jev_typed_smoke import run as run_jev_typed_smoke
+    from repository_regression_smoke import run as run_repository_regression_smoke
+    from repository_pass2_smoke import run as run_repository_pass2_smoke
+    from volatile_offset_smoke import run as run_volatile_offset_smoke
+    from response_lookup_smoke import run as run_response_lookup_smoke
+    from token_budget_smoke import run as run_token_budget_smoke
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2771,6 +2972,9 @@ def main():
         adaptive_batch_output = run_duckdb_adaptive_batches(args.duckdb, f"http://127.0.0.1:{port}")
         assert_adaptive_batches(adaptive_batch_output)
         MockProviderHandler.reset()
+        run_duckdb_embedding_validation(args.duckdb)
+        run_response_lookup_smoke(args.duckdb)
+        run_token_budget_smoke(args.duckdb)
         usage_distribution_output = run_duckdb_embedding_usage_distribution(args.duckdb, f"http://127.0.0.1:{port}")
         assert_embedding_usage_distribution(usage_distribution_output)
         MockProviderHandler.reset()
@@ -2813,6 +3017,9 @@ def main():
         openai_pricing_output = run_duckdb_openai_pricing(args.duckdb, f"http://127.0.0.1:{port}")
         assert_openai_pricing(openai_pricing_output)
         MockProviderHandler.reset()
+        new_model_pricing_output = run_duckdb_new_model_pricing(args.duckdb, f"http://127.0.0.1:{port}")
+        assert_new_model_pricing(new_model_pricing_output)
+        MockProviderHandler.reset()
         xai_header_output = run_duckdb_xai_prompt_cache_header(args.duckdb, f"http://127.0.0.1:{port}")
         assert_xai_prompt_cache_header(xai_header_output)
         MockProviderHandler.reset()
@@ -2851,6 +3058,9 @@ def main():
     run_provider_api_smoke(args.duckdb)
     run_jev_provider_smoke(args.duckdb)
     run_jev_typed_smoke(args.duckdb)
+    run_repository_regression_smoke(args.duckdb)
+    run_repository_pass2_smoke(args.duckdb)
+    run_volatile_offset_smoke(args.duckdb)
     print("mock provider smoke passed")
 
 

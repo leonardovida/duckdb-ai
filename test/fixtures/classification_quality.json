@@ -1,0 +1,12 @@
+{
+  "description": "Hand-authored synthetic regression data, independent of teacher outputs; not a production quality benchmark.",
+  "labels": ["billing", "technical", "other"],
+  "rows": [
+    {"id": "1", "text": "Please refund the duplicate invoice.", "label": "billing", "prediction": "billing", "failed": false},
+    {"id": "2", "text": "发票金额不正确", "label": "billing", "prediction": "technical", "failed": false},
+    {"id": "3", "text": "My application crashes on startup.", "label": "technical", "prediction": "technical", "failed": false},
+    {"id": "4", "text": "La facture est incorrecte.", "label": "billing", "prediction": null, "failed": true},
+    {"id": "5", "text": "What is the weather tomorrow?", "label": "other", "prediction": "other", "failed": false},
+    {"id": "6", "text": "The sign-in page freezes.", "label": "technical", "prediction": "technical", "failed": false}
+  ]
+}

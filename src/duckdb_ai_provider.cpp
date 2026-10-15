@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "duckdb_ai_provider.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -18,6 +19,7 @@
 #include <curl/curl.h>
 #include <deque>
 #include <list>
+#include <locale>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -103,13 +105,13 @@ constexpr size_t MAX_HTTP_RESPONSE_BYTES_LIMIT = 1024ULL * 1024ULL * 1024ULL;
 constexpr int64_t MAX_TOKEN_LIMIT_PER_MINUTE = 10000000000LL;
 constexpr int64_t MAX_PROVIDER_CHUNK_WORKERS = 64;
 constexpr int64_t DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE = 512;
-std::once_flag curl_global_init_once;
-std::atomic<uint64_t> next_operation_id {1};
+std::once_flag curl_global_init_once;        // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<uint64_t> next_operation_id {1}; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 const size_t DEFAULT_MAX_RESPONSE_CACHE_ENTRIES = 1024;
 constexpr size_t DEFAULT_MAX_RESPONSE_CACHE_BYTES = 64ULL * 1024ULL * 1024ULL;
 
 struct ProviderRuntimeState : public ObjectCacheEntry {
-	~ProviderRuntimeState();
+	~ProviderRuntimeState() override;
 
 	static std::string ObjectType() {
 		return "duckdb_ai_runtime_state";
@@ -124,9 +126,10 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	}
 
 	std::mutex usage_mutex;
-	std::vector<UsageEvent> usage_events;
+	std::deque<UsageEvent> usage_events;
 	uint64_t next_usage_event_id = 1;
 	uint64_t dropped_usage_events = 0;
+	UsageTotals usage_totals;
 
 	std::mutex provider_control_mutex;
 	std::condition_variable provider_control_cv;
@@ -152,7 +155,10 @@ struct ProviderRuntimeState : public ObjectCacheEntry {
 	uint64_t dropped_usage_log_events = 0;
 };
 
-ProviderRuntimeState fallback_runtime_state;
+ProviderRuntimeState &FallbackRuntimeState() {
+	static ProviderRuntimeState state;
+	return state;
+}
 
 ProviderRuntimeState &RuntimeState(ClientContext &context) {
 	return *ObjectCache::GetObjectCache(context).GetOrCreate<ProviderRuntimeState>(ProviderRuntimeState::ObjectType());
@@ -162,7 +168,7 @@ ProviderRuntimeState &RuntimeState(const CompletionOptions &options) {
 	if (options.runtime_state) {
 		return *reinterpret_cast<ProviderRuntimeState *>(options.runtime_state);
 	}
-	return options.client_context ? RuntimeState(*options.client_context) : fallback_runtime_state;
+	return options.client_context ? RuntimeState(*options.client_context) : FallbackRuntimeState();
 }
 
 std::string LowerAscii(std::string input) {
@@ -196,6 +202,9 @@ std::string NormalizeProviderNameInternal(const std::string &provider_input) {
 	auto provider = LowerAscii(provider_input);
 	if (provider == "jev") {
 		return "typesafe";
+	}
+	if (provider == "system_one" || provider == "decision") {
+		return "systemone";
 	}
 	if (provider == "xiaomi" || provider == "xiaomi_mimo") {
 		return "mimo";
@@ -662,6 +671,11 @@ bool EndsWith(const std::string &value, const std::string &suffix) {
 	return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+bool IsDecisionProtocol(const std::string &protocol) {
+	return protocol == "typesafe_jev" || protocol == "systemone" || protocol == "cloudflare_decision" ||
+	       protocol == "perplexity_decisions";
+}
+
 bool StartsWith(const std::string &value, const std::string &prefix) {
 	return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
 }
@@ -878,7 +892,15 @@ std::string JsonEscape(const std::string &input) {
 
 std::string JsonDouble(double input) {
 	std::ostringstream out;
+	out.imbue(std::locale::classic());
 	out << std::setprecision(15) << input;
+	return out.str();
+}
+
+std::string JsonDoubleExact(double input) {
+	std::ostringstream out;
+	out.imbue(std::locale::classic());
+	out << std::setprecision(std::numeric_limits<double>::max_digits10) << input;
 	return out.str();
 }
 
@@ -904,6 +926,25 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "Jev input tokens only", "2026-09-18"},
 	    {"typesafe", "jev-1.13.0", "completion", 0.042, 0.00, "https://docs.typesafe.ai/models.md",
 	     "Jev input tokens only", "2026-09-18"},
+	    {"cloudflare", "clef", "completion", 0.24, 0.00, "https://developers.cloudflare.com/workers-ai/models/clef/",
+	     "Clef decision model input tokens only", "2026-10-06"},
+	    {"cloudflare", "clef-flash", "completion", 0.09, 0.00,
+	     "https://developers.cloudflare.com/workers-ai/models/clef-flash/", "Clef decision model input tokens only",
+	     "2026-10-08"},
+	    {"perplexity", "pplx-decider-v1.1-27b", "completion", 0.02, 0.00,
+	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-08"},
+	    {"perplexity", "pplx-decider-v1-27b", "completion", 0.02, 0.00,
+	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-08"},
+	    {"openai", "gpt-6-astra", "completion", 10.00, 50.00,
+	     "https://developers.openai.com/api/docs/models/gpt-6-astra", "standard text pricing up to 272K input tokens",
+	     "2026-09-30"},
+	    {"openai", "gpt-6.1-sol", "completion", 2.00, 10.00,
+	     "https://developers.openai.com/api/docs/models/gpt-6.1-sol", "standard text pricing up to 272K input tokens",
+	     "2026-09-30"},
+	    {"openai", "gpt-6-sol", "completion", 2.00, 10.00, "https://developers.openai.com/api/docs/models/gpt-6-sol",
+	     "standard text pricing up to 272K input tokens", "2026-09-30"},
+	    {"openai", "gpt-6-luna", "completion", 0.10, 0.50, "https://developers.openai.com/api/docs/models/gpt-6-luna",
+	     "standard text pricing up to 272K input tokens", "2026-09-30"},
 	    {"openai", "gpt-5.6", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
 	     "standard text token pricing; alias routes to gpt-5.6-sol", "2026-08-26"},
 	    {"openai", "gpt-5.6-sol", "completion", 4.00, 20.00, "https://developers.openai.com/api/docs/models",
@@ -923,6 +964,15 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	    {"openai", "text-embedding-3-small", "embedding", 0.02, -1,
 	     "https://developers.openai.com/api/docs/models/text-embedding-3-small", "embedding input tokens only",
 	     "2026-06-30"},
+	    {"anthropic", "claude-fable-5-1", "completion", 10.00, 50.00,
+	     "https://platform.claude.com/docs/en/models/fable-5-1/overview", "standard text token pricing", "2026-09-30"},
+	    {"anthropic", "claude-opus-5-5", "completion", 4.00, 20.00,
+	     "https://platform.claude.com/docs/en/models/opus-5-5/overview", "standard text token pricing", "2026-09-30"},
+	    {"anthropic", "claude-sonnet-5-5", "completion", 2.00, 10.00,
+	     "https://platform.claude.com/docs/en/models/sonnet-5-5/overview", "standard text token pricing", "2026-09-30"},
+	    {"anthropic", "claude-haiku-5-5", "completion", 0.10, 0.50,
+	     "https://platform.claude.com/docs/en/about-claude/pricing",
+	     "standard text token pricing for prompts up to 100K tokens", "2026-10-08"},
 	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
 	    {"anthropic", "claude-sonnet-5", "completion", 2.00, 10.00,
@@ -935,14 +985,18 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
 	    {"gemini", "gemini-3.7-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
+	    {"gemini", "gemini-3.8-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
+	     "standard text token pricing starting 2027-01-01", "2026-10-08"},
 	    {"gemini", "gemini-embedding-2", "embedding", 0.20, -1, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text embedding input tokens only", "2026-07-17"},
 	    {"mistral", "mistral-small-latest", "completion", 0.15, 0.60, "https://mistral.ai/pricing/api/",
 	     "standard text token pricing", "2026-07-08"},
 	    {"mistral", "mistral-embed", "embedding", 0.10, -1, "https://mistral.ai/pricing/",
 	     "embedding input tokens only", "2026-06-30"},
-	    {"deepseek", "deepseek-v4-flash", "completion", 0.44, 1.32, "https://api-docs.deepseek.com/quick_start/pricing",
-	     "peak-hour cache-miss pricing; off-peak rates are 50% lower", "2026-09-04"},
+	    {"deepseek", "deepseek-flash", "completion", 0.30, 1.20, "https://api-docs.deepseek.com/quick_start/pricing",
+	     "peak-hour cache-miss pricing; off-peak rates are 50% lower", "2026-10-08"},
+	    {"deepseek", "deepseek-v4-flash", "completion", 0.30, 1.20, "https://api-docs.deepseek.com/updates",
+	     "retired ID routed to deepseek-flash; peak-hour cache-miss pricing", "2026-10-08"},
 	    {"zai", "glm-4.7-flash", "completion", 0.00, 0.00, "https://docs.z.ai/guides/overview/pricing",
 	     "standard text token pricing", "2026-06-30"},
 	    {"zai", "glm-4.7-flashx", "completion", 0.07, 0.40, "https://docs.z.ai/guides/overview/pricing",
@@ -953,14 +1007,28 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "live model feed pricing", "2026-06-30"},
 	    {"openrouter", "anthropic/claude-haiku-4.5", "completion", 1.00, 5.00, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
+	    {"openrouter", "anthropic/claude-haiku-5.5", "completion", 0.10, 0.50, "https://openrouter.ai/api/v1/models",
+	     "live model feed pricing", "2026-10-08"},
 	    {"openrouter", "z-ai/glm-4.7-flash", "completion", 0.06, 0.40, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
 	    {"xai", "grok-4.5", "completion", 2.00, 6.00, "https://docs.x.ai/developers/models/grok-4.5",
 	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
 	    {"xai", "grok-4.6", "completion", 2.00, 6.00, "https://docs.x.ai/developers/grok-4-6",
 	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
+	    {"xai", "grok-4.7", "completion", 2.00, 6.00, "https://docs.x.ai/docs/models",
+	     "standard text token pricing for prompts below 200K tokens", "2026-10-08"},
 	};
 	return prices;
+}
+
+void ApplyCurrentModelPrice(ModelPrice &price) {
+	if (price.provider == "gemini" &&
+	    (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash" || price.model == "gemini-3.8-flash") &&
+	    price.operation == "completion" && CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
+		price.input_token_price_per_million = 0.75;
+		price.output_token_price_per_million = 3.75;
+		price.source_note = "introductory text token pricing through 2026-12-31";
+	}
 }
 
 bool TryFindBuiltinModelPrice(const std::string &provider, const std::string &model, const std::string &operation,
@@ -968,10 +1036,11 @@ bool TryFindBuiltinModelPrice(const std::string &provider, const std::string &mo
 	auto provider_key = LowerAscii(provider);
 	auto model_key = LowerAscii(model);
 	auto operation_key = LowerAscii(operation);
-	for (auto &price : ModelPrices()) {
+	for (auto &price : BuiltinModelPrices()) {
 		if (LowerAscii(price.provider) == provider_key && LowerAscii(price.model) == model_key &&
 		    LowerAscii(price.operation) == operation_key) {
 			result = price;
+			ApplyCurrentModelPrice(result);
 			return true;
 		}
 	}
@@ -1154,9 +1223,8 @@ std::string ResponseCacheKey(const std::string &operation, const ProviderConfig 
 	       api_key_hash + "\n" + payload;
 }
 
-void TouchResponseCacheEntry(ProviderRuntimeState &state, CachedHttpResponse &entry, const std::string &cache_key) {
-	state.response_cache_order.erase(entry.order_entry);
-	entry.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
+void TouchResponseCacheEntry(ProviderRuntimeState &state, CachedHttpResponse &entry) {
+	state.response_cache_order.splice(state.response_cache_order.end(), state.response_cache_order, entry.order_entry);
 }
 
 void RemoveCachedResponse(ProviderRuntimeState &state, const std::string &cache_key) {
@@ -1165,7 +1233,7 @@ void RemoveCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 	if (entry == state.response_cache.end()) {
 		return;
 	}
-	auto entry_bytes = cache_key.size() + entry->second.response.body.size();
+	auto entry_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 	state.response_cache_bytes =
 	    state.response_cache_bytes >= entry_bytes ? state.response_cache_bytes - entry_bytes : 0;
 	state.response_cache_order.erase(entry->second.order_entry);
@@ -1180,7 +1248,7 @@ bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 		return false;
 	}
 	if (ResponseCacheEntryExpired(entry->second, options)) {
-		auto entry_bytes = cache_key.size() + entry->second.response.body.size();
+		auto entry_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 		state.response_cache_bytes =
 		    state.response_cache_bytes >= entry_bytes ? state.response_cache_bytes - entry_bytes : 0;
 		state.response_cache_order.erase(entry->second.order_entry);
@@ -1191,35 +1259,42 @@ bool TryGetCachedResponse(ProviderRuntimeState &state, const std::string &cache_
 	response.elapsed_ms = 0;
 	response.retries = 0;
 	response.cache_hit = true;
-	TouchResponseCacheEntry(state, entry->second, cache_key);
+	TouchResponseCacheEntry(state, entry->second);
 	return true;
 }
 
 void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_key, const HttpResponse &response,
                          const CompletionOptions &options) {
 	auto max_entries = MaxResponseCacheEntries(options);
-	auto response_bytes = cache_key.size() + response.body.size();
-	if (max_entries == 0 || response_bytes > DEFAULT_MAX_RESPONSE_CACHE_BYTES) {
+	// The map and recency list each retain their own key copy.
+	if (max_entries == 0 || cache_key.size() > DEFAULT_MAX_RESPONSE_CACHE_BYTES / 2 ||
+	    response.body.size() > DEFAULT_MAX_RESPONSE_CACHE_BYTES - 2 * cache_key.size()) {
 		return;
 	}
+	auto response_bytes = 2 * cache_key.size() + response.body.size();
 	std::lock_guard<std::mutex> lock(state.response_cache_mutex);
+	CachedHttpResponse cached;
+	cached.response = response;
+	cached.response.cache_hit = false;
+	cached.created_at = std::chrono::steady_clock::now();
 	auto entry = state.response_cache.find(cache_key);
 	if (entry != state.response_cache.end()) {
-		auto previous_bytes = cache_key.size() + entry->second.response.body.size();
+		auto previous_bytes = 2 * cache_key.size() + entry->second.response.body.size();
 		state.response_cache_bytes =
 		    state.response_cache_bytes >= previous_bytes ? state.response_cache_bytes - previous_bytes : 0;
-		entry->second.response = response;
-		entry->second.response.cache_hit = false;
-		entry->second.created_at = std::chrono::steady_clock::now();
+		cached.order_entry = entry->second.order_entry;
+		entry->second = std::move(cached);
 		state.response_cache_bytes += response_bytes;
-		TouchResponseCacheEntry(state, entry->second, cache_key);
+		TouchResponseCacheEntry(state, entry->second);
 	} else {
-		CachedHttpResponse cached;
-		cached.response = response;
-		cached.response.cache_hit = false;
-		cached.created_at = std::chrono::steady_clock::now();
 		cached.order_entry = state.response_cache_order.insert(state.response_cache_order.end(), cache_key);
-		state.response_cache.emplace(cache_key, std::move(cached));
+		auto order_entry = cached.order_entry;
+		try {
+			state.response_cache.emplace(cache_key, std::move(cached));
+		} catch (...) {
+			state.response_cache_order.erase(order_entry);
+			throw;
+		}
 		state.response_cache_bytes += response_bytes;
 	}
 	while (
@@ -1229,7 +1304,7 @@ void StoreCachedResponse(ProviderRuntimeState &state, const std::string &cache_k
 		state.response_cache_order.pop_front();
 		auto oldest_entry = state.response_cache.find(oldest);
 		if (oldest_entry != state.response_cache.end()) {
-			auto oldest_bytes = oldest.size() + oldest_entry->second.response.body.size();
+			auto oldest_bytes = 2 * oldest.size() + oldest_entry->second.response.body.size();
 			state.response_cache_bytes =
 			    state.response_cache_bytes >= oldest_bytes ? state.response_cache_bytes - oldest_bytes : 0;
 			state.response_cache.erase(oldest_entry);
@@ -1300,10 +1375,134 @@ struct JsonValue {
 	bool boolean_value = false;
 	double number_value = 0;
 	bool number_is_integer = false;
+	//! Preserve the JSON numeric lexeme for exact decimal comparisons and projection.
+	std::string number_text;
 	std::string string_value;
 	std::vector<JsonValue> array_value;
 	std::map<std::string, JsonValue> object_value;
+	//! Object keys in document order, so schema properties keep the order the user wrote.
+	std::vector<std::string> object_keys;
 };
+
+int CompareIntegerText(const std::string &left, const std::string &right) {
+	auto left_negative = left[0] == '-';
+	auto right_negative = right[0] == '-';
+	if (left_negative != right_negative) {
+		return left_negative ? -1 : 1;
+	}
+	auto result = left.size() == right.size() ? left.compare(right) : (left.size() < right.size() ? -1 : 1);
+	return left_negative ? -result : result;
+}
+
+std::string UnsignedDecimalAdd(const std::string &left, const std::string &right) {
+	std::string result(std::max(left.size(), right.size()) + 1, '0');
+	idx_t l = left.size(), r = right.size(), output = result.size();
+	int carry = 0;
+	while (l > 0 || r > 0 || carry > 0) {
+		auto digit = carry + (l > 0 ? left[--l] - '0' : 0) + (r > 0 ? right[--r] - '0' : 0);
+		result[--output] = static_cast<char>('0' + digit % 10);
+		carry = digit / 10;
+	}
+	auto first = result.find_first_not_of('0');
+	return first == std::string::npos ? "0" : result.substr(first);
+}
+
+// left >= right, with both magnitudes normalized and nonnegative.
+std::string UnsignedDecimalSubtract(const std::string &left, const std::string &right) {
+	auto result = left;
+	idx_t l = left.size(), r = right.size();
+	int borrow = 0;
+	while (l > 0) {
+		auto digit = left[--l] - '0' - borrow - (r > 0 ? right[--r] - '0' : 0);
+		borrow = digit < 0 ? 1 : 0;
+		result[l] = static_cast<char>('0' + digit + borrow * 10);
+	}
+	auto first = result.find_first_not_of('0');
+	return first == std::string::npos ? "0" : result.substr(first);
+}
+
+std::string AddDecimalExponent(std::string exponent, int64_t adjustment) {
+	auto negative = !exponent.empty() && exponent[0] == '-';
+	auto first = exponent.find_first_not_of("+-0");
+	auto magnitude = first == std::string::npos ? std::string("0") : exponent.substr(first);
+	if (magnitude == "0") {
+		negative = false;
+	}
+	// adjustment is bounded by the input length, not by the exponent lexeme.
+	auto adjustment_negative = adjustment < 0;
+	auto other = std::to_string(adjustment_negative ? -adjustment : adjustment);
+	if (negative == adjustment_negative) {
+		magnitude = UnsignedDecimalAdd(magnitude, other);
+	} else if (CompareIntegerText(magnitude, other) >= 0) {
+		magnitude = UnsignedDecimalSubtract(magnitude, other);
+	} else {
+		magnitude = UnsignedDecimalSubtract(other, magnitude);
+		negative = adjustment_negative;
+	}
+	return negative && magnitude != "0" ? "-" + magnitude : magnitude;
+}
+
+struct ExactDecimalNumber {
+	bool negative;
+	std::string digits;
+	//! Position of the decimal point relative to the first significant digit.
+	std::string order;
+};
+
+ExactDecimalNumber ExactDecimal(const JsonValue &value) {
+	auto text = value.number_text.empty() ? JsonDoubleExact(value.number_value) : value.number_text;
+	ExactDecimalNumber result {text[0] == '-', "", "0"};
+	auto exponent_start = text.find_first_of("eE");
+	auto coefficient_end = exponent_start == std::string::npos ? text.size() : exponent_start;
+	auto point = text.find('.');
+	auto fraction_digits = point == std::string::npos ? 0 : coefficient_end - point - 1;
+	for (idx_t i = result.negative ? 1 : 0; i < coefficient_end; i++) {
+		if (text[i] != '.') {
+			result.digits += text[i];
+		}
+	}
+	auto first = result.digits.find_first_not_of('0');
+	if (first == std::string::npos) {
+		return {false, "0", "0"};
+	}
+	result.digits.erase(0, first);
+	auto exponent = exponent_start == std::string::npos ? std::string("0") : text.substr(exponent_start + 1);
+	result.order = AddDecimalExponent(exponent, NumericCast<int64_t>(result.digits.size()) -
+	                                                NumericCast<int64_t>(fraction_digits));
+	result.digits.erase(result.digits.find_last_not_of('0') + 1);
+	return result;
+}
+
+std::string ExactIntegerText(const JsonValue &value) {
+	auto number = ExactDecimal(value);
+	if (number.digits == "0") {
+		return "0";
+	}
+	if (CompareIntegerText(number.order, std::to_string(number.digits.size())) < 0) {
+		return "";
+	}
+	// Nonzero numbers accepted by the parser are finite doubles, so integral
+	// values have at most 309 decimal digits. Check before narrowing the exponent.
+	if (CompareIntegerText(number.order, "309") > 0) {
+		throw InvalidInputException("JSON integer is outside the finite DOUBLE range");
+	}
+	auto length = static_cast<size_t>(std::stoull(number.order));
+	return (number.negative ? "-" : "") + number.digits + std::string(length - number.digits.size(), '0');
+}
+
+bool IsExactIntegerMultiple(std::string magnitude, const std::string &divisor) {
+	if (magnitude[0] == '-') {
+		magnitude.erase(0, 1);
+	}
+	std::string remainder = "0";
+	for (auto digit : magnitude) {
+		remainder = remainder == "0" ? std::string(1, digit) : remainder + digit;
+		while (CompareIntegerText(remainder, divisor) >= 0) {
+			remainder = UnsignedDecimalSubtract(remainder, divisor);
+		}
+	}
+	return remainder == "0";
+}
 
 using YyjsonDocPtr = std::unique_ptr<duckdb_yyjson::yyjson_doc, decltype(&duckdb_yyjson::yyjson_doc_free)>;
 
@@ -1314,10 +1513,48 @@ std::string YyjsonParseError(const duckdb_yyjson::yyjson_read_err &read_error) {
 	return "malformed JSON at byte " + std::to_string(read_error.pos) + ": " + read_error.msg;
 }
 
-YyjsonDocPtr ReadYyjsonDocument(const std::string &input, std::string &error) {
+//! Code that walks parsed JSON (conversion, lookups, schema validation) recurses once per nesting level, so a deeply
+//! nested reply, which a looping model can produce, would overflow the stack. Such documents are rejected unparsed.
+constexpr idx_t MAX_JSON_NESTING_DEPTH = 512;
+
+bool JsonNestingWithinLimitInternal(const std::string &input) {
+	idx_t depth = 0;
+	bool in_string = false;
+	bool escaped = false;
+	for (auto c : input) {
+		if (in_string) {
+			if (escaped) {
+				escaped = false;
+			} else if (c == '\\') {
+				escaped = true;
+			} else if (c == '"') {
+				in_string = false;
+			}
+			continue;
+		}
+		if (c == '"') {
+			in_string = true;
+		} else if (c == '[' || c == '{') {
+			if (++depth > MAX_JSON_NESTING_DEPTH) {
+				return false;
+			}
+		} else if ((c == ']' || c == '}') && depth > 0) {
+			depth--;
+		}
+	}
+	return true;
+}
+
+YyjsonDocPtr ReadYyjsonDocument(const std::string &input, std::string &error,
+                                duckdb_yyjson::yyjson_read_flag flags = duckdb_yyjson::YYJSON_READ_NOFLAG) {
+	if (!JsonNestingWithinLimitInternal(input)) {
+		error = "JSON is nested more than " + std::to_string(MAX_JSON_NESTING_DEPTH) + " levels deep";
+		return YyjsonDocPtr(nullptr, duckdb_yyjson::yyjson_doc_free);
+	}
 	duckdb_yyjson::yyjson_read_err read_error;
-	auto doc = duckdb_yyjson::yyjson_read_opts(const_cast<char *>(input.data()), input.size(),
-	                                           duckdb_yyjson::YYJSON_READ_NOFLAG, nullptr, &read_error);
+	// No in-situ parsing: yyjson copies this input before processing it.
+	auto mutable_input = const_cast<char *>(input.data()); // NOLINT(cppcoreguidelines-pro-type-const-cast)
+	auto doc = duckdb_yyjson::yyjson_read_opts(mutable_input, input.size(), flags, nullptr, &read_error);
 	if (!doc) {
 		error = YyjsonParseError(read_error);
 		return YyjsonDocPtr(nullptr, duckdb_yyjson::yyjson_doc_free);
@@ -1401,10 +1638,27 @@ bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, st
 		target.boolean_value = duckdb_yyjson::yyjson_get_bool(source);
 		return true;
 	}
+	if (duckdb_yyjson::yyjson_is_raw(source)) {
+		target.type = JsonValueType::NUMBER;
+		auto text = std::string(duckdb_yyjson::yyjson_get_raw(source), duckdb_yyjson::yyjson_get_len(source));
+		target.number_value = std::strtod(text.c_str(), nullptr);
+		if (!std::isfinite(target.number_value)) {
+			error = "JSON number is outside the finite DOUBLE range";
+			return false;
+		}
+		target.number_text = std::move(text);
+		target.number_is_integer = !ExactIntegerText(target).empty();
+		return true;
+	}
 	if (duckdb_yyjson::yyjson_is_num(source)) {
 		target.type = JsonValueType::NUMBER;
 		target.number_value = duckdb_yyjson::yyjson_get_num(source);
 		target.number_is_integer = duckdb_yyjson::yyjson_is_int(source);
+		if (target.number_is_integer) {
+			target.number_text = duckdb_yyjson::yyjson_is_uint(source)
+			                         ? std::to_string(duckdb_yyjson::yyjson_get_uint(source))
+			                         : std::to_string(duckdb_yyjson::yyjson_get_sint(source));
+		}
 		return true;
 	}
 	if (duckdb_yyjson::yyjson_is_str(source)) {
@@ -1437,7 +1691,11 @@ bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, st
 			if (!ConvertYyjsonValue(value, child, error)) {
 				return false;
 			}
-			target.object_value[YyjsonString(key)] = std::move(child);
+			auto name = YyjsonString(key);
+			if (target.object_value.find(name) == target.object_value.end()) {
+				target.object_keys.push_back(name);
+			}
+			target.object_value[name] = std::move(child);
 		}
 		return true;
 	}
@@ -1603,7 +1861,7 @@ bool FindYyjsonNumberArrayField(duckdb_yyjson::yyjson_val *value, const std::str
 }
 
 bool ParseJsonValueDocument(const std::string &input, JsonValue &value, std::string &error) {
-	auto doc = ReadYyjsonDocument(input, error);
+	auto doc = ReadYyjsonDocument(input, error, duckdb_yyjson::YYJSON_READ_NUMBER_AS_RAW);
 	if (!doc) {
 		return false;
 	}
@@ -1633,16 +1891,16 @@ bool SchemaNumberField(const JsonValue &schema, const std::string &field, double
 }
 
 bool SchemaNonNegativeIntegerField(const JsonValue &schema, const std::string &field, int64_t &value) {
-	double number_value;
-	if (!SchemaNumberField(schema, field, number_value)) {
+	auto field_value = ObjectField(schema, field);
+	if (!field_value || field_value->type != JsonValueType::NUMBER) {
 		return false;
 	}
-	if (!std::isfinite(number_value) || number_value < 0 ||
-	    number_value > static_cast<double>(std::numeric_limits<int64_t>::max()) ||
-	    std::floor(number_value) != number_value) {
+	auto integer = ExactIntegerText(*field_value);
+	if (integer.empty() || integer[0] == '-' ||
+	    CompareIntegerText(integer, std::to_string(std::numeric_limits<int64_t>::max())) > 0) {
 		return false;
 	}
-	value = static_cast<int64_t>(number_value);
+	value = std::stoll(integer);
 	return true;
 }
 
@@ -1650,7 +1908,7 @@ bool IsJsonInteger(const JsonValue &value) {
 	if (value.type != JsonValueType::NUMBER) {
 		return false;
 	}
-	return value.number_is_integer || std::floor(value.number_value) == value.number_value;
+	return value.number_is_integer || !ExactIntegerText(value).empty();
 }
 
 std::string JsonTypeName(const JsonValue &value) {
@@ -1671,9 +1929,35 @@ std::string JsonTypeName(const JsonValue &value) {
 	return "unknown";
 }
 
+int CompareJsonNumbers(const JsonValue &left, const JsonValue &right) {
+	auto l = ExactDecimal(left);
+	auto r = ExactDecimal(right);
+	if (l.digits == "0" || r.digits == "0") {
+		if (l.digits == r.digits) {
+			return 0;
+		}
+		return l.digits == "0" ? (r.negative ? 1 : -1) : (l.negative ? -1 : 1);
+	}
+	if (l.negative != r.negative) {
+		return l.negative ? -1 : 1;
+	}
+	auto comparison = CompareIntegerText(l.order, r.order);
+	if (comparison == 0) {
+		for (idx_t i = 0; i < std::max(l.digits.size(), r.digits.size()); i++) {
+			auto a = i < l.digits.size() ? l.digits[i] : '0';
+			auto b = i < r.digits.size() ? r.digits[i] : '0';
+			if (a != b) {
+				comparison = a < b ? -1 : 1;
+				break;
+			}
+		}
+	}
+	return l.negative ? -comparison : comparison;
+}
+
 bool JsonValueEquals(const JsonValue &left, const JsonValue &right) {
 	if (left.type == JsonValueType::NUMBER && right.type == JsonValueType::NUMBER) {
-		return left.number_value == right.number_value;
+		return CompareJsonNumbers(left, right) == 0;
 	}
 	if (left.type != right.type) {
 		return false;
@@ -1725,8 +2009,13 @@ size_t JsonValueHash(const JsonValue &value) {
 		HashCombine(hash, std::hash<bool> {}(value.boolean_value));
 		return hash;
 	case JsonValueType::NUMBER:
-		// JsonValueEquals treats positive and negative zero as equal.
-		HashCombine(hash, std::hash<double> {}(value.number_value == 0 ? 0.0 : value.number_value));
+		// Equivalent decimal spellings, including signed zero, share a hash.
+		{
+			auto number = ExactDecimal(value);
+			HashCombine(hash, std::hash<bool> {}(number.negative));
+			HashCombine(hash, std::hash<std::string> {}(number.digits));
+			HashCombine(hash, std::hash<std::string> {}(number.order));
+		}
 		return hash;
 	case JsonValueType::STRING:
 		HashCombine(hash, std::hash<std::string> {}(value.string_value));
@@ -1753,7 +2042,7 @@ std::string JsonValueToJson(const JsonValue &value) {
 	case JsonValueType::BOOLEAN:
 		return value.boolean_value ? "true" : "false";
 	case JsonValueType::NUMBER:
-		return JsonDouble(value.number_value);
+		return value.number_text.empty() ? JsonDoubleExact(value.number_value) : value.number_text;
 	case JsonValueType::STRING:
 		return "\"" + JsonEscape(value.string_value) + "\"";
 	case JsonValueType::ARRAY: {
@@ -1799,6 +2088,7 @@ bool SchemaTypeAllows(const JsonValue &type_schema, const JsonValue &value) {
 				return true;
 			}
 		}
+		return false;
 	}
 	return true;
 }
@@ -1817,11 +2107,20 @@ std::string SchemaTypeName(const JsonValue &schema) {
 		return type_schema->string_value;
 	}
 	if (type_schema && type_schema->type == JsonValueType::ARRAY) {
+		std::set<std::string> types;
 		for (auto &entry : type_schema->array_value) {
 			if (entry.type == JsonValueType::STRING && entry.string_value != "null") {
-				return entry.string_value;
+				types.insert(entry.string_value);
 			}
 		}
+		if (types.size() == 1) {
+			return *types.begin();
+		}
+		if (types == std::set<std::string> {"integer", "number"}) {
+			return "number";
+		}
+		// Mixed types such as ["string", "integer"] have no single column type, so keep the JSON text.
+		return types.empty() ? "null" : "json";
 	}
 	if (ObjectField(schema, "properties")) {
 		return "object";
@@ -1832,7 +2131,66 @@ std::string SchemaTypeName(const JsonValue &schema) {
 	return "json";
 }
 
-void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaProperty> &properties) {
+//! Follows a local "$ref" (for example "#/$defs/Address") and unwraps an anyOf or oneOf with one non-null branch,
+//! so {"anyOf": [{"type": "string"}, {"type": "null"}]} maps like {"type": "string"}.
+const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schema, idx_t depth = 0) {
+	if (depth > 32 || schema->type != JsonValueType::OBJECT) {
+		return schema;
+	}
+	auto ref = ObjectField(*schema, "$ref");
+	if (ref && ref->type == JsonValueType::STRING && !ref->string_value.empty() && ref->string_value[0] == '#') {
+		auto pointer = ref->string_value.substr(1);
+		const JsonValue *node = &root;
+		size_t position = 0;
+		while (node && position < pointer.size()) {
+			if (pointer[position] != '/') {
+				node = nullptr;
+				break;
+			}
+			auto next = pointer.find('/', position + 1);
+			auto token =
+			    pointer.substr(position + 1, next == std::string::npos ? std::string::npos : next - position - 1);
+			std::string unescaped;
+			for (size_t i = 0; i < token.size(); i++) {
+				if (token[i] == '~' && i + 1 < token.size() && (token[i + 1] == '0' || token[i + 1] == '1')) {
+					unescaped += token[i + 1] == '0' ? '~' : '/';
+					i++;
+				} else {
+					unescaped += token[i];
+				}
+			}
+			node = ObjectField(*node, unescaped);
+			position = next == std::string::npos ? pointer.size() : next;
+		}
+		return node ? ResolveSchemaNode(root, node, depth + 1) : schema;
+	}
+	if (ObjectField(*schema, "type") || ObjectField(*schema, "properties")) {
+		return schema;
+	}
+	for (auto keyword : {"anyOf", "oneOf"}) {
+		auto branches = ObjectField(*schema, keyword);
+		if (!branches || branches->type != JsonValueType::ARRAY) {
+			continue;
+		}
+		const JsonValue *only = nullptr;
+		idx_t non_null = 0;
+		for (auto &branch : branches->array_value) {
+			auto resolved = ResolveSchemaNode(root, &branch, depth + 1);
+			if (SchemaTypeName(*resolved) != "null") {
+				only = resolved;
+				non_null++;
+			}
+		}
+		if (non_null == 1) {
+			return only;
+		}
+	}
+	return schema;
+}
+
+void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
+                               std::vector<JsonSchemaProperty> &properties) {
+	auto &schema = *ResolveSchemaNode(root, &schema_p);
 	if (schema.type != JsonValueType::OBJECT) {
 		return;
 	}
@@ -1841,10 +2199,11 @@ void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaPr
 		return;
 	}
 	auto required_schema = ObjectField(schema, "required");
-	for (auto &entry : properties_schema->object_value) {
+	for (auto &name : properties_schema->object_keys) {
+		auto &property_schema = *ResolveSchemaNode(root, &properties_schema->object_value.at(name));
 		JsonSchemaProperty property;
-		property.name = entry.first;
-		property.type = entry.second.type == JsonValueType::OBJECT ? SchemaTypeName(entry.second) : "json";
+		property.name = name;
+		property.type = property_schema.type == JsonValueType::OBJECT ? SchemaTypeName(property_schema) : "json";
 		property.required = false;
 		if (required_schema && required_schema->type == JsonValueType::ARRAY) {
 			for (auto &required : required_schema->array_value) {
@@ -1854,15 +2213,16 @@ void ExtractSchemaPropertyList(const JsonValue &schema, std::vector<JsonSchemaPr
 				}
 			}
 		}
-		if (property.type == "object" && entry.second.type == JsonValueType::OBJECT) {
-			ExtractSchemaPropertyList(entry.second, property.children);
+		if (property.type == "object" && property_schema.type == JsonValueType::OBJECT) {
+			ExtractSchemaPropertyList(root, property_schema, property.children);
 		}
-		if (property.type == "array" && entry.second.type == JsonValueType::OBJECT) {
-			auto items_schema = ObjectField(entry.second, "items");
+		if (property.type == "array" && property_schema.type == JsonValueType::OBJECT) {
+			auto items_schema = ObjectField(property_schema, "items");
 			if (items_schema && items_schema->type == JsonValueType::OBJECT) {
-				property.item_type = SchemaTypeName(*items_schema);
+				auto &item_schema = *ResolveSchemaNode(root, items_schema);
+				property.item_type = SchemaTypeName(item_schema);
 				if (property.item_type == "object") {
-					ExtractSchemaPropertyList(*items_schema, property.item_children);
+					ExtractSchemaPropertyList(root, item_schema, property.item_children);
 				}
 			}
 		}
@@ -1902,6 +2262,12 @@ bool RegexMatches(const std::string &value, const std::string &pattern, const st
 
 bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &schema, const std::string &path,
                                     std::string &error) {
+	if (schema.type == JsonValueType::BOOLEAN) {
+		if (!schema.boolean_value) {
+			error = path + " is not allowed by false schema";
+		}
+		return schema.boolean_value;
+	}
 	if (schema.type != JsonValueType::OBJECT) {
 		return true;
 	}
@@ -1945,7 +2311,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		}
 	}
 	auto not_schema = ObjectField(schema, "not");
-	if (not_schema && not_schema->type == JsonValueType::OBJECT) {
+	if (not_schema) {
 		std::string child_error;
 		if (ValidateJsonValueAgainstSchema(value, *not_schema, path, child_error)) {
 			error = path + " matched schema in not";
@@ -1982,54 +2348,66 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		double numeric_bound;
 		auto exclusive_minimum = ObjectField(schema, "exclusiveMinimum");
 		if (exclusive_minimum && exclusive_minimum->type == JsonValueType::NUMBER &&
-		    value.number_value <= exclusive_minimum->number_value) {
+		    CompareJsonNumbers(value, *exclusive_minimum) <= 0) {
 			error = path + " must be greater than " + JsonDouble(exclusive_minimum->number_value);
 			return false;
 		}
 		if (exclusive_minimum && exclusive_minimum->type == JsonValueType::BOOLEAN &&
 		    exclusive_minimum->boolean_value && SchemaNumberField(schema, "minimum", numeric_bound) &&
-		    value.number_value <= numeric_bound) {
+		    CompareJsonNumbers(value, *ObjectField(schema, "minimum")) <= 0) {
 			error = path + " must be greater than " + JsonDouble(numeric_bound);
 			return false;
 		}
-		if (SchemaNumberField(schema, "minimum", numeric_bound) && value.number_value < numeric_bound) {
+		if (SchemaNumberField(schema, "minimum", numeric_bound) &&
+		    CompareJsonNumbers(value, *ObjectField(schema, "minimum")) < 0) {
 			error = path + " must be greater than or equal to " + JsonDouble(numeric_bound);
 			return false;
 		}
 		auto exclusive_maximum = ObjectField(schema, "exclusiveMaximum");
 		if (exclusive_maximum && exclusive_maximum->type == JsonValueType::NUMBER &&
-		    value.number_value >= exclusive_maximum->number_value) {
+		    CompareJsonNumbers(value, *exclusive_maximum) >= 0) {
 			error = path + " must be less than " + JsonDouble(exclusive_maximum->number_value);
 			return false;
 		}
 		if (exclusive_maximum && exclusive_maximum->type == JsonValueType::BOOLEAN &&
 		    exclusive_maximum->boolean_value && SchemaNumberField(schema, "maximum", numeric_bound) &&
-		    value.number_value >= numeric_bound) {
+		    CompareJsonNumbers(value, *ObjectField(schema, "maximum")) >= 0) {
 			error = path + " must be less than " + JsonDouble(numeric_bound);
 			return false;
 		}
-		if (SchemaNumberField(schema, "maximum", numeric_bound) && value.number_value > numeric_bound) {
+		if (SchemaNumberField(schema, "maximum", numeric_bound) &&
+		    CompareJsonNumbers(value, *ObjectField(schema, "maximum")) > 0) {
 			error = path + " must be less than or equal to " + JsonDouble(numeric_bound);
 			return false;
 		}
 		if (SchemaNumberField(schema, "multipleOf", numeric_bound) && numeric_bound > 0) {
-			auto remainder = std::fmod(std::fabs(value.number_value), numeric_bound);
-			auto tolerance = std::max(1e-12, std::fabs(numeric_bound) * 1e-12);
-			if (remainder > tolerance && std::fabs(remainder - numeric_bound) > tolerance) {
-				error = path + " must be a multiple of " + JsonDouble(numeric_bound);
-				return false;
+			auto &divisor = *ObjectField(schema, "multipleOf");
+			if (IsJsonInteger(value) && IsJsonInteger(divisor)) {
+				auto divisor_text = ExactIntegerText(divisor);
+				if (!IsExactIntegerMultiple(ExactIntegerText(value), divisor_text)) {
+					error = path + " must be a multiple of " + divisor_text;
+					return false;
+				}
+			} else {
+				auto remainder = std::fmod(std::fabs(value.number_value), numeric_bound);
+				auto tolerance = std::max(1e-12, std::fabs(numeric_bound) * 1e-12);
+				if (remainder > tolerance && std::fabs(remainder - numeric_bound) > tolerance) {
+					error = path + " must be a multiple of " + JsonDouble(numeric_bound);
+					return false;
+				}
 			}
 		}
 	}
 	if (value.type == JsonValueType::STRING) {
+		// JSON Schema lengths count Unicode code points, including combining marks.
+		auto string_length = std::count_if(value.string_value.begin(), value.string_value.end(),
+		                                   [](unsigned char c) { return (c & 0xc0) != 0x80; });
 		int64_t string_limit;
-		if (SchemaNonNegativeIntegerField(schema, "minLength", string_limit) &&
-		    value.string_value.size() < static_cast<idx_t>(string_limit)) {
+		if (SchemaNonNegativeIntegerField(schema, "minLength", string_limit) && string_length < string_limit) {
 			error = path + " length must be at least " + std::to_string(string_limit);
 			return false;
 		}
-		if (SchemaNonNegativeIntegerField(schema, "maxLength", string_limit) &&
-		    value.string_value.size() > static_cast<idx_t>(string_limit)) {
+		if (SchemaNonNegativeIntegerField(schema, "maxLength", string_limit) && string_length > string_limit) {
 			error = path + " length must be at most " + std::to_string(string_limit);
 			return false;
 		}
@@ -2071,7 +2449,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			}
 		}
 		auto property_names_schema = ObjectField(schema, "propertyNames");
-		if (property_names_schema && property_names_schema->type == JsonValueType::OBJECT) {
+		if (property_names_schema) {
 			for (auto &property : value.object_value) {
 				JsonValue property_name;
 				property_name.type = JsonValueType::STRING;
@@ -2144,8 +2522,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 					error = JsonPathChild(path, property.first) + " is not allowed by additionalProperties";
 					return false;
 				}
-				if (additional_schema->type == JsonValueType::OBJECT &&
-				    !ValidateJsonValueAgainstSchema(property.second, *additional_schema,
+				if (!ValidateJsonValueAgainstSchema(property.second, *additional_schema,
 				                                    JsonPathChild(path, property.first), error)) {
 					return false;
 				}
@@ -2181,7 +2558,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			}
 		}
 		auto items_schema = ObjectField(schema, "items");
-		if (items_schema && items_schema->type == JsonValueType::OBJECT) {
+		if (items_schema && items_schema->type != JsonValueType::ARRAY) {
 			for (idx_t i = 0; i < value.array_value.size(); i++) {
 				if (!ValidateJsonValueAgainstSchema(value.array_value[i], *items_schema, JsonPathIndex(path, i),
 				                                    error)) {
@@ -2190,7 +2567,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			}
 		}
 		auto contains_schema = ObjectField(schema, "contains");
-		if (contains_schema && contains_schema->type == JsonValueType::OBJECT) {
+		if (contains_schema) {
 			idx_t matches = 0;
 			for (auto &item : value.array_value) {
 				std::string child_error;
@@ -2214,23 +2591,9 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	return true;
 }
 
-bool FindJsonStringValue(const std::string &body, const std::string &key, std::string &value) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return false;
-	}
-	return FindYyjsonStringField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, value);
-}
-
-int64_t FindJsonIntegerValue(const std::string &body, const std::string &key) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return -1;
-	}
+int64_t FindYyjsonIntegerValue(duckdb_yyjson::yyjson_val *root, const std::string &key) {
 	int64_t value = -1;
-	if (FindYyjsonIntegerField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, value)) {
+	if (FindYyjsonIntegerField(root, key, value)) {
 		return value;
 	}
 	return -1;
@@ -2526,9 +2889,29 @@ void PruneProviderTokenWindow(ProviderRuntimeState &state, std::chrono::steady_c
 	}
 }
 
+int64_t ProfileTokenEstimate(const std::string &text, double multiplier) {
+	auto estimate = std::ceil(static_cast<double>(EstimateTokenCount(text)) * multiplier);
+	if (!std::isfinite(estimate) || estimate > static_cast<double>(MAX_TOKEN_LIMIT_PER_MINUTE)) {
+		throw InvalidInputException("Estimated request token count is too large");
+	}
+	return static_cast<int64_t>(estimate);
+}
+
+int64_t EstimatedCompletionInputTokens(const std::string &prompt, const CompletionOptions &options, double multiplier) {
+	return ProfileTokenEstimate(prompt, multiplier) + ProfileTokenEstimate(options.system_prompt, multiplier) +
+	       ProfileTokenEstimate(options.response_schema, multiplier);
+}
+
 int64_t EstimatedCompletionTokens(const std::string &prompt, const CompletionOptions &options) {
 	auto output_estimate = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
-	return EstimateTokenCount(prompt) + output_estimate;
+	auto input_estimate =
+	    EstimatedCompletionInputTokens(prompt, options, GetProviderCapabilities(options).token_estimate_multiplier);
+	// Pacing caps reservations at the configured window. Keep a large positive
+	// output limit positive even when the combined estimate cannot fit in BIGINT.
+	if (output_estimate > std::numeric_limits<int64_t>::max() - input_estimate) {
+		return std::numeric_limits<int64_t>::max();
+	}
+	return input_estimate + output_estimate;
 }
 
 int64_t TokenReservation(int64_t estimated_tokens, int64_t token_limit_per_minute) {
@@ -2824,6 +3207,11 @@ HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload
 			HttpResponse response;
 			{
 				ProviderRequestGuard request_guard(options, estimated_tokens);
+				{
+					auto &runtime = RuntimeState(options);
+					std::lock_guard<std::mutex> lock(runtime.usage_mutex);
+					runtime.usage_totals.request_attempts++;
+				}
 				response = HttpPost(url, payload, headers, timeout_seconds, false, 0, retry_backoff_ms,
 				                    options.client_context, connect_timeout_seconds);
 			}
@@ -2868,18 +3256,21 @@ std::string RedactProviderSecrets(const ProviderConfig &config, const std::strin
 
 std::string ProviderErrorDetail(const ProviderConfig &config, const HttpResponse &response) {
 	auto body = RedactProviderSecrets(config, response.body);
+	std::string parse_error;
+	auto doc = ReadYyjsonDocument(body, parse_error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
 	std::string message;
 	std::string error_type;
 	std::string error_code;
-	FindJsonStringValue(body, "message", message);
+	FindYyjsonStringField(root, "message", message);
 	if (message.empty()) {
-		FindJsonStringValue(body, "error", message);
+		FindYyjsonStringField(root, "error", message);
 	}
 	if (message.empty()) {
-		FindJsonStringValue(body, "detail", message);
+		FindYyjsonStringField(root, "detail", message);
 	}
-	FindJsonStringValue(body, "type", error_type);
-	FindJsonStringValue(body, "code", error_code);
+	FindYyjsonStringField(root, "type", error_type);
+	FindYyjsonStringField(root, "code", error_code);
 
 	std::string detail = "AI provider \"" + config.provider + "\" (" + config.protocol + ", model \"" + config.model +
 	                     "\") returned HTTP " + std::to_string(response.status);
@@ -2923,11 +3314,12 @@ std::string ProviderSpecificEnvPrefix(const std::string &provider) {
 const std::vector<ProviderSpec> &ProviderCatalog() {
 	static const std::vector<ProviderSpec> providers {
 	    {"typesafe", "typesafe_jev", "jev-latest", "", "https://api.typesafe.ai/v1", "TYPESAFE_API_KEY", true},
+	    {"systemone", "systemone", "", "", "", "SYSTEMONE_API_KEY", false},
 	    {"ollama", "ollama_chat", "llama3.2", "nomic-embed-text", "http://localhost:11434", "OLLAMA_API_KEY", false},
 	    {"openai", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "https://api.openai.com/v1",
 	     "OPENAI_API_KEY", true},
-	    {"azure", "openai_chat", "gpt-4o", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
-	    {"anthropic", "anthropic_messages", "claude-haiku-4-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
+	    {"azure", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
+	    {"anthropic", "anthropic_messages", "claude-haiku-5-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
 	     true},
 	    {"bedrock", "openai_chat", "openai.gpt-oss-120b", "", "", "AWS_BEDROCK_API_KEY", true},
 	    {"cerebras", "openai_chat", "gpt-oss-120b", "", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", true},
@@ -2940,22 +3332,22 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"databricks", "openai_chat", "databricks-gpt-oss-120b", "", "", "DATABRICKS_TOKEN", true},
 	    {"deepinfra", "openai_chat", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "BAAI/bge-large-en-v1.5",
 	     "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY", true},
-	    {"deepseek", "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
-	    {"fireworks", "openai_chat", "accounts/fireworks/models/gpt-oss-20b", "nomic-ai/nomic-embed-text-v1.5",
+	    {"deepseek", "openai_chat", "deepseek-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
+	    {"fireworks", "openai_chat", "accounts/fireworks/models/gpt-oss-120b", "nomic-ai/nomic-embed-text-v1.5",
 	     "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", true},
-	    {"gemini", "openai_chat", "gemini-3.7-flash", "gemini-embedding-2",
+	    {"gemini", "openai_chat", "gemini-3.8-flash", "gemini-embedding-2",
 	     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", true},
 	    {"groq", "openai_chat", "openai/gpt-oss-20b", "", "https://api.groq.com/openai/v1", "GROQ_API_KEY", true},
 	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
 	    {"hunyuan", "openai_chat", "hy3", "", "https://tokenhub.tencentmaas.com/v1", "HUNYUAN_API_KEY", true},
 	    {"llamacpp", "openai_chat", "default", "default", "http://localhost:8080/v1", "LLAMACPP_API_KEY", false},
 	    {"minimax", "openai_chat", "MiniMax-M2.7", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
-	    {"mimo", "openai_chat", "mimo-v2.5-pro", "", "https://api.xiaomimimo.com/v1", "MIMO_API_KEY", true},
+	    {"mimo", "openai_chat", "mimo-v2.6-flash", "", "https://api.xiaomimimo.com/v1", "MIMO_API_KEY", true},
 	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
 	     "MISTRAL_API_KEY", true},
 	    {"moonshot", "openai_chat", "kimi-k3", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
-	    {"nebius", "openai_chat", "meta-llama/Meta-Llama-3.1-70B-Instruct", "",
-	     "https://api.tokenfactory.nebius.com/v1", "NEBIUS_API_KEY", true},
+	    {"nebius", "openai_chat", "Qwen/Qwen3-30B-A3B-Instruct-2507", "", "https://api.tokenfactory.nebius.com/v1",
+	     "NEBIUS_API_KEY", true},
 	    {"nvidia", "openai_chat", "nvidia/nemotron-3-super-120b-a12b", "", "https://integrate.api.nvidia.com/v1",
 	     "NVIDIA_API_KEY", true},
 	    {"openai_privacy_filter", "privacy_filter", "openai/privacy-filter", "", "http://localhost:8080",
@@ -2966,8 +3358,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", true},
 	    {"perplexity", "openai_chat", "sonar", "", "https://api.perplexity.ai", "PERPLEXITY_API_KEY", true},
 	    {"poe", "openai_chat", "GPT-5.4", "", "https://api.poe.com/v1", "POE_API_KEY", true},
-	    {"qianfan", "openai_chat", "ernie-4.5-turbo-128k", "", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY",
-	     true},
+	    {"qianfan", "openai_chat", "ernie-5.1", "", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY", true},
 	    {"sambanova", "openai_chat", "Meta-Llama-3.3-70B-Instruct", "", "https://api.sambanova.ai/v1",
 	     "SAMBANOVA_API_KEY", true},
 	    {"siliconflow", "openai_chat", "Qwen/Qwen2.5-72B-Instruct", "", "https://api.siliconflow.com/v1",
@@ -2978,7 +3369,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "intfloat/multilingual-e5-large-instruct", "https://api.together.xyz/v1", "TOGETHER_API_KEY", true},
 	    {"vercel", "openai_chat", "openai/gpt-4o-mini", "openai/text-embedding-3-small",
 	     "https://ai-gateway.vercel.sh/v1", "AI_GATEWAY_API_KEY", true},
-	    {"vertex", "openai_chat", "google/gemini-2.5-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
+	    {"vertex", "openai_chat", "google/gemini-3.8-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
 	    {"volcengine", "openai_chat", "doubao-seed-2-1-pro-260628", "", "https://ark.cn-beijing.volces.com/api/v3",
 	     "VOLCENGINE_API_KEY", true},
 	    {"xai", "openai_chat", "grok-4.6", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
@@ -3004,7 +3395,7 @@ std::string SupportedProvidersList() {
 		}
 		result += ProviderCatalog()[i].provider;
 	}
-	result += ", claude, gcp, google, zhipu, azure_openai, databricks_ai, local, llama.cpp, "
+	result += ", jev, system_one, claude, gcp, google, zhipu, azure_openai, databricks_ai, local, llama.cpp, "
 	          "hugging_face, x.ai, nvidia_nim, aws_bedrock, google_vertex, workers_ai, qwen, alibaba, "
 	          "nebius_token_factory, sambanova_ai, silicon_flow, vercel_ai_gateway, kimi, baidu, ernie, "
 	          "tencent_hunyuan, step, mini_max, doubao, ark";
@@ -3549,6 +3940,10 @@ void ValidateResolvedProviderConfig(const ProviderConfig &config, bool require_a
 		                            "CLOUDFLARE_BASE_URL, CLOUDFLARE_WORKERS_AI_BASE_URL, or "
 		                            "CLOUDFLARE_ACCOUNT_ID.");
 	}
+	if (config.provider == "systemone" && config.base_url.empty()) {
+		throw InvalidInputException("AI provider \"systemone\" requires a base URL. Pass base_url := ..., set "
+		                            "SYSTEMONE_BASE_URL, or add BASE_URL to the duckdb_ai secret.");
+	}
 	if (config.provider == "databricks" && config.base_url.empty()) {
 		throw InvalidInputException(
 		    "AI provider \"databricks\" requires a base URL. Set duckdb_ai_base_url, DATABRICKS_BASE_URL, or "
@@ -3569,6 +3964,86 @@ void ValidateResolvedProviderConfig(const ProviderConfig &config, bool require_a
 		                            "VERTEX_BASE_URL, VERTEX_AI_BASE_URL, GOOGLE_VERTEX_BASE_URL, or "
 		                            "GOOGLE_CLOUD_PROJECT.");
 	}
+}
+
+bool IsDecisionFunction(const std::string &function_name) {
+	return function_name == "ai_decide" || function_name == "ai_jev";
+}
+
+std::string DecisionModel(const ProviderConfig &config, const CompletionOptions &options, const char *fallback) {
+	if (!options.model.empty()) {
+		return options.model;
+	}
+	// Chat model defaults (for example OLLAMA_MODEL) name text models, so decision models use their own variable.
+	auto model = GetEnv(ProviderSpecificEnvPrefix(config.provider) + "_DECISION_MODEL");
+	return model.empty() ? fallback : model;
+}
+
+std::string CloudflareDecisionEndpoint(const std::string &base_url, const std::string &route) {
+	if (base_url.empty() || base_url.find("/ai/run/") != std::string::npos ||
+	    base_url.find("/@cf/") != std::string::npos) {
+		return base_url;
+	}
+	if (EndsWith(base_url, "/ai/v1")) {
+		return base_url.substr(0, base_url.size() - 2) + "run/" + route;
+	}
+	if (EndsWith(base_url, "/workers-ai/v1")) {
+		return base_url.substr(0, base_url.size() - 2) + route;
+	}
+	if (EndsWith(base_url, "/workers-ai")) {
+		return base_url + "/" + route;
+	}
+	return base_url + "/ai/run/" + route;
+}
+
+//! Decision models share one request shape (model, state, typed questions) but differ in endpoint, response
+//! envelope and default model. Chat providers that also host a decision model switch protocol only for
+//! ai_decide/ai_jev, so their completion and embedding behavior is unchanged.
+void ApplyDecisionProtocol(ProviderConfig &config, const CompletionOptions &options) {
+	if (config.provider == "typesafe") {
+		// DUCKDB_AI_MODEL usually names a chat model, so only TypeSafe variables override the default.
+		if (options.model.empty()) {
+			auto model = GetEnv("TYPESAFE_DECISION_MODEL");
+			model = model.empty() ? GetEnv("TYPESAFE_MODEL") : model;
+			config.model = model.empty() ? config.default_model : model;
+		}
+		return;
+	}
+	if (config.provider == "systemone") {
+		// A generic endpoint has no default model, and DUCKDB_AI_MODEL usually names a chat model.
+		config.model = options.model.empty() ? GetEnv("SYSTEMONE_MODEL") : options.model;
+		if (config.model.empty()) {
+			throw InvalidInputException("AI provider \"systemone\" requires a model. Pass model := ..., set "
+			                            "SYSTEMONE_MODEL, or add MODEL to the duckdb_ai secret.");
+		}
+		return;
+	}
+	if (config.provider == "ollama") {
+		config.protocol = "systemone";
+		config.model = DecisionModel(config, options, "nimble");
+		return;
+	}
+	if (config.provider == "perplexity") {
+		config.protocol = "perplexity_decisions";
+		config.model = DecisionModel(config, options, "pplx-decider-v1.1-27b");
+		return;
+	}
+	if (config.provider == "cloudflare") {
+		static const std::string prefix = "@cf/cloudflare/";
+		auto model = DecisionModel(config, options, "clef");
+		config.protocol = "cloudflare_decision";
+		config.model = StartsWith(model, prefix) ? model.substr(prefix.size()) : model;
+		config.base_url =
+		    CloudflareDecisionEndpoint(config.base_url, StartsWith(model, "@cf/") ? model : prefix + model);
+		return;
+	}
+	if (config.provider == "openai") {
+		throw InvalidInputException("OpenAI has not published a Decisions API schema yet; ai_decide supports "
+		                            "typesafe, cloudflare, perplexity, ollama, and systemone");
+	}
+	throw InvalidInputException("AI provider \"%s\" has no supported decision model API; ai_decide supports "
+	                            "typesafe, cloudflare, perplexity, ollama, and systemone",
+	                            config.provider);
 }
 
 ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool require_api_key) {
@@ -3597,12 +4072,27 @@ ProviderConfig ResolveProviderConfig(const CompletionOptions &options, bool requ
 		}
 		config.base_url = TrimTrailingSlash(options.base_url);
 	}
+	if (IsDecisionFunction(options.function_name)) {
+		ApplyDecisionProtocol(config, options);
+	}
 	ValidateResolvedProviderConfig(config, require_api_key);
 	return config;
 }
 
 std::string RequestEndpoint(const ProviderConfig &config) {
-	if (config.protocol == "typesafe_jev") {
+	if (config.protocol == "cloudflare_decision") {
+		return config.base_url;
+	}
+	if (config.protocol == "perplexity_decisions") {
+		if (EndsWith(config.base_url, "/decisions")) {
+			return config.base_url;
+		}
+		if (EndsWith(config.base_url, "/v1")) {
+			return config.base_url + "/decisions";
+		}
+		return config.base_url + "/v1/decisions";
+	}
+	if (config.protocol == "typesafe_jev" || config.protocol == "systemone") {
 		if (EndsWith(config.base_url, "/systemone")) {
 			return config.base_url;
 		}
@@ -3731,8 +4221,40 @@ std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
 }
 
 bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
-	return config.provider == "gemini" && (config.model == "gemini-3.7-flash" || config.model == "gemini-3.6-flash" ||
-	                                       config.model == "gemini-3.5-flash-lite");
+	std::string model;
+	if (config.provider == "gemini") {
+		model = config.model;
+	} else if (config.provider == "vertex" && StartsWith(config.model, "google/")) {
+		model = config.model.substr(7);
+	} else {
+		return false;
+	}
+	return model == "gemini-3.8-flash" || model == "gemini-3.7-flash" || model == "gemini-3.6-flash" ||
+	       model == "gemini-3.5-flash-lite";
+}
+
+bool OpenAIOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
+	if (config.provider != "openai" || (config.model != "gpt-6-astra" && config.model != "gpt-6.1-sol" &&
+	                                    config.model != "gpt-6-sol" && config.model != "gpt-6-luna")) {
+		return false;
+	}
+	if (config.model == "gpt-6-sol" || config.model == "gpt-6-luna") {
+		std::string error;
+		auto doc = ReadYyjsonDocument(options.request_options, error);
+		auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+		std::string effort;
+		if (YyjsonDirectString(root, "reasoning_effort", effort) && effort == "none") {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool AnthropicOmitsSamplingParameters(const ProviderConfig &config) {
+	return config.protocol == "anthropic_messages" &&
+	       (config.model == "claude-fable-5-1" || config.model == "claude-opus-5-5" ||
+	        config.model == "claude-sonnet-5-5" || config.model == "claude-haiku-5-5" ||
+	        config.model == "claude-sonnet-5");
 }
 
 bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
@@ -3740,11 +4262,14 @@ bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
 		return false;
 	}
 	auto model = LowerAscii(config.model);
-	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5");
+	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5") ||
+	       EndsWith(model, "claude-sonnet-5-5") || EndsWith(model, "claude-opus-5-5") ||
+	       EndsWith(model, "claude-haiku-5-5") || EndsWith(model, "claude-fable-5-1");
 }
 
-bool ProviderOmitsSamplingParameters(const ProviderConfig &config) {
-	return GeminiOmitsSamplingParameters(config) || DatabricksOmitsSamplingParameters(config);
+bool ProviderOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
+	return GeminiOmitsSamplingParameters(config) || DatabricksOmitsSamplingParameters(config) ||
+	       OpenAIOmitsSamplingParameters(config, options) || AnthropicOmitsSamplingParameters(config);
 }
 
 void ValidateProviderResponseFormat(const ProviderConfig &config, const CompletionOptions &options) {
@@ -3762,7 +4287,8 @@ void ValidateProviderResponseFormat(const ProviderConfig &config, const Completi
 bool OpenAIUsesExplicitPromptCache(const ProviderConfig &config, const CompletionOptions &options) {
 	auto model = LowerAscii(config.model);
 	return config.provider == "openai" && PromptCacheEnabled(options) && !options.system_prompt.empty() &&
-	       (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-"));
+	       (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-") || StartsWith(model, "gpt-6-") ||
+	        StartsWith(model, "gpt-6.1-"));
 }
 
 std::string OllamaFormatJson(const CompletionOptions &options) {
@@ -3799,7 +4325,7 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 				payload += ",\"system\":\"" + JsonEscape(options.system_prompt) + "\"";
 			}
 		}
-		if (options.has_temperature) {
+		if (options.has_temperature && !ProviderOmitsSamplingParameters(config, options)) {
 			payload += ",\"temperature\":" + JsonDouble(options.temperature);
 		}
 		if (!options.response_schema.empty()) {
@@ -3837,7 +4363,7 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 	auto explicit_openai_prompt_cache = OpenAIUsesExplicitPromptCache(config, options);
 	auto payload = "{\"model\":\"" + escaped_model +
 	               "\",\"messages\":" + ChatMessagesJson(prompt, options.system_prompt, explicit_openai_prompt_cache);
-	if (options.has_temperature && !ProviderOmitsSamplingParameters(config)) {
+	if (options.has_temperature && !ProviderOmitsSamplingParameters(config, options)) {
 		payload += ",\"temperature\":" + JsonDouble(options.temperature);
 	}
 	if (options.has_max_tokens) {
@@ -3874,18 +4400,24 @@ std::string BasicRequestPayload(const ProviderConfig &config, const std::string 
 }
 
 std::string RequestPayload(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options) {
-	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
+	const bool decision = IsDecisionProtocol(config.protocol);
+	const bool native = options.function_name == "ai_provider_call" || decision;
 	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
 	    options.function_name != "ai_classify" && options.function_name != "ai_filter" &&
-	    options.function_name != "ai_jev") {
+	    !IsDecisionFunction(options.function_name)) {
 		throw InvalidInputException(
-		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, ai_filter, and ai_jev");
+		    "AI provider \"typesafe\" only supports ai_provider_call, ai_classify, ai_filter, ai_decide, and ai_jev");
 	}
-	if (config.protocol == "typesafe_jev" && options.function_name != "ai_provider_call" &&
+	if (decision && config.protocol != "typesafe_jev" && options.function_name != "ai_provider_call" &&
+	    !IsDecisionFunction(options.function_name)) {
+		throw InvalidInputException("AI provider \"%s\" decision API only supports ai_decide and ai_provider_call",
+		                            config.provider);
+	}
+	if (decision && options.function_name != "ai_provider_call" &&
 	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
 	     !options.response_schema.empty() || !options.response_format.empty())) {
-		throw InvalidInputException("TypeSafe Jev does not support generation options; use classification instructions "
-		                            "or native question instructions instead");
+		throw InvalidInputException("Decision models do not support generation options; use classification "
+		                            "instructions or native question instructions instead");
 	}
 	if (options.function_name == "ai_provider_call" &&
 	    (options.has_temperature || options.has_max_tokens || !options.system_prompt.empty() ||
@@ -4000,14 +4532,9 @@ std::string EmbeddingPayload(const ProviderConfig &config, const std::vector<std
 	return payload;
 }
 
-std::vector<double> FindEmbeddingArray(const std::string &body, const std::string &key) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return {};
-	}
+std::vector<double> FindEmbeddingArray(duckdb_yyjson::yyjson_val *root, const std::string &key) {
 	std::vector<double> values;
-	if (FindYyjsonNumberArrayField(duckdb_yyjson::yyjson_doc_get_root(doc.get()), key, values)) {
+	if (FindYyjsonNumberArrayField(root, key, values)) {
 		return values;
 	}
 	return {};
@@ -4019,14 +4546,8 @@ struct ParsedEmbeddingArray {
 	int64_t index = -1;
 };
 
-std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &config, const std::string &body,
+std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &config, duckdb_yyjson::yyjson_val *root,
                                                       idx_t expected_count) {
-	std::string error;
-	auto doc = ReadYyjsonDocument(body, error);
-	if (!doc) {
-		return {};
-	}
-	auto root = duckdb_yyjson::yyjson_doc_get_root(doc.get());
 	std::vector<std::vector<double>> embeddings;
 	if (config.protocol == "ollama_embed") {
 		auto embedding_values = YyjsonObjectGet(root, "embeddings");
@@ -4100,11 +4621,12 @@ std::vector<std::vector<double>> ParseEmbeddingArrays(const ProviderConfig &conf
 	return embeddings;
 }
 
-EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response) {
+EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response,
+                                     duckdb_yyjson::yyjson_val *root) {
 	EmbeddingResult result;
-	result.values = FindEmbeddingArray(response.body, config.protocol == "ollama_embed" ? "embeddings" : "embedding");
+	result.values = FindEmbeddingArray(root, config.protocol == "ollama_embed" ? "embeddings" : "embedding");
 	if (result.values.empty() && config.protocol != "ollama_embed") {
-		result.values = FindEmbeddingArray(response.body, "embeddings");
+		result.values = FindEmbeddingArray(root, "embeddings");
 	}
 	if (result.values.empty()) {
 		throw IOException("AI provider embedding response contained an empty embedding: %s", response.body);
@@ -4114,24 +4636,34 @@ EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpRes
 	result.elapsed_ms = response.elapsed_ms;
 	result.retries = response.retries;
 	result.cache_hit = response.cache_hit;
-	result.prompt_tokens = FindJsonIntegerValue(response.body, "prompt_tokens");
-	result.total_tokens = FindJsonIntegerValue(response.body, "total_tokens");
+	result.prompt_tokens = FindYyjsonIntegerValue(root, "prompt_tokens");
+	result.total_tokens = FindYyjsonIntegerValue(root, "total_tokens");
 	return result;
+}
+
+EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpResponse &response) {
+	std::string error;
+	auto doc = ReadYyjsonDocument(response.body, error);
+	return ParseEmbeddingResult(config, response, doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr);
 }
 
 std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config, const HttpResponse &response,
                                                    idx_t expected_count) {
-	auto values = ParseEmbeddingArrays(config, response.body, expected_count);
+	// Keep one document alive for all array and usage lookups, including scalar fallback.
+	std::string error;
+	auto doc = ReadYyjsonDocument(response.body, error);
+	auto root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+	auto values = ParseEmbeddingArrays(config, root, expected_count);
 	if (values.size() != expected_count) {
 		if (expected_count == 1) {
-			return {ParseEmbeddingResult(config, response)};
+			return {ParseEmbeddingResult(config, response, root)};
 		}
 		throw IOException("AI provider embedding response returned %llu embeddings for %llu inputs",
 		                  static_cast<unsigned long long>(values.size()),
 		                  static_cast<unsigned long long>(expected_count));
 	}
-	auto prompt_tokens = FindJsonIntegerValue(response.body, "prompt_tokens");
-	auto total_tokens = FindJsonIntegerValue(response.body, "total_tokens");
+	auto prompt_tokens = FindYyjsonIntegerValue(root, "prompt_tokens");
+	auto total_tokens = FindYyjsonIntegerValue(root, "total_tokens");
 	std::vector<EmbeddingResult> results;
 	results.reserve(values.size());
 	auto distribute_tokens = [&](int64_t tokens, idx_t index) {
@@ -4163,12 +4695,12 @@ std::vector<std::string> RequestHeaders(const ProviderConfig &config, const Comp
 	if (config.provider == "mimo") {
 		headers.push_back("api-key: " + config.api_key);
 		if (config.protocol == "anthropic_messages") {
-			headers.push_back("anthropic-version: 2023-06-01");
+			headers.emplace_back("anthropic-version: 2023-06-01");
 		}
 		return headers;
 	}
 	if (config.protocol == "anthropic_messages") {
-		headers.push_back("anthropic-version: 2023-06-01");
+		headers.emplace_back("anthropic-version: 2023-06-01");
 		if (config.provider == "moonshot" || config.provider == "zai") {
 			headers.push_back("Authorization: Bearer " + config.api_key);
 		} else {
@@ -4282,6 +4814,30 @@ std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::y
 		}
 	}
 	throw IOException("AI provider response did not contain a supported completion text field: %s", body);
+}
+
+//! Reasoning models served by llama.cpp, vLLM, LM Studio and some gateways put their reasoning inline as a leading
+//! <think>...</think> block. It is not part of the answer, so it is removed. An unclosed block means the reply was
+//! all reasoning (usually cut off by max_tokens), which leaves no answer text.
+std::string StripLeadingReasoning(const std::string &text) {
+	static const std::pair<const char *, const char *> tags[] = {
+	    {"<think>", "</think>"}, {"<thinking>", "</thinking>"}, {"<reasoning>", "</reasoning>"}};
+	auto start = text.find_first_not_of(" \t\r\n");
+	if (start == std::string::npos) {
+		return text;
+	}
+	for (auto &tag : tags) {
+		if (text.compare(start, std::strlen(tag.first), tag.first) != 0) {
+			continue;
+		}
+		auto end = text.find(tag.second, start);
+		if (end == std::string::npos) {
+			return std::string();
+		}
+		auto answer = text.find_first_not_of(" \t\r\n", end + std::strlen(tag.second));
+		return answer == std::string::npos ? std::string() : text.substr(answer);
+	}
+	return text;
 }
 
 std::string NativeResponseJson(const std::string &body) {
@@ -4438,14 +4994,47 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	if (native && (!root || !duckdb_yyjson::yyjson_is_obj(root))) {
 		throw IOException("Provider response must be a JSON object");
 	}
+	if (native && config.protocol == "cloudflare_decision") {
+		// Workers AI wraps model output in {"result": ..., "success": ..., "errors": [...]}.
+		auto success = YyjsonObjectGet(root, "success");
+		if (success && duckdb_yyjson::yyjson_is_false(success)) {
+			throw IOException("Cloudflare Workers AI response reported success=false");
+		}
+		auto inner = YyjsonObjectGet(root, "result");
+		if (inner && duckdb_yyjson::yyjson_is_obj(inner)) {
+			size_t length = 0;
+			auto json = duckdb_yyjson::yyjson_val_write(inner, 0, &length);
+			if (!json) {
+				throw IOException("Cloudflare Workers AI result could not be serialized");
+			}
+			body.assign(json, length);
+			free(json);
+			doc = ReadYyjsonDocument(body, error);
+			root = doc ? duckdb_yyjson::yyjson_doc_get_root(doc.get()) : nullptr;
+		}
+	}
 	if (native && config.protocol == "typesafe_jev" && !ValidateJevResponse(root)) {
 		throw IOException("TypeSafe Jev response must contain valid model and answers");
+	}
+	if (native && IsDecisionProtocol(config.protocol)) {
+		auto answers = YyjsonObjectGet(root, "answers");
+		if (!answers || !duckdb_yyjson::yyjson_is_obj(answers)) {
+			throw IOException("Decision model response must contain an answers object");
+		}
 	}
 	auto response_error = YyjsonObjectGet(root, "error");
 	if (native && response_error && !duckdb_yyjson::yyjson_is_null(response_error)) {
 		throw IOException("Provider returned an error object");
 	}
-	result.text = native ? body : ExtractCompletionText(config, root, response.body);
+	if (native) {
+		result.text = body;
+	} else {
+		auto text = ExtractCompletionText(config, root, response.body);
+		result.text = StripLeadingReasoning(text);
+		if (result.text.empty() && !text.empty()) {
+			result.finish_reason = "reasoning_only";
+		}
+	}
 	result.raw_response = response.body;
 	result.http_status = response.status;
 	result.elapsed_ms = response.elapsed_ms;
@@ -4456,7 +5045,7 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.total_tokens = -1;
 	result.cached_prompt_tokens = -1;
 	result.cache_creation_prompt_tokens = -1;
-	if (config.protocol == "typesafe_jev") {
+	if (IsDecisionProtocol(config.protocol)) {
 		auto usage = YyjsonObjectGet(root, "usage");
 		result.prompt_tokens = YyjsonIntegerOrMissing(usage, "input_tokens");
 		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
@@ -4473,18 +5062,17 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 		result.cached_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_read_input_tokens");
 		result.cache_creation_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_creation_input_tokens");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
-			result.total_tokens = result.prompt_tokens + result.completion_tokens;
+			result.total_tokens = result.prompt_tokens + result.completion_tokens +
+			                      std::max<int64_t>(0, result.cached_prompt_tokens) +
+			                      std::max<int64_t>(0, result.cache_creation_prompt_tokens);
 		}
 		YyjsonDirectString(root, "stop_reason", result.finish_reason);
-		if (!native && result.finish_reason == "max_tokens") {
-			throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or "
-			                  "request a shorter response");
-		}
 		return result;
 	}
 	if (config.protocol == "ollama_chat") {
 		result.prompt_tokens = YyjsonIntegerOrMissing(root, "prompt_eval_count");
 		result.completion_tokens = YyjsonIntegerOrMissing(root, "eval_count");
+		result.cached_prompt_tokens = YyjsonIntegerOrMissing(root, "prompt_eval_cached_count");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
 			result.total_tokens = result.prompt_tokens + result.completion_tokens;
 		}
@@ -4497,6 +5085,7 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 	result.total_tokens = YyjsonIntegerOrMissing(usage, "total_tokens");
 	auto prompt_token_details = YyjsonObjectGet(usage, "prompt_tokens_details");
 	result.cached_prompt_tokens = YyjsonIntegerOrMissing(prompt_token_details, "cached_tokens");
+	result.cache_creation_prompt_tokens = YyjsonIntegerOrMissing(prompt_token_details, "cache_write_tokens");
 	if (config.provider == "deepseek") {
 		auto cached = YyjsonIntegerOrMissing(usage, "prompt_cache_hit_tokens");
 		if (cached >= 0) {
@@ -4508,15 +5097,30 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
 		result.cached_prompt_tokens =
 		    YyjsonIntegerOrMissing(YyjsonObjectGet(usage, "input_tokens_details"), "cached_tokens");
+		result.cache_creation_prompt_tokens =
+		    YyjsonIntegerOrMissing(YyjsonObjectGet(usage, "input_tokens_details"), "cache_write_tokens");
 		YyjsonDirectString(root, "status", result.finish_reason);
 	}
 	auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
 	YyjsonDirectString(first_choice, "finish_reason", result.finish_reason);
-	if (!native && result.finish_reason == "length") {
+	return result;
+}
+
+//! A reply cut off by the output limit, or one that holds only reasoning, has no usable answer. It is reported as an
+//! error after parsing so the usage event keeps the tokens the provider charged for.
+void RequireCompleteAnswer(const CompletionResult &result, bool native) {
+	if (native) {
+		return;
+	}
+	// OpenAI-compatible APIs and Ollama report "length"; Anthropic reports "max_tokens".
+	if (result.finish_reason == "length" || result.finish_reason == "max_tokens") {
 		throw IOException("AI provider response stopped because max_tokens was reached; raise max_tokens or request a "
 		                  "shorter response");
 	}
-	return result;
+	if (result.finish_reason == "reasoning_only") {
+		throw IOException("AI provider response contained only reasoning and no answer; raise max_tokens or lower the "
+		                  "model's reasoning effort");
+	}
 }
 
 double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionOptions &options,
@@ -4546,10 +5150,29 @@ double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionO
 	}
 	auto cached_prompt_tokens = std::max<int64_t>(0, result.cached_prompt_tokens);
 	auto cache_creation_prompt_tokens = std::max<int64_t>(0, result.cache_creation_prompt_tokens);
+	// Anthropic reports uncached input separately; OpenAI includes cached tokens in prompt_tokens.
 	auto billable_prompt_tokens =
-	    std::max<int64_t>(0, result.prompt_tokens - cached_prompt_tokens - cache_creation_prompt_tokens);
+	    config.protocol == "anthropic_messages"
+	        ? result.prompt_tokens
+	        : std::max<int64_t>(0, result.prompt_tokens - cached_prompt_tokens - cache_creation_prompt_tokens);
+	auto model = LowerAscii(config.model);
 	auto cached_input_multiplier = config.protocol == "anthropic_messages" ? 0.1 : 0.5;
-	auto cache_creation_multiplier = config.protocol == "anthropic_messages" ? 1.25 : 1.0;
+	if (config.provider == "anthropic" && model == "claude-fable-5-1") {
+		cached_input_multiplier = 0.025;
+	} else if (config.provider == "anthropic" && (model == "claude-opus-5-5" || model == "claude-sonnet-5-5")) {
+		cached_input_multiplier = 0.05;
+	} else if (config.provider == "openai" && model == "gpt-6.1-sol") {
+		cached_input_multiplier = 0.05;
+	} else if (config.provider == "openai" &&
+	           (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-") || StartsWith(model, "gpt-6-"))) {
+		cached_input_multiplier = 0.1;
+	}
+	auto cache_creation_multiplier =
+	    config.protocol == "anthropic_messages" ||
+	            (config.provider == "openai" && (model == "gpt-5.6" || StartsWith(model, "gpt-5.6-") ||
+	                                             StartsWith(model, "gpt-6-") || StartsWith(model, "gpt-6.1-")))
+	        ? 1.25
+	        : 1.0;
 	auto input_cost = static_cast<double>(billable_prompt_tokens) * input_price;
 	input_cost += static_cast<double>(cached_prompt_tokens) * input_price * cached_input_multiplier;
 	input_cost += static_cast<double>(cache_creation_prompt_tokens) * input_price * cache_creation_multiplier;
@@ -4581,13 +5204,33 @@ double EstimateEmbeddingCostUsd(const ProviderConfig &config, const CompletionOp
 
 void PushUsageEvent(ProviderRuntimeState &state, UsageEvent event) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
+	if (event.provider != "local") {
+		state.usage_totals.provider_events++;
+		state.usage_totals.failures += event.status == "error" ? 1 : 0;
+		state.usage_totals.cache_hits += event.cache_hit ? 1 : 0;
+		if (event.total_tokens >= 0) {
+			auto tokens = static_cast<uint64_t>(event.total_tokens);
+			state.usage_totals.known_total_tokens += MinValue<uint64_t>(
+			    tokens, std::numeric_limits<uint64_t>::max() - state.usage_totals.known_total_tokens);
+		} else {
+			state.usage_totals.unknown_token_events++;
+		}
+	}
 	event.event_id = state.next_usage_event_id++;
 	state.usage_events.push_back(std::move(event));
 	if (state.usage_events.size() > MAX_USAGE_EVENTS) {
-		auto dropped = state.usage_events.size() - MAX_USAGE_EVENTS;
-		state.usage_events.erase(state.usage_events.begin(), state.usage_events.begin() + dropped);
-		state.dropped_usage_events += dropped;
+		state.usage_events.pop_front();
+		state.dropped_usage_events++;
 	}
+}
+
+//! Usage character counts are Unicode characters, not UTF-8 bytes.
+int64_t Utf8Length(const std::string &text) {
+	int64_t count = 0;
+	for (auto c : text) {
+		count += (static_cast<unsigned char>(c) & 0xC0) != 0x80;
+	}
+	return count;
 }
 
 UsageEvent BaseProviderUsageEvent(const ProviderConfig &config, const CompletionOptions &options,
@@ -4617,9 +5260,9 @@ UsageEvent BaseProviderUsageEvent(const ProviderConfig &config, const Completion
 }
 
 void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionResult &result,
-                      const CompletionOptions &options) {
-	auto event = BaseProviderUsageEvent(config, options, "ai_completion", static_cast<int64_t>(prompt.size()), -1);
-	event.response_chars = static_cast<int64_t>(result.text.size());
+                      const CompletionOptions &options, const char *error = nullptr) {
+	auto event = BaseProviderUsageEvent(config, options, "ai_completion", Utf8Length(prompt), -1);
+	event.response_chars = Utf8Length(result.text);
 	event.prompt_tokens = result.prompt_tokens;
 	event.completion_tokens = result.completion_tokens;
 	event.total_tokens = result.total_tokens;
@@ -4629,15 +5272,20 @@ void RecordUsageEvent(const ProviderConfig &config, const std::string &prompt, c
 	event.retries = result.retries;
 	event.http_status = result.http_status;
 	event.cache_hit = result.cache_hit;
-	event.status = "ok";
-	event.error = "";
+	event.status = error ? "error" : "ok";
+	event.error = error ? error : "";
 	event.estimated_cost_usd = EstimateCompletionCostUsd(config, options, result);
 	PushUsageEvent(RuntimeState(options), std::move(event));
 }
 
+//! Usage rows hold the plain error message, not DuckDB's serialized exception JSON.
+std::string UsageErrorMessage(const std::exception &ex) {
+	return ErrorData(ex).RawMessage();
+}
+
 void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &prompt, const CompletionOptions &options,
                             long http_status, const std::string &error, int64_t retries) {
-	auto event = BaseProviderUsageEvent(config, options, "ai_completion", static_cast<int64_t>(prompt.size()), -1);
+	auto event = BaseProviderUsageEvent(config, options, "ai_completion", Utf8Length(prompt), -1);
 	event.retries = retries;
 	event.http_status = http_status;
 	event.status = "error";
@@ -4647,7 +5295,7 @@ void RecordFailedUsageEvent(const ProviderConfig &config, const std::string &pro
 
 void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input, const EmbeddingResult &result,
                                const CompletionOptions &options, int64_t dimensions = -1) {
-	auto input_chars = static_cast<int64_t>(input.size());
+	auto input_chars = Utf8Length(input);
 	auto event = BaseProviderUsageEvent(config, options, "ai_embedding", input_chars, input_chars);
 	event.dimensions = dimensions >= 0 ? dimensions : static_cast<int64_t>(result.values.size());
 	event.prompt_tokens = result.prompt_tokens;
@@ -4665,7 +5313,7 @@ void RecordEmbeddingUsageEvent(const ProviderConfig &config, const std::string &
 void RecordFailedEmbeddingUsageEvent(const ProviderConfig &config, const std::string &input,
                                      const CompletionOptions &options, long http_status, const std::string &error,
                                      int64_t retries) {
-	auto input_chars = static_cast<int64_t>(input.size());
+	auto input_chars = Utf8Length(input);
 	auto event = BaseProviderUsageEvent(config, options, "ai_embedding", input_chars, input_chars);
 	event.retries = retries;
 	event.http_status = http_status;
@@ -4956,7 +5604,7 @@ std::string SerializeEmbeddingCacheBody(const ProviderConfig &config, const Embe
 		if (i > 0) {
 			body += ",";
 		}
-		body += JsonDouble(result.values[i]);
+		body += JsonDoubleExact(result.values[i]);
 	}
 	body += config.protocol == "ollama_embed" ? "]]" : "]}]";
 	if (result.prompt_tokens >= 0) {
@@ -4971,13 +5619,14 @@ std::string SerializeEmbeddingCacheBody(const ProviderConfig &config, const Embe
 
 void ValidateEmbeddingInputLimits(const std::string &input, idx_t request_bytes,
                                   const ProviderCapabilities &capabilities) {
-	auto input_tokens = EstimateTokenCount(input);
+	auto input_tokens = ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 	if (input_tokens > capabilities.max_batch_tokens) {
 		throw InvalidInputException(
 		    "AI embedding input has %lld estimated tokens; external model request limit is %lld",
 		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.max_batch_tokens));
 	}
-	if (capabilities.context_tokens > 0 && input_tokens > capabilities.context_tokens) {
+	if ((capabilities.context_tokens > 0 && input_tokens > capabilities.context_tokens) ||
+	    (capabilities.max_input_tokens > 0 && input_tokens > capabilities.max_input_tokens)) {
 		throw InvalidInputException(
 		    "AI embedding input has %lld estimated tokens; external model context limit is %lld",
 		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.context_tokens));
@@ -4999,14 +5648,51 @@ std::string EmbeddingDimensionError(const EmbeddingResult &result, const Provide
 	                          static_cast<long long>(capabilities.embedding_dimensions));
 }
 
+//! Scalar responses and cached batch rows share validation and rejected-response cleanup.
+//! Preserve exception messages for parse failures and plain diagnostic text for dimension failures.
+EmbeddingResult ParseValidatedEmbeddingResult(const ProviderConfig &config, const std::string &input,
+                                              const HttpResponse &response, const CompletionOptions &options,
+                                              const ProviderCapabilities &capabilities, const std::string &cache_key) {
+	auto record_failure = [&](const std::string &error) {
+		if (!cache_key.empty()) {
+			RemoveCachedResponse(RuntimeState(options), cache_key);
+		}
+		RecordFailedEmbeddingUsageEvent(config, input, options, response.status, error, response.retries);
+	};
+	EmbeddingResult result;
+	try {
+		result = ParseEmbeddingResult(config, response);
+	} catch (std::exception &ex) {
+		record_failure(UsageErrorMessage(ex));
+		throw;
+	}
+	auto dimension_error = EmbeddingDimensionError(result, capabilities);
+	if (!dimension_error.empty()) {
+		record_failure(dimension_error);
+		throw InvalidInputException("%s", dimension_error);
+	}
+	return result;
+}
+
 void ValidateCompletionRequestLimits(const std::string &prompt, const std::string &payload,
                                      const CompletionOptions &options) {
 	auto capabilities = GetProviderCapabilities(options, false);
-	auto input_tokens = EstimateTokenCount(prompt) + EstimateTokenCount(options.system_prompt);
+	auto input_tokens = EstimatedCompletionInputTokens(prompt, options, capabilities.token_estimate_multiplier);
 	if (capabilities.context_tokens > 0 && input_tokens > capabilities.context_tokens) {
 		throw InvalidInputException(
 		    "AI completion input has %lld estimated tokens; external model context limit is %lld",
 		    static_cast<long long>(input_tokens), static_cast<long long>(capabilities.context_tokens));
+	}
+	if (capabilities.context_window_tokens > 0) {
+		auto output_tokens = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
+		if (output_tokens > capabilities.context_window_tokens ||
+		    input_tokens > capabilities.context_window_tokens - output_tokens) {
+			throw InvalidInputException(
+			    "AI completion estimated input plus output exceeds external model context window");
+		}
+	}
+	if (capabilities.max_input_tokens > 0 && input_tokens > capabilities.max_input_tokens) {
+		throw InvalidInputException("AI completion input exceeds external model max_input_tokens");
 	}
 	if (NumericCast<int64_t>(payload.size()) > capabilities.max_request_bytes) {
 		throw InvalidInputException("AI completion request has %llu bytes; external model request limit is %lld",
@@ -5075,9 +5761,10 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
                                                const std::vector<std::string> &inputs,
                                                const CompletionOptions &options) {
 	auto payload = EmbeddingPayload(config, inputs);
+	auto capabilities = GetProviderCapabilities(options, true);
 	auto total_tokens = int64_t(0);
 	for (auto &input : inputs) {
-		total_tokens += EstimateTokenCount(input);
+		total_tokens += ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 	}
 	HttpResponse response;
 	try {
@@ -5086,7 +5773,7 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		throw;
 	} catch (std::exception &ex) {
 		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), 0);
 		}
 		throw;
 	}
@@ -5105,11 +5792,11 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		results = ParseEmbeddingResults(config, response, inputs.size());
 	} catch (std::exception &ex) {
 		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, ex.what(), response.retries);
+			RecordFailedEmbeddingUsageEvent(config, input, options, response.status, UsageErrorMessage(ex),
+			                                response.retries);
 		}
 		throw;
 	}
-	auto capabilities = GetProviderCapabilities(options, true);
 	if (capabilities.embedding_dimensions > 0) {
 		for (auto &result : results) {
 			auto error = EmbeddingDimensionError(result, capabilities);
@@ -5129,6 +5816,14 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 }
 
 } // namespace
+
+int64_t Utf8CharacterCount(const std::string &text) {
+	return Utf8Length(text);
+}
+
+bool JsonNestingWithinLimit(const std::string &input) {
+	return JsonNestingWithinLimitInternal(input);
+}
 
 bool ParseJevAnswer(const std::string &response, const std::string &question_key, const std::string &answer_type,
                     std::string &choice, double &probability) {
@@ -5192,14 +5887,14 @@ ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, b
 	// rejected payload instead of failing the whole vector.
 	capabilities.max_batch_inputs = 512;
 	capabilities.max_batch_tokens = 100000;
-	capabilities.max_request_bytes = 8 * 1024 * 1024;
+	capabilities.max_request_bytes = 8LL * 1024 * 1024;
 	capabilities.context_tokens = -1;
 	capabilities.embedding_dimensions = -1;
 	capabilities.native_batch_jobs = false;
 	if (config.protocol == "ollama_embed") {
 		capabilities.max_batch_inputs = 128;
 		capabilities.max_batch_tokens = 32768;
-		capabilities.max_request_bytes = 4 * 1024 * 1024;
+		capabilities.max_request_bytes = 4LL * 1024 * 1024;
 	}
 	if (!options.model_options.empty()) {
 		std::string error;
@@ -5209,9 +5904,12 @@ ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, b
 			throw InvalidInputException("External model options must be a JSON object: %s", error);
 		}
 		auto apply_limit = [&](const char *name, int64_t &target, int64_t maximum) {
+			if (!YyjsonObjectGet(root, name)) {
+				return false;
+			}
 			int64_t value;
 			if (!YyjsonDirectInteger(root, name, value)) {
-				return false;
+				throw InvalidInputException("External model option \"%s\" must be a positive integer", name);
 			}
 			if (value <= 0 || value > maximum) {
 				throw InvalidInputException("External model option \"%s\" must be between 1 and %lld", name,
@@ -5226,8 +5924,20 @@ ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, b
 		apply_limit("max_batch_tokens", capabilities.max_batch_tokens, 1000000000);
 		apply_limit("max_request_bytes", capabilities.max_request_bytes,
 		            static_cast<int64_t>(MAX_HTTP_RESPONSE_BYTES_LIMIT));
-		if (!apply_limit("context_size", capabilities.context_tokens, 1000000000)) {
-			apply_limit("max_input_tokens", capabilities.context_tokens, 1000000000);
+		apply_limit("context_size", capabilities.context_window_tokens, 1000000000);
+		apply_limit("max_input_tokens", capabilities.max_input_tokens, 1000000000);
+		capabilities.context_tokens =
+		    capabilities.context_window_tokens > 0 ? capabilities.context_window_tokens : capabilities.max_input_tokens;
+		auto multiplier = YyjsonObjectGet(root, "token_estimate_multiplier");
+		if (multiplier) {
+			if (!duckdb_yyjson::yyjson_is_num(multiplier)) {
+				throw InvalidInputException("token_estimate_multiplier must be a number between 1 and 16");
+			}
+			auto value = duckdb_yyjson::yyjson_get_num(multiplier);
+			if (!std::isfinite(value) || value < 1 || value > 16) {
+				throw InvalidInputException("token_estimate_multiplier must be a number between 1 and 16");
+			}
+			capabilities.token_estimate_multiplier = value;
 		}
 		apply_limit("embedding_dimensions", capabilities.embedding_dimensions, 1000000);
 		auto native_batch = YyjsonObjectGet(root, "native_batch_support");
@@ -5304,11 +6014,12 @@ CompletionResult Complete(const std::string &prompt, const std::string &model, c
 CompletionResult Complete(const std::string &prompt, const CompletionOptions &options,
                           const std::function<void(const CompletionResult &)> &validate_result) {
 	if (prompt.empty()) {
-		throw InvalidInputException("ai_complete prompt must not be empty");
+		throw InvalidInputException("%s input must not be empty",
+		                            options.function_name.empty() ? "ai_complete" : options.function_name);
 	}
 	auto request_options = RequestOperationOptions(options);
 	auto config = ResolveProvider(request_options);
-	const bool native = options.function_name == "ai_provider_call" || config.protocol == "typesafe_jev";
+	const bool native = options.function_name == "ai_provider_call" || IsDecisionProtocol(config.protocol);
 	auto endpoint = native && !options.api.empty() && options.api != "chat" ? config.base_url : RequestEndpoint(config);
 	std::string payload;
 	try {
@@ -5332,7 +6043,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		ValidateCompletionRequestLimits(prompt, payload, request_options);
 		EnforceAllowedHost(endpoint, request_options);
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, prompt, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	HttpResponse response;
@@ -5344,7 +6055,7 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		// Query cancellation is not a provider failure; keep it out of usage error events.
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, prompt, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -5353,8 +6064,11 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 		throw IOException("%s", error);
 	}
 	CompletionResult result;
+	bool parsed = false;
 	try {
 		result = ParseCompletionResult(config, response, native);
+		parsed = true;
+		RequireCompleteAnswer(result, native);
 		if (validate_result) {
 			validate_result(result);
 		}
@@ -5364,7 +6078,13 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 			// poisoned entry would fail every later cache hit until ai_clear_cache().
 			RemoveCachedResponse(RuntimeState(request_options), cache_key);
 		}
-		RecordFailedUsageEvent(config, prompt, request_options, response.status, ex.what(), response.retries);
+		if (parsed) {
+			// The provider answered and charged for it, so keep its token counts on the error event.
+			RecordUsageEvent(config, prompt, result, request_options, UsageErrorMessage(ex).c_str());
+		} else {
+			RecordFailedUsageEvent(config, prompt, request_options, response.status, UsageErrorMessage(ex),
+			                       response.retries);
+		}
 		throw;
 	}
 	RecordUsageEvent(config, prompt, result, request_options);
@@ -5389,7 +6109,7 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 		ValidateCompletionRequestLimits(text, payload, request_options);
 		EnforceAllowedHost(endpoint, request_options);
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, text, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	HttpResponse response;
@@ -5400,7 +6120,7 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, text, request_options, 0, ex.what(), 0);
+		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -5409,13 +6129,21 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 		throw IOException("%s", error);
 	}
 	CompletionResult result;
+	bool parsed = false;
 	try {
 		result = ParseCompletionResult(config, response);
+		parsed = true;
+		RequireCompleteAnswer(result, false);
 	} catch (std::exception &ex) {
 		if (!cache_key.empty()) {
 			RemoveCachedResponse(RuntimeState(request_options), cache_key);
 		}
-		RecordFailedUsageEvent(config, text, request_options, response.status, ex.what(), response.retries);
+		if (parsed) {
+			RecordUsageEvent(config, text, result, request_options, UsageErrorMessage(ex).c_str());
+		} else {
+			RecordFailedUsageEvent(config, text, request_options, response.status, UsageErrorMessage(ex),
+			                       response.retries);
+		}
 		throw;
 	}
 	RecordUsageEvent(config, text, result, request_options);
@@ -5455,7 +6183,7 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	try {
 		ValidateEmbeddingInputLimits(input, payload.size(), capabilities);
 	} catch (std::exception &ex) {
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, ex.what(), 0);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	auto endpoint = EmbeddingEndpoint(config);
@@ -5463,12 +6191,13 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	HttpResponse response;
 	std::string cache_key;
 	try {
-		response = FetchProviderResponse("embedding", config, endpoint, payload, request_options,
-		                                 EstimateTokenCount(input), cache_key);
+		response =
+		    FetchProviderResponse("embedding", config, endpoint, payload, request_options,
+		                          ProfileTokenEstimate(input, capabilities.token_estimate_multiplier), cache_key);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, ex.what(), 0);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), 0);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -5476,25 +6205,7 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, error, response.retries);
 		throw IOException("%s", error);
 	}
-	EmbeddingResult result;
-	try {
-		result = ParseEmbeddingResult(config, response);
-	} catch (std::exception &ex) {
-		if (!cache_key.empty()) {
-			RemoveCachedResponse(RuntimeState(request_options), cache_key);
-		}
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, ex.what(), response.retries);
-		throw;
-	}
-	auto dimension_error = EmbeddingDimensionError(result, capabilities);
-	if (!dimension_error.empty()) {
-		if (!cache_key.empty()) {
-			RemoveCachedResponse(RuntimeState(request_options), cache_key);
-		}
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, response.status, dimension_error,
-		                                response.retries);
-		throw InvalidInputException("%s", dimension_error);
-	}
+	auto result = ParseValidatedEmbeddingResult(config, input, response, request_options, capabilities, cache_key);
 	RecordEmbeddingUsageEvent(config, input, result, request_options);
 	MaybePostEmbeddingLog(config, input, result, request_options);
 	return result;
@@ -5520,7 +6231,7 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 		try {
 			ValidateEmbeddingInputLimits(input, EmbeddingPayload(config, input).size(), capabilities);
 		} catch (std::exception &ex) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, 0, ex.what(), 0);
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), 0);
 			throw;
 		}
 	}
@@ -5537,21 +6248,8 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 			auto cache_key = ResponseCacheKey("embedding", config, endpoint, EmbeddingPayload(config, inputs[i]));
 			HttpResponse cached_response;
 			if (TryGetCachedResponse(runtime_state, cache_key, options, cached_response)) {
-				try {
-					results[i] = ParseEmbeddingResult(config, cached_response);
-				} catch (std::exception &ex) {
-					RemoveCachedResponse(runtime_state, cache_key);
-					RecordFailedEmbeddingUsageEvent(config, inputs[i], options, cached_response.status, ex.what(),
-					                                cached_response.retries);
-					throw;
-				}
-				auto dimension_error = EmbeddingDimensionError(results[i], capabilities);
-				if (!dimension_error.empty()) {
-					RemoveCachedResponse(runtime_state, cache_key);
-					RecordFailedEmbeddingUsageEvent(config, inputs[i], options, cached_response.status, dimension_error,
-					                                cached_response.retries);
-					throw InvalidInputException("%s", dimension_error);
-				}
+				results[i] =
+				    ParseValidatedEmbeddingResult(config, inputs[i], cached_response, options, capabilities, cache_key);
 				auto cache_options = ChildOperationOptions(options);
 				RecordEmbeddingUsageEvent(config, inputs[i], results[i], cache_options);
 				MaybePostEmbeddingLog(config, inputs[i], results[i], cache_options);
@@ -5573,7 +6271,7 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 		int64_t batch_bytes = NumericCast<int64_t>(EmbeddingPayload(config, std::vector<std::string> {}).size());
 		while (batch_end < miss_rows.size()) {
 			auto &input = inputs[miss_rows[batch_end]];
-			auto input_tokens = EstimateTokenCount(input);
+			auto input_tokens = ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 			auto input_bytes = NumericCast<int64_t>(JsonEscape(input).size()) + 2 + (batch_end > batch_start ? 1 : 0);
 			auto input_count = NumericCast<int64_t>(batch_end - batch_start + 1);
 			if (batch_end > batch_start && (input_count > capabilities.max_batch_inputs ||
@@ -5599,8 +6297,12 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 			return EmbedBatchRequest(config, endpoint, batch_inputs, batch_options);
 		} catch (EmbeddingBatchTooLargeException &) {
 			auto split = batch_inputs.size() / 2;
-			std::vector<std::string> left(batch_inputs.begin(), batch_inputs.begin() + split);
-			std::vector<std::string> right(batch_inputs.begin() + split, batch_inputs.end());
+			std::vector<std::string> left(batch_inputs.begin(),
+			                              batch_inputs.begin() +
+			                                  NumericCast<std::vector<std::string>::difference_type>(split));
+			std::vector<std::string> right(batch_inputs.begin() +
+			                                   NumericCast<std::vector<std::string>::difference_type>(split),
+			                               batch_inputs.end());
 			auto left_results = execute_batch(left);
 			auto right_results = execute_batch(right);
 			left_results.insert(left_results.end(), std::make_move_iterator(right_results.begin()),
@@ -5694,7 +6396,7 @@ namespace {
 
 std::vector<UsageEvent> SnapshotUsageEvents(ProviderRuntimeState &state) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
-	return state.usage_events;
+	return {state.usage_events.begin(), state.usage_events.end()};
 }
 
 UsageBufferStats SnapshotUsageStats(ProviderRuntimeState &state) {
@@ -5709,6 +6411,7 @@ void ResetUsageEvents(ProviderRuntimeState &state) {
 	std::lock_guard<std::mutex> lock(state.usage_mutex);
 	state.usage_events.clear();
 	state.dropped_usage_events = 0;
+	state.usage_totals = UsageTotals {};
 }
 
 void ResetResponseCache(ProviderRuntimeState &state) {
@@ -5721,7 +6424,7 @@ void ResetResponseCache(ProviderRuntimeState &state) {
 } // namespace
 
 std::vector<UsageEvent> UsageEvents() {
-	return SnapshotUsageEvents(fallback_runtime_state);
+	return SnapshotUsageEvents(FallbackRuntimeState());
 }
 
 std::vector<UsageEvent> UsageEvents(ClientContext &context) {
@@ -5729,15 +6432,21 @@ std::vector<UsageEvent> UsageEvents(ClientContext &context) {
 }
 
 UsageBufferStats UsageStats() {
-	return SnapshotUsageStats(fallback_runtime_state);
+	return SnapshotUsageStats(FallbackRuntimeState());
 }
 
 UsageBufferStats UsageStats(ClientContext &context) {
 	return SnapshotUsageStats(RuntimeState(context));
 }
 
+UsageTotals GetUsageTotals(ClientContext &context) {
+	auto &runtime = RuntimeState(context);
+	std::lock_guard<std::mutex> lock(runtime.usage_mutex);
+	return runtime.usage_totals;
+}
+
 void ClearUsageEvents() {
-	ResetUsageEvents(fallback_runtime_state);
+	ResetUsageEvents(FallbackRuntimeState());
 }
 
 void ClearUsageEvents(ClientContext &context) {
@@ -5745,7 +6454,7 @@ void ClearUsageEvents(ClientContext &context) {
 }
 
 void ClearResponseCache() {
-	ResetResponseCache(fallback_runtime_state);
+	ResetResponseCache(FallbackRuntimeState());
 }
 
 void ClearResponseCache(ClientContext &context) {
@@ -5754,16 +6463,8 @@ void ClearResponseCache(ClientContext &context) {
 
 std::vector<ModelPrice> ModelPrices() {
 	auto prices = BuiltinModelPrices();
-	if (CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
-		for (auto &price : prices) {
-			if (price.provider == "gemini" &&
-			    (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash") &&
-			    price.operation == "completion") {
-				price.input_token_price_per_million = 0.75;
-				price.output_token_price_per_million = 3.75;
-				price.source_note = "introductory text token pricing through 2026-12-31";
-			}
-		}
+	for (auto &price : prices) {
+		ApplyCurrentModelPrice(price);
 	}
 	return prices;
 }
@@ -5796,7 +6497,7 @@ void RecordLocalUsageEvent(ClientContext *context, const std::string &event_name
 	event.status = "ok";
 	event.error = "";
 	event.estimated_cost_usd = -1;
-	auto &state = context ? RuntimeState(*context) : fallback_runtime_state;
+	auto &state = context ? RuntimeState(*context) : FallbackRuntimeState();
 	PushUsageEvent(state, std::move(event));
 }
 
@@ -5819,20 +6520,21 @@ bool ExtractJsonSchemaProperties(const std::string &schema, std::vector<JsonSche
 		error = "schema must be a JSON object";
 		return false;
 	}
-	auto root_type = ObjectField(schema_value, "type");
+	auto &root_schema = *ResolveSchemaNode(schema_value, &schema_value);
+	auto root_type = ObjectField(root_schema, "type");
 	JsonValue object_value;
 	object_value.type = JsonValueType::OBJECT;
 	if (root_type && !SchemaTypeAllows(*root_type, object_value)) {
 		error = "schema root type must allow object";
 		return false;
 	}
-	auto properties_schema = ObjectField(schema_value, "properties");
+	auto properties_schema = ObjectField(root_schema, "properties");
 	if (!properties_schema || properties_schema->type != JsonValueType::OBJECT ||
 	    properties_schema->object_value.empty()) {
 		error = "schema must define at least one top-level object property";
 		return false;
 	}
-	ExtractSchemaPropertyList(schema_value, properties);
+	ExtractSchemaPropertyList(schema_value, root_schema, properties);
 	return true;
 }
 
@@ -5851,6 +6553,9 @@ JsonExtractedValue ExtractJsonValue(const JsonValue &value) {
 		extracted.kind = JsonExtractedKind::NUMBER;
 		extracted.number_value = value.number_value;
 		extracted.number_is_integer = IsJsonInteger(value);
+		if (extracted.number_is_integer) {
+			extracted.json_value = ExactIntegerText(value);
+		}
 		break;
 	case JsonValueType::STRING:
 		extracted.kind = JsonExtractedKind::STRING;
@@ -5872,7 +6577,7 @@ JsonExtractedValue ExtractJsonValue(const JsonValue &value) {
 	case JsonValueType::OBJECT:
 		extracted.kind = JsonExtractedKind::OBJECT;
 		for (auto &entry : value.object_value) {
-			extracted.object_values.push_back(make_pair(entry.first, ExtractJsonValue(entry.second)));
+			extracted.object_values.emplace_back(entry.first, ExtractJsonValue(entry.second));
 		}
 		break;
 	}

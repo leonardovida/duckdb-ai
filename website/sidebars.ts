@@ -25,6 +25,8 @@ const sidebars: SidebarsConfig = {
       },
       items: [
         'cookbooks/support-ticket-data',
+        'cookbooks/chain-ai-steps',
+        'cookbooks/evaluate-before-batch',
         'cookbooks/production-batch-enrichment',
         'cookbooks/resumable-enrichment',
         'cookbooks/source-database-enrichment',
@@ -36,6 +38,7 @@ const sidebars: SidebarsConfig = {
         'cookbooks/lance-semantic-search',
         'cookbooks/structured-triage-records',
         'cookbooks/jev-decisions',
+        'cookbooks/decision-routing',
         'cookbooks/sql-assistant',
       ],
     },

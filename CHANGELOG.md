@@ -5,17 +5,308 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
-## Unreleased
+## 0.8.1 - 2026-10-09
+
+### Fixed
+
+- Very large positive `max_tokens` values no longer overflow the estimated
+  input-plus-output token count. Declared context windows reject oversized
+  requests before HTTP, and token pacing reserves the configured window instead
+  of treating an overflowed estimate as zero. Without a declared context window,
+  large positive output limits remain valid and are sent unchanged.
+
+## 0.8.0 - 2026-10-08
+
+This release refreshes default models and built-in prices for current provider
+catalogs. SQL functions, options and result shapes are unchanged. Calls that
+rely on a provider's default model now use a different model; pass
+`model := ...` or set `MODEL` in a secret to keep the previous one.
 
 ### Added
 
-- A labeled-data Jev batch evaluation example compares batch sizes 1, 8, 16 and
-  32 with row-level predictions, accuracy, agreement and request usage.
+- Built-in pricing and request compatibility for Claude Haiku 5.5
+  (`claude-haiku-5-5`), Gemini 3.8 Flash (`gemini-3.8-flash`, with Google's
+  introductory rate through 2026-12-31), DeepSeek V4.1 Flash (`deepseek-flash`),
+  Grok 4.7, Cloudflare Clef-flash, Perplexity `pplx-decider-v1.1-27b` and
+  OpenRouter `anthropic/claude-haiku-5.5`.
 
-- `ai_jev` returns named choices, rubric scores, probabilities and confidence as
-  typed SQL fields, with automatic batches of up to 32 rows and bounded request
-  bodies. Includes a runnable table-to-Parquet cookbook and deterministic HTTP
-  coverage. Existing Jev entry points retain their behavior.
+### Changed
+
+- New default models:
+  - `anthropic`: `claude-haiku-5-5` (was `claude-haiku-4-5`). It costs a tenth
+    as much, uses adaptive thinking by default and counts about 30% more tokens
+    for the same text.
+  - `gemini`: `gemini-3.8-flash` (was `gemini-3.7-flash`), at the same price.
+  - `vertex`: `google/gemini-3.8-flash` (was `google/gemini-2.5-flash`, which
+    Vertex retires in October 2026).
+  - `deepseek`: `deepseek-flash` (was `deepseek-v4-flash`, retired by DeepSeek
+    and temporarily routed to `deepseek-flash`).
+  - `azure`: `gpt-5.6-luna` (was `gpt-4o`, which Azure no longer offers to new
+    deployments).
+  - `fireworks`: `accounts/fireworks/models/gpt-oss-120b` (was `gpt-oss-20b`,
+    removed from Fireworks serverless).
+  - `nebius`: `Qwen/Qwen3-30B-A3B-Instruct-2507` (was
+    `meta-llama/Meta-Llama-3.1-70B-Instruct`, no longer served).
+  - `mimo`: `mimo-v2.6-flash` (was `mimo-v2.5-pro`, which retires on 2026-10-21).
+  - `qianfan`: `ernie-5.1` (was `ernie-4.5-turbo-128k`, which retires on
+    2026-10-29).
+  - `ai_decide` with `perplexity`: `pplx-decider-v1.1-27b` (was
+    `pplx-decider-v1-27b`).
+
+### Fixed
+
+- Built-in cost estimates use current rates: DeepSeek Flash at $0.30/$1.20 per
+  million tokens (was $0.44/$1.32), Perplexity decision models at $0.02 per
+  million input tokens (was $0.04), and Claude Sonnet 5.5 cache reads at 5% of
+  the input rate (was 10%).
+- `temperature` is omitted for models that reject non-default sampling
+  parameters: Claude Haiku 5.5, Gemini 3.8 Flash, Gemini 3.x models on Vertex,
+  and Claude 5.5-generation and Fable 5.1 endpoints on Databricks. Previously
+  these requests could fail when `temperature` was set.
+
+### Documentation
+
+- Provider guides list the new defaults and note that Together no longer serves
+  embeddings serverlessly, so its default embedding model needs a dedicated
+  endpoint.
+
+## 0.7.0 - 2026-10-06
+
+### Added
+
+- `ai_decide(state, questions, provider := ...)` answers typed questions with
+  any supported decision model and returns the same typed `STRUCT` as `ai_jev`.
+  It supports TypeSafe Jev, Cloudflare Clef and Clef-flash on Workers AI,
+  Perplexity `pplx-decider-v1-27b`, local Ollama decision models such as
+  `nimble` and `tev1`, and any `/v1/systemone` endpoint through the new
+  `systemone` provider. Questions can carry their own `instructions`.
+  `ai_jev` is unchanged and remains available as the TypeSafe-only form.
+
+### Documentation
+
+- New [chain AI steps](docs/cookbooks/chain-ai-steps.md) cookbook and agent
+  guide section. They cover calling each model function once per row,
+  skipping failed and NULL rows downstream, branching with `CASE`, and
+  checkpointing each step so reruns only retry missing rows. A new smoke test
+  pins these call counts and runs the cookbook SQL.
+- Reworked docs for readers and agents: one documented order for how call
+  options, profiles, session settings and secrets combine; `ai_decide` model
+  resolution; missing providers (TypeSafe, systemone, Xiaomi MiMo) and aliases
+  in the provider tables; and fixes to examples that failed as written.
+- New cookbooks for routing rows by decision confidence and for evaluating a
+  prompt or model on a labeled sample before a batch run.
+- Function and setting descriptions shown by `duckdb_functions()`,
+  `duckdb_settings()` and the community extension page now say what each one
+  does and use consistent examples.
+
+### Maintenance
+
+- Build and test against DuckDB 1.5.6 and matching extension CI tooling. This
+  includes the upstream fix for LIMIT/OFFSET pushdown across volatile
+  projections, preserving evaluation order for model-backed SQL expressions.
+  The sanitizer host and platform/distribution builds use the same version.
+  OFFSET can evaluate model calls for skipped rows; paginate in an input
+  subquery when pagination should happen before inference.
+
+### Fixed
+
+- Functions accept DuckDB native types and the usual ways of passing values:
+  - Text inputs accept any type (numbers, dates, UUIDs, lists, structs, whole
+    rows), sent as their text form.
+  - A column or macro parameter in a positional slot is read as the per-row
+    model, provider or instruction instead of being rejected as an unknown
+    named option.
+  - Prepared-statement parameters and macro parameters work for named options,
+    JSON Schemas, `ai_decide` questions and classifier labels.
+  - Labels accept fixed-size arrays, JSON-array strings and a `MAP` of label to
+    description. Previously these were split into wrong labels.
+  - `ai_decide` criteria accept any key, value or level type that casts to text,
+    such as `MAP {true: ..., false: ...}` or `VARCHAR[3]` levels.
+  - JSON options (`response_schema`, `request_options`, `metadata`,
+    `label_descriptions`, `examples`) accept a `STRUCT`, `MAP` or list.
+  - `include_tables` and `exclude_tables` accept a single table name.
+  - A NULL named option keeps the default instead of raising an error.
+- `ai_generate_chunks` and `ai_prep_search` can chunk a column with a lateral
+  join (`FROM docs d, ai_generate_chunks(d.body)`).
+- `ai_agg(..., instruction := ...)` and `task := ...` no longer fail with
+  "requires a constant instruction argument".
+- An empty label list, a NULL label or duplicate labels now raise an error
+  (or follow `on_error`) before any request is sent, instead of returning NULL
+  or paying for a request.
+- `ai_extract_record` and `ai_complete_record` reject JSON Schemas whose
+  property names are empty or differ only in case, instead of building a
+  `STRUCT` that cannot be stored.
+- `ai_decide` no longer sends the chat model stored in an Ollama, Cloudflare or
+  Perplexity secret to the decision endpoint, and TypeSafe decisions no longer
+  pick up a chat model from `DUCKDB_AI_MODEL`. `TYPESAFE_DECISION_MODEL` is
+  accepted alongside `TYPESAFE_MODEL`.
+- Model replies are read the way small and local models actually write them:
+  - `ai_classify`, `ai_classify_labels` and `ai_classify_result` accept a label
+    wrapped in markdown or quotes, after a `Label:` prefix, with trailing
+    punctuation or followed by an explanation. Multi-label replies may be
+    unquoted (`[billing, other]`), a bare label or a bullet list, and repeated
+    labels are de-duplicated instead of failing.
+  - `ai_filter` accepts `True.`, `**Yes**`, `"false"` and an answer followed by
+    a reason. `ai_rerank` accepts `Score: 0.8`, `0.8 - relevant` and
+    `{"score": 0.8}`, and no longer reads hex such as `0x1p-1` as a score.
+  - `ai_complete_json`, `ai_extract_record` and `ai_complete_record` find the
+    JSON inside a code fence or after a sentence. `ai_extract` drops a code
+    fence, and text outputs no longer keep leading or trailing whitespace.
+  - A leading `<think>` reasoning block is removed. A reply cut off by
+    `max_tokens`, or one that contains only reasoning, now raises an error (or
+    follows `on_error`) instead of returning partial text.
+  - `ai_sql`, `ai_query_data` and `ai_fix_sql` find the query after prose,
+    inside a one-line fence or after a `SQL:` label, and ignore text after it.
+  - `ai_decide` matches a choice that differs only in case or surrounding
+    spaces, and returns NULL for `"confidence": null`.
+- JSON Schemas map to the expected column types: local `$ref`/`$defs` (as
+  generated by pydantic), `anyOf`/`oneOf` with one non-null branch
+  (`Optional[int]` becomes `BIGINT`), and `["integer", "number"]` becomes
+  `DOUBLE`. Properties with several types become `VARCHAR` instead of failing
+  on valid values.
+- Deeply nested JSON replies (more than 512 levels) return an error instead of
+  crashing the process.
+- Usage rows keep the provider's token counts when a reply fails validation,
+  record the reason when `ai_query_data(..., on_error := 'null')` swallows an
+  error, store plain error messages, and report Ollama's cached prompt tokens.
+- `ai_fix_sql` in line mode rejects an error that points past the last line of
+  the query instead of accepting any reply. Errors name the function that
+  failed (`ai_extract_record`, not `ai_complete_record`).
+- Classifier centroid accumulation avoids overflowing finite embeddings. Labels
+  preserve commas, escaped characters, literal quotes, whitespace, and fences
+  through training and fallback; ambiguous duplicate labels fail early.
+- Generated SQL cache keys include resolved credentials and model profiles, so
+  credential rotation and profile replacement invalidate earlier entries.
+- Completion token reservations and input limits include system prompts and
+  response schemas.
+- Release signing uses private temporary staging with failure cleanup. Unsigned
+  reruns reset signatures; unsupported signature sizes fail explicitly, and
+  WebAssembly compression and upload headers agree for every wasm target.
+
+### Changed
+
+- `ai_usage()` returns NULL instead of `-1` for counts the provider did not
+  report (tokens, cached tokens, character counts, dimensions) and for
+  `http_status` when no HTTP call was made, so `sum()` and `avg()` are correct.
+  `ai_usage_summary()` returns NULL `total_tokens` and `estimated_cost_usd` when
+  no call in the group reported them. Replace `col < 0` checks with
+  `col IS NULL`.
+- Character counts in `ai_usage()` count Unicode characters instead of bytes.
+- `ai_sentiment` always returns `positive`, `neutral` or `negative`. Other
+  replies raise an error or follow `on_error`.
+- `STRUCT` fields from `ai_extract_record` and columns from
+  `ai_complete_record` follow the order of the JSON Schema properties instead
+  of alphabetical order. Select fields by name rather than position.
+
+### Performance
+
+- Generated SQL cache recency updates take constant time. Retained key and SQL
+  text is bounded by 64 MiB as well as the existing 1,024-entry limit.
+
+### Diagnostics and validation
+
+- Added `ai_query_cache_stats()` and `ai_usage_totals()` without changing existing
+  result schemas. Resumable enrichment persists batch counters with its results.
+- Classifier sampling now selects distinct texts across the entire relation using
+  stable bottom-k priorities, with identical texts isolated from holdout leakage.
+- Model profiles support conservative `token_estimate_multiplier` margins.
+  `context_size` reserves output as well as input; `max_input_tokens` remains an
+  independent input-only limit.
+- Accuracy thresholds and required-label gates are available in the labeled
+  evaluator, with independent multilingual synthetic fixtures in CI.
+- CI now exercises owned C++ ASan/UBSan, deterministic schema/chunk fuzz cases,
+  shared-connection stress, and macOS/Windows extension checks on every change.
+
+### Evaluation
+
+- The labeled Jev evaluator reports per-class precision, recall, F1, support,
+  macro F1, answer coverage, and a confusion matrix including failed predictions.
+
+## 0.6.1 - 2026-10-01
+
+### Fixed
+
+- Typed completion validation now runs before success accounting and evicts
+  rejected cached responses. Record projection preserves exact 64-bit integers
+  and respects `fail_on_error` for projection failures.
+- JSON Schema validation now enforces union types and nested boolean schemas,
+  counts Unicode code points, compares decimal lexemes exactly, and validates
+  integer divisibility without narrowing large values to 64 bits.
+- Cosine similarity handles extreme finite embedding magnitudes, and cached
+  embeddings retain double precision.
+- Classifier holdouts retain training examples for each observed class; artifacts
+  without validation examples are marked unusable.
+- Batch-size recommendations reject results outside the BIGINT range.
+
+### Performance
+
+- Chunk metadata advances through the document instead of rescanning every
+  prefix. Usage-buffer eviction now takes constant time, and per-request model
+  pricing avoids copying the complete price catalog.
+
+### Maintenance
+
+- CI now analyzes extension sources directly under `src/` with clang-tidy.
+- Added deterministic regressions and updated three documentation dependencies
+  to versions without currently reported npm audit vulnerabilities.
+
+## 0.6.0 - 2026-09-30
+
+### Added
+
+- `ai_jev(text, questions)` returns named choices, rubric scores, probabilities
+  and confidence as typed SQL fields. It batches up to 32 rows per request,
+  preserves row identity, and keeps existing Jev entry points unchanged.
+  [#101](https://github.com/leonardovida/duckdb-ai/pull/101)
+
+- A labeled-data Jev batch evaluation example compares batch sizes 1, 8, 16 and
+  32 with row-level predictions, accuracy, agreement coverage, request
+  operations and token usage. [#104](https://github.com/leonardovida/duckdb-ai/pull/104)
+
+- Built-in pricing and request compatibility now cover GPT-6 Astra, GPT-6.1
+  Sol, GPT-6 Sol, GPT-6 Luna, Claude Fable 5.1, Claude Opus 5.5 and Claude
+  Sonnet 5.5. [#112](https://github.com/leonardovida/duckdb-ai/pull/112)
+
+### Fixed
+
+- Numeric `DUCKDB_AI_*` environment settings now reject valid prefixes followed
+  by trailing text, so values such as `0junk` cannot silently change retry,
+  cache, concurrency, token-limit or logging behavior.
+  [#106](https://github.com/leonardovida/duckdb-ai/pull/106)
+
+- Provider cache reads and writes now contribute to token totals and cost
+  estimates using model-specific rates. Unsupported sampling parameters are
+  omitted for the new reasoning models while GPT-6 Sol and Luna retain their
+  temperature behavior with reasoning disabled.
+  [#112](https://github.com/leonardovida/duckdb-ai/pull/112)
+
+### Changed
+
+- Added shared provider response-format validation for no-schema requests while
+  preserving provider-specific JSON and schema-first behavior.
+  [#99](https://github.com/leonardovida/duckdb-ai/pull/99)
+
+- Consolidated usage snapshots, usage statistics, usage clearing and response
+  cache clearing around shared database-scoped runtime state operations.
+  [#100](https://github.com/leonardovida/duckdb-ai/pull/100)
+
+- Reused successful `patternProperties` matches when validating
+  `additionalProperties`, keeping validation order and SQL behavior stable.
+  [#110](https://github.com/leonardovida/duckdb-ai/pull/110)
+
+- Shared scalar and cached batch embedding validation and rejected-response
+  cleanup while preserving diagnostics, cache identity and bulk-request
+  behavior. [#111](https://github.com/leonardovida/duckdb-ai/pull/111)
+
+### Maintenance
+
+- CI now runs code, test, example, build, documentation and website checks only
+  for the paths they cover, while retaining manual and scheduled runs.
+  [#105](https://github.com/leonardovida/duckdb-ai/pull/105)
+
+- Patched the documentation dependency versions for vulnerable `colord` and
+  `image-size` releases through the existing npm overrides.
+  [#107](https://github.com/leonardovida/duckdb-ai/pull/107)
 
 ## 0.5.2 - 2026-09-26
 

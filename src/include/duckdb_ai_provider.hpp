@@ -30,6 +30,9 @@ struct ProviderCapabilities {
 	int64_t max_batch_tokens;
 	int64_t max_request_bytes;
 	int64_t context_tokens;
+	int64_t max_input_tokens = -1;
+	int64_t context_window_tokens = -1;
+	double token_estimate_multiplier = 1;
 	int64_t embedding_dimensions;
 	bool native_batch_jobs;
 };
@@ -172,6 +175,18 @@ struct UsageBufferStats {
 	uint64_t dropped_log_events;
 };
 
+//! Lifetime counters retained independently of the bounded usage-event buffer.
+struct UsageTotals {
+	uint64_t provider_events = 0;
+	uint64_t request_attempts = 0;
+	uint64_t failures = 0;
+	uint64_t cache_hits = 0;
+	uint64_t known_total_tokens = 0;
+	uint64_t unknown_token_events = 0;
+};
+
+UsageTotals GetUsageTotals(ClientContext &context);
+
 //! Built-in model pricing row exposed through ai_model_prices().
 struct ModelPrice {
 	std::string provider;
@@ -218,6 +233,10 @@ ProviderConfig ResolveProvider(const CompletionOptions &options);
 void SnapshotEnvironmentOptions(CompletionOptions &options);
 //! Normalize provider aliases such as claude -> anthropic and local -> openai_compatible.
 std::string NormalizeProviderName(const std::string &provider);
+//! False when JSON text nests deeper than the extension parses safely.
+bool JsonNestingWithinLimit(const std::string &input);
+//! Number of Unicode characters in UTF-8 text, as reported in ai_usage() character counts.
+int64_t Utf8CharacterCount(const std::string &text);
 //! Return the default base URL for a supported provider.
 std::string ProviderBaseUrl(const std::string &provider);
 //! Return the provider protocol used for request/response shaping.

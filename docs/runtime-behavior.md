@@ -1,12 +1,16 @@
 ---
 sidebar_position: 5
+title: "Runtime behavior"
+sidebar_label: "Runtime behavior"
+description: "How DuckDB AI runs provider calls: function volatility, concurrency, retries, timeouts, response caching, cancellation, token limits and egress allowlists."
+keywords: ["DuckDB AI runtime", "LLM retries", "LLM caching", "concurrency", "timeouts"]
 ---
 
 # Runtime behavior
 
 This page documents how the `ai` extension executes provider calls at runtime. It is
-the operational reference for the provider hardening, caching, concurrency, and
-egress controls used by the SQL functions.
+the operational reference for the retry, caching, concurrency and egress
+controls used by the SQL functions.
 
 ## Function stability
 
@@ -70,7 +74,8 @@ provider rate limiter still controls outbound request pacing.
 Configured worker caps must be between 0 and 64; larger values are rejected
 instead of being silently clamped.
 
-SQL-assistant table functions perform one provider call per invocation.
+SQL-assistant table functions perform one provider call per invocation, plus up
+to `fix_attempts` correction calls when the generated SQL does not bind.
 Aggregate functions use one request for groups that fit `max_context_chars` and
 a bounded parallel map/reduce request tree for larger groups.
 
@@ -109,6 +114,29 @@ an oversized group before any provider call. Hierarchical reduction also stops
 immediately with an explicit error when a provider's intermediate responses do
 not reduce either the chunk count or total byte size.
 
+## Estimated token pacing
+
+Completion reservations include the user prompt, system prompt, response schema,
+and requested output limit (512 tokens when no output limit is supplied). Schema
+text can appear in both the system instructions and the provider's structured
+output field; both transmitted copies count. External model input limits use the
+same input estimate. `max_input_tokens` limits only input; `context_size` limits
+estimated input plus the requested output maximum (512 estimated tokens when unspecified). Both
+limits apply when a profile supplies both. Native output limits are read from the
+request JSON body. For embedding models, both context limits constrain input.
+Profiles may set `token_estimate_multiplier` to a finite value from 1 through 16
+to scale input estimates conservatively for that provider/model; completion
+pacing, context checks, and embedding batching share the multiplier. Choose it
+from measured usage on representative prompts. It does not provide exact
+provider tokenization, and `ai_count_tokens()` retains its unscaled local estimate. Estimates still use roughly one token per four UTF-8 bytes,
+so they do not guarantee exact enforcement of a provider's token quota.
+
+Generated SQL caching for `ai_query_data()` also uses the resolved provider,
+credential fingerprint, and profile options. Rotating credentials or replacing a
+profile therefore creates a new cache key. Recency updates take constant time;
+retained key and SQL text is limited to 64 MiB and 1,024 entries per database.
+Container overhead is additional. Oversized entries are not retained.
+
 ## Cancellation and retries
 
 Provider HTTP calls use libcurl with interrupt-aware progress callbacks. When a
@@ -133,7 +161,8 @@ handle for provider requests, and attaches those handles to a shared libcurl
 connection cache. This allows libcurl to reuse connections across provider
 worker threads where the provider and libcurl build support it.
 
-Provider calls use the configured `timeout_seconds` for the total request. The
+Provider calls use the configured `timeout_seconds` for the total request
+(default 120 seconds, or `DUCKDB_AI_TIMEOUT_SECONDS`). The
 connect timeout defaults to the smaller of 10 seconds and the total timeout. Set
 `connect_timeout_seconds := ...`, `duckdb_ai_connect_timeout_seconds`, or
 `DUCKDB_AI_CONNECT_TIMEOUT_SECONDS` to override it for provider requests.
@@ -176,12 +205,19 @@ as `0` because no provider HTTP request was made.
 The maximum number of cached entries defaults to `1024`. Set
 `cache_max_entries := ...`, `duckdb_ai_cache_max_entries`, or
 `DUCKDB_AI_CACHE_MAX_ENTRIES` to change the bound. Use `0` to disable
-response-cache storage. Cached response bodies and keys also have a hard 64 MiB
-per-database bound; an individual response larger than that is not cached.
+response-cache storage. Cached response bodies and both retained key copies also
+have a hard 64 MiB per-database bound; entries exceeding that bound are not cached.
+Container overhead is additional.
 
 `ai_query_data()` also keeps a small in-memory generated-SQL cache for successful
 binds. `ai_clear_cache()` clears the response, generated-SQL, and similarity
 query caches.
+
+Typed completion functions validate their output before recording a successful
+usage event. Invalid JSON, schema violations, unknown classification labels,
+invalid booleans or scores, and record projection failures produce error events
+and evict the rejected response from the cache. A later call can request a fresh
+response. Validation failures do not automatically retry the model call.
 
 ## Deterministic performance benchmark
 
@@ -229,3 +265,26 @@ embedding arrays, `ai_complete_json()` validation, and
 documented JSON Schema subset rather than full JSON Schema draft parity.
 Schema `pattern` checks use RE2-compatible regular expressions so validation
 has bounded-time matching behavior; constructs unsupported by RE2 are rejected.
+
+Type unions accept only their listed types. Nested boolean schemas are supported:
+`true` allows any value and `false` rejects every value. String `minLength` and
+`maxLength` count Unicode code points, so an emoji counts as one and a combining
+mark counts separately from its base character. Numeric equality and bounds
+compare the original decimal values, including equivalent exponent spellings.
+Integer `multipleOf` checks use decimal arithmetic without narrowing to 64 bits.
+Numbers whose double conversion is non-finite are rejected. Typed integer
+projection preserves exact values within the signed `BIGINT` range; projected
+`number` fields use DuckDB `DOUBLE` precision. Non-integer `multipleOf` checks
+still use floating-point tolerance.
+
+## Lifetime and persisted diagnostics
+
+`ai_query_cache_stats()` exposes generated SQL cache retention, bounds and
+lookup/eviction counters. `ai_usage_totals()` keeps provider row events, transport
+attempts, failures, cache hits and partial known-token totals independently of
+usage-event eviction. Counters are per database, protected by the existing state
+mutexes, and reset by their corresponding clear function. They are in memory;
+[`examples/resumable_enrichment.py`](https://github.com/leonardovida/duckdb-ai/blob/main/examples/resumable_enrichment.py)
+(see the [resumable enrichment cookbook](cookbooks/resumable-enrichment.md)) persists each batch's usage snapshot in the same
+transaction as its results, so totals survive process reopening and uncommitted
+snapshots roll back with a crashed batch.

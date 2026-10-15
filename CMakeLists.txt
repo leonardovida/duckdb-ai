@@ -51,3 +51,16 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+# Instrument project-owned extension code without requiring a sanitized DuckDB core.
+option(AI_ENABLE_SANITIZERS "Enable address/undefined sanitizers on the loadable AI extension" OFF)
+if(AI_ENABLE_SANITIZERS)
+  if(NOT EXTENSION_STATIC_BUILD)
+    message(FATAL_ERROR "AI_ENABLE_SANITIZERS requires EXTENSION_STATIC_BUILD=1 for DuckDB RTTI linkage")
+  endif()
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "AI_ENABLE_SANITIZERS requires GCC or Clang")
+  endif()
+  target_compile_options(${LOADABLE_EXTENSION_NAME} PRIVATE -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
+  target_link_libraries(${LOADABLE_EXTENSION_NAME} -fsanitize=address,undefined)
+endif()

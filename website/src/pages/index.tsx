@@ -3,20 +3,31 @@ import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
+import CodeBlock from '@theme/CodeBlock';
 
 import styles from './index.module.css';
 
 const functionGroups = [
   'ai_complete',
-  'ai_complete_json',
-  'ai_complete_record',
-  'ai_embed',
+  'ai_classify',
   'ai_filter',
-  'ai_sql',
+  'ai_summarize',
+  'ai_extract_record',
+  'ai_embed',
+  'ai_similarity',
   'ai_query_data',
-  'ai_count_tokens',
   'ai_usage',
 ];
+
+const quickstart = `INSTALL ai FROM community;
+LOAD ai;
+
+SET duckdb_ai_provider = 'ollama';
+SET duckdb_ai_model = 'qwen3.8:27b';
+
+SELECT ticket,
+       ai_classify(ticket, ['billing', 'performance', 'other']) AS category
+FROM (VALUES ('I was charged twice.'), ('My query got slow.')) AS t(ticket);`;
 
 function HomepageHeader(): ReactNode {
   const {siteConfig} = useDocusaurusContext();
@@ -52,10 +63,14 @@ function DocsSummary(): ReactNode {
           <article>
             <Heading as="h2">What it covers</Heading>
             <p>
-              duckdb-ai adds SQL functions for completion models, structured
-              JSON output, embeddings, generated read-only SQL, usage logging,
-              and provider metadata.
+              duckdb-ai is a DuckDB extension that calls LLMs from SQL. Classify,
+              summarize and filter rows, extract typed fields with a JSON Schema,
+              generate embeddings for semantic search, and turn questions into
+              read-only SQL. Use local models through Ollama or llama.cpp, or
+              hosted providers such as OpenAI, Claude, Gemini, Bedrock,
+              Databricks and Snowflake Cortex.
             </p>
+            <CodeBlock language="sql">{quickstart}</CodeBlock>
             <div className={styles.chips}>
               {functionGroups.map((name) => (
                 <code key={name}>{name}</code>
@@ -72,6 +87,9 @@ function DocsSummary(): ReactNode {
             <ul className={styles.linkList}>
               <li>
                 <Link to="/docs/functions">SQL function reference</Link>
+              </li>
+              <li>
+                <Link to="/docs/agent-guide">Agent guide</Link>
               </li>
               <li>
                 <Link to="/docs/provider-guides">Provider guides</Link>
@@ -91,11 +109,10 @@ function DocsSummary(): ReactNode {
 }
 
 export default function Home(): ReactNode {
-  const {siteConfig} = useDocusaurusContext();
   return (
     <Layout
-      title={siteConfig.title}
-      description="Documentation for the duckdb-ai DuckDB extension">
+      title="LLMs and embeddings in DuckDB SQL"
+      description="Call LLMs from DuckDB SQL: classify, summarize and extract typed data, generate embeddings for semantic search, and turn questions into SQL with Ollama, OpenAI, Claude, Gemini and 30+ providers.">
       <HomepageHeader />
       <main>
         <DocsSummary />
