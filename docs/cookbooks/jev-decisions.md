@@ -172,9 +172,23 @@ Create `criteria.json` with the allowed labels and their descriptions:
 }
 ```
 
-Use a build containing `ai_jev` and configure `TYPESAFE_API_KEY` as above.
-The example requires explicit live-call opt-in because it sends the sample
-four times and may incur charges:
+Check the sample locally without credentials, a DuckDB build or provider calls:
+
+```sh
+python3 examples/jev_batch_evaluation.py \
+  --input tickets.csv --criteria criteria.json --preflight
+```
+
+The JSON summary reports row count, counts for every allowed label (including
+unused labels), and minimum, median and maximum UTF-8 text bytes. Inspect label
+balance and long rows before the live comparison. The byte counts exclude
+criteria and request framing, so they do not predict Jev token use or whether
+a row fits `max_request_bytes`. The input and criteria hashes can be compared
+with the later live report to confirm the same sample and criteria were used.
+
+For the live comparison, use a build containing `ai_jev` and configure
+`TYPESAFE_API_KEY` as above. The example requires explicit live-call opt-in
+because it sends the sample four times and may incur charges:
 
 ```sh
 python3 examples/jev_batch_evaluation.py \

@@ -12,7 +12,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
+from statistics import median
 
 
 MAX_ROWS = 1000
@@ -91,6 +93,20 @@ def sql_string(value):
 def criteria_sql(criteria):
     pairs = ", ".join(f"{sql_string(label)}: {sql_string(criteria[label])}" for label in sorted(criteria))
     return "MAP {" + pairs + "}"
+
+
+def preflight_report(rows, criteria, input_sha256, criteria_sha256):
+    counts = Counter(row["label"] for row in rows)
+    text_sizes = sorted(len(row["text"].encode("utf-8")) for row in rows)
+    return {
+        "valid": True,
+        "input_sha256": input_sha256,
+        "criteria_sha256": criteria_sha256,
+        "rows": len(rows),
+        "row_cap": MAX_ROWS,
+        "label_counts": {label: counts[label] for label in sorted(criteria)},
+        "text_bytes": {"min": text_sizes[0], "median": median(text_sizes), "max": text_sizes[-1]},
+    }
 
 
 def child_env():
@@ -250,22 +266,26 @@ def main(argv=None):
     parser.add_argument("--duckdb", type=Path, default=Path("build/release/duckdb"))
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--criteria", required=True, type=Path)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model")
     parser.add_argument(
         "--timeout-seconds", type=float, default=3600, help="timeout for each batch-size run (default: 3600)"
     )
-    parser.add_argument("--allow-live", action="store_true", help="explicitly permit provider calls")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--allow-live", action="store_true", help="explicitly permit provider calls")
+    mode.add_argument("--preflight", action="store_true", help="validate the sample without provider calls")
     args = parser.parse_args(argv)
     if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be a finite positive number")
-    if not args.allow_live:
-        parser.error("refusing provider calls without --allow-live")
-    if not args.model.strip():
+    criteria, criteria_sha256 = load_criteria(args.criteria)
+    rows, input_sha256 = load_input(args.input, criteria)
+    if args.preflight:
+        json.dump(preflight_report(rows, criteria, input_sha256, criteria_sha256), sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return
+    if not args.model or not args.model.strip():
         parser.error("--model must not be empty")
     if not args.duckdb.is_file():
         parser.error(f"DuckDB executable not found: {args.duckdb}")
-    criteria, criteria_sha256 = load_criteria(args.criteria)
-    rows, input_sha256 = load_input(args.input, criteria)
     results = []
     report = {
         "model": args.model,

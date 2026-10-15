@@ -104,7 +104,15 @@ def run(duckdb_override=None):
         DUCKDB_AI_LOG_INCLUDE_TEXT="1",
     )
 
-    def invoke(input_path, criteria_path, allow_live=True, model="jev-1.13.0", timeout_seconds=None, credentials=True):
+    def invoke(
+        input_path,
+        criteria_path,
+        allow_live=True,
+        model="jev-1.13.0",
+        timeout_seconds=None,
+        credentials=True,
+        preflight=False,
+    ):
         command = [
             sys.executable,
             str(script),
@@ -114,11 +122,13 @@ def run(duckdb_override=None):
             str(input_path),
             "--criteria",
             str(criteria_path),
-            "--model",
-            model,
         ]
+        if model is not None:
+            command.extend(["--model", model])
         if allow_live:
             command.append("--allow-live")
+        if preflight:
+            command.append("--preflight")
         if timeout_seconds is not None:
             command.extend(["--timeout-seconds", str(timeout_seconds)])
         child_env = env.copy()
@@ -147,6 +157,14 @@ def run(duckdb_override=None):
             refused = invoke(input_path, criteria_path, allow_live=False)
             assert refused.returncode != 0 and not requests, refused.stderr
 
+            checked = invoke(input_path, criteria_path, allow_live=False, model=None, credentials=False, preflight=True)
+            assert checked.returncode == 0 and not requests and not logs, checked.stderr
+            summary = json.loads(checked.stdout)
+            assert summary["valid"] is True and summary["rows"] == 33 and summary["row_cap"] == 1000
+            assert summary["label_counts"] == {"a'b": 17, "b": 16}
+            assert summary["text_bytes"] == {"min": 5, "median": 6, "max": len("row-0 café".encode("utf-8"))}
+            assert len(summary["input_sha256"]) == 64 and len(summary["criteria_sha256"]) == 64
+
             completed = invoke(input_path, criteria_path)
             assert completed.returncode == 0, completed.stdout + completed.stderr
             assert "smoke-secret" not in completed.stdout
@@ -157,6 +175,10 @@ def run(duckdb_override=None):
             assert report["row_cap"] == 1000 and report["rows"] == 33
             assert report["model"] == "jev-1.13.0"
             assert len(report["input_sha256"]) == 64 and len(report["criteria_sha256"]) == 64
+            assert (report["input_sha256"], report["criteria_sha256"]) == (
+                summary["input_sha256"],
+                summary["criteria_sha256"],
+            )
             runs = {run["batch_size"]: run for run in report["runs"]}
             assert sorted(len(body["questions"]) for body in requests) == sorted(
                 [1] * 33 + [8, 8, 8, 8, 1] + [16, 16, 1] + [32, 1]
@@ -202,6 +224,8 @@ def run(duckdb_override=None):
             duplicate.write_text("id,text,label\n0,ok,a'b\n0,again,a'b\n", encoding="utf-8")
             requests.clear()
             invalid = invoke(duplicate, criteria_path)
+            assert invalid.returncode != 0 and not requests and "duplicate id" in invalid.stderr
+            invalid = invoke(duplicate, criteria_path, allow_live=False, model=None, credentials=False, preflight=True)
             assert invalid.returncode != 0 and not requests and "duplicate id" in invalid.stderr
             capped = directory / "capped.csv"
             capped.write_text("id,text,label\n" + "".join(f"{n},ok,a'b\n" for n in range(1001)), encoding="utf-8")
@@ -264,7 +288,7 @@ def run(duckdb_override=None):
             assert partial["complete"] is False
             assert [result["batch_size"] for result in partial["runs"]] == [1]
             assert partial["runs"][0]["metrics"]["accuracy"] == 1.0
-        print("jev batch evaluation smoke passed: validation, opt-in, request counts, failures, agreement")
+        print("jev batch evaluation smoke passed: preflight, validation, opt-in, request counts, failures, agreement")
     finally:
         server.shutdown()
         server.server_close()
