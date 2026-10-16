@@ -3196,7 +3196,7 @@ ProviderRuntimeState::~ProviderRuntimeState() {
 
 HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload,
                               const std::vector<std::string> &headers, const CompletionOptions &options,
-                              int64_t estimated_tokens) {
+                              int64_t estimated_tokens, int64_t &retries_out) {
 	auto retry_count = RetryCount(options);
 	auto retry_backoff_ms = RetryBackoffMs(options);
 	auto timeout_seconds = TimeoutSeconds(options);
@@ -3212,6 +3212,9 @@ HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload
 					std::lock_guard<std::mutex> lock(runtime.usage_mutex);
 					runtime.usage_totals.request_attempts++;
 				}
+				// Preserve the owner's attempted retries even when HttpPost throws instead of
+				// returning a response. Cache waiters do not make these attempts.
+				retries_out = attempt;
 				response = HttpPost(url, payload, headers, timeout_seconds, false, 0, retry_backoff_ms,
 				                    options.client_context, connect_timeout_seconds);
 			}
@@ -5708,9 +5711,10 @@ void ValidateCompletionRequestLimits(const std::string &prompt, const std::strin
 HttpResponse FetchProviderResponse(const std::string &operation, const ProviderConfig &config,
                                    const std::string &endpoint, const std::string &payload,
                                    const CompletionOptions &options, int64_t estimated_tokens,
-                                   std::string &cache_key_out) {
+                                   std::string &cache_key_out, int64_t &retries_out) {
 	if (!ResponseCacheEnabled(options)) {
-		return ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens);
+		return ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens,
+		                        retries_out);
 	}
 	auto &runtime_state = RuntimeState(options);
 	auto cache_key = ResponseCacheKey(operation, config, endpoint, payload);
@@ -5725,8 +5729,8 @@ HttpResponse FetchProviderResponse(const std::string &operation, const ProviderC
 		return WaitForPendingCachedResponse(runtime_state, cache_key, pending, options);
 	}
 	try {
-		auto fresh_response =
-		    ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens);
+		auto fresh_response = ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options,
+		                                       estimated_tokens, retries_out);
 		if (fresh_response.status >= 200 && fresh_response.status < 300) {
 			StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
 		}
@@ -5768,13 +5772,14 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		total_tokens += ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 	}
 	HttpResponse response;
+	int64_t retries = 0;
 	try {
-		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, total_tokens);
+		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, total_tokens, retries);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
 		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), 0);
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), retries);
 		}
 		throw;
 	}
@@ -6049,14 +6054,15 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	}
 	HttpResponse response;
 	std::string cache_key;
+	int64_t retries = 0;
 	try {
 		response = FetchProviderResponse("completion", config, endpoint, payload, request_options,
-		                                 EstimatedCompletionTokens(prompt, request_options), cache_key);
+		                                 EstimatedCompletionTokens(prompt, request_options), cache_key, retries);
 	} catch (InterruptException &) {
 		// Query cancellation is not a provider failure; keep it out of usage error events.
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), 0);
+		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), retries);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -6115,13 +6121,14 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	}
 	HttpResponse response;
 	std::string cache_key;
+	int64_t retries = 0;
 	try {
 		response = FetchProviderResponse("redaction", config, endpoint, payload, request_options,
-		                                 EstimateTokenCount(text), cache_key);
+		                                 EstimateTokenCount(text), cache_key, retries);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), 0);
+		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), retries);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -6191,14 +6198,15 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	EnforceAllowedHost(endpoint, request_options);
 	HttpResponse response;
 	std::string cache_key;
+	int64_t retries = 0;
 	try {
-		response =
-		    FetchProviderResponse("embedding", config, endpoint, payload, request_options,
-		                          ProfileTokenEstimate(input, capabilities.token_estimate_multiplier), cache_key);
+		response = FetchProviderResponse("embedding", config, endpoint, payload, request_options,
+		                                 ProfileTokenEstimate(input, capabilities.token_estimate_multiplier), cache_key,
+		                                 retries);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), 0);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), retries);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
