@@ -5,6 +5,16 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## 0.8.2 - 2026-10-16
+
+### Fixed
+
+- TypeSafe decision replies with an explicit JSON `null` confidence now retain
+  their answers in `ai_jev` and `ai_decide`, with SQL NULL confidence fields.
+  Previously, the provider validator rejected an otherwise valid response,
+  failing every row in the affected batch. Invalid non-null confidence values
+  still fail validation.
+
 ## 0.8.1 - 2026-10-09
 
 ### Fixed

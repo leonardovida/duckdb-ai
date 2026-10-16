@@ -4965,7 +4965,8 @@ bool ValidateJevResponse(duckdb_yyjson::yyjson_val *root) {
 				return false;
 			}
 			double confidence;
-			if (YyjsonObjectGet(answer, "confidence") &&
+			auto confidence_value = YyjsonObjectGet(answer, "confidence");
+			if (confidence_value && !duckdb_yyjson::yyjson_is_null(confidence_value) &&
 			    (!YyjsonDirectDouble(answer, "confidence", confidence) || !std::isfinite(confidence) ||
 			     confidence < 0 || confidence > 1)) {
 				return false;

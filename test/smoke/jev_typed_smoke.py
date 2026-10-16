@@ -74,11 +74,19 @@ def run(duckdb_path):
                 answers[first_key]['choice'] = 'undeclared'
             elif answer_mode == 'bad_score':
                 next(answer for answer in answers.values() if answer['type'] == 'score')['score'] = 8.0
-            elif answer_mode == 'bad_confidence':
-                answers[first_key]['confidence'] = 1.2
-            elif answer_mode == 'no_confidence':
+            elif answer_mode in ('bad_confidence', 'negative_confidence', 'string_confidence', 'boolean_confidence'):
+                answers[first_key]['confidence'] = {
+                    'bad_confidence': 1.2,
+                    'negative_confidence': -0.1,
+                    'string_confidence': '0.9',
+                    'boolean_confidence': True,
+                }[answer_mode]
+            elif answer_mode in ('no_confidence', 'null_confidence'):
                 for answer in answers.values():
-                    answer.pop('confidence', None)
+                    if answer_mode == 'null_confidence' and answer['type'] != 'noul':
+                        answer['confidence'] = None
+                    else:
+                        answer.pop('confidence', None)
             data = json.dumps(
                 {
                     'model': 'jev-1.13.0',
@@ -200,6 +208,9 @@ def run(duckdb_path):
             ('bad_choice', 'outside the declared choices'),
             ('bad_score', 'outside the declared scale'),
             ('bad_confidence', 'valid model and answers'),
+            ('negative_confidence', 'valid model and answers'),
+            ('string_confidence', 'valid model and answers'),
+            ('boolean_confidence', 'valid model and answers'),
             ('http_error', '503'),
         ):
             decisions(select(2), error=error)
@@ -242,6 +253,33 @@ FROM ai_usage() WHERE function_name='ai_jev';
         mode = 'no_confidence'
         rows = decisions(select(1))
         assert rows[0]['a']['department_confidence'] is None and rows[0]['a']['severity_confidence'] is None
+        # Explicit JSON null has the same optional-confidence meaning as an
+        # absent field. Keep every row/answer in a full batch and its overflow.
+        mode = 'null_confidence'
+        for function in ('ai_jev', 'ai_decide'):
+            requests.clear()
+            provider = ", provider := 'typesafe'" if function == 'ai_decide' else ''
+            rows = decisions(select(33, provider).replace('ai_jev(', function + '('))
+            assert len(requests) == 2, requests
+            for row in rows:
+                assert row['a']['department'] == ('technical' if row['i'] % 2 else 'billing'), row
+                assert row['a']['severity'] == row['i'] % 3, row
+                assert row['a']['department_confidence'] is None and row['a']['severity_confidence'] is None, row
+            requests.clear()
+            call = f"{function}('0:nullable', {SPEC}, cache := true, retry_count := 0{provider})"
+            rows = query(
+                f"CREATE TEMP TABLE first_result AS SELECT {call} AS a; "
+                f"CREATE TEMP TABLE second_result AS SELECT {call} AS a; "
+                "SELECT (SELECT a.department FROM first_result) AS department, "
+                "(SELECT a.department_confidence FROM second_result) AS confidence, "
+                "count(*) FILTER (WHERE status='error') AS errors, "
+                "count(*) FILTER (WHERE cache_hit) AS cache_hits, "
+                "sum(prompt_tokens)::BIGINT AS input_tokens FROM ai_usage();"
+            )
+            assert rows == [
+                {'department': 'billing', 'confidence': None, 'errors': 0, 'cache_hits': 1, 'input_tokens': 200}
+            ], rows
+            assert len(requests) == 1, requests
         mode = 'retry'
         requests.clear()
         rows = decisions(f"SELECT 0 AS i, ai_jev('0:retry', {SPEC}, retry_count := 1, retry_backoff_ms := 0) AS a")
