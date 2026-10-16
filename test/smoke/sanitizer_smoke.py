@@ -13,6 +13,7 @@ from repository_pass2_smoke import run as pass2
 from response_lookup_smoke import run as response_lookups
 from token_budget_smoke import run as token_budgets
 from jev_typed_smoke import run as typed_jev
+from transport_retry_smoke import run as transport_retries
 
 
 def main():
@@ -43,6 +44,7 @@ def main():
         response_lookups(wrapper)
         token_budgets(wrapper)
         typed_jev(wrapper)
+        transport_retries(wrapper)
         subprocess.run(
             ["python3", str(Path(__file__).with_name("reliability_smoke.py")), "--duckdb", str(wrapper)], check=True
         )
