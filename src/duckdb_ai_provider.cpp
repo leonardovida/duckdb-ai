@@ -1589,8 +1589,8 @@ bool YyjsonDirectString(duckdb_yyjson::yyjson_val *object, const char *key, std:
 	return true;
 }
 
-bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int64_t &result) {
-	auto value = YyjsonObjectGet(object, key);
+//! Read only JSON integers representable as int64_t, leaving result unchanged on failure.
+bool YyjsonInteger(duckdb_yyjson::yyjson_val *value, int64_t &result) {
 	if (!value || !duckdb_yyjson::yyjson_is_int(value)) {
 		return false;
 	}
@@ -1604,6 +1604,10 @@ bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int
 		result = duckdb_yyjson::yyjson_get_sint(value);
 	}
 	return true;
+}
+
+bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int64_t &result) {
+	return YyjsonInteger(YyjsonObjectGet(object, key), result);
 }
 
 bool YyjsonDirectDouble(duckdb_yyjson::yyjson_val *object, const char *key, double &result) {
@@ -1747,16 +1751,8 @@ bool FindYyjsonIntegerField(duckdb_yyjson::yyjson_val *value, const std::string 
 		size_t max;
 		yyjson_obj_foreach(value, index, max, key, child) {
 			if (YyjsonString(key) == field && duckdb_yyjson::yyjson_is_int(child)) {
-				if (duckdb_yyjson::yyjson_is_uint(child)) {
-					auto unsigned_value = duckdb_yyjson::yyjson_get_uint(child);
-					if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-						return false;
-					}
-					result = static_cast<int64_t>(unsigned_value);
-				} else {
-					result = duckdb_yyjson::yyjson_get_sint(child);
-				}
-				return true;
+				// A matching unsigned overflow stops this object's search, just like a match.
+				return YyjsonInteger(child, result);
 			}
 			if (FindYyjsonIntegerField(child, field, result)) {
 				return true;
