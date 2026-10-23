@@ -320,6 +320,37 @@ def run(duckdb_path):
             "properties": {"x": {"$ref": "#/$defs/score"}},
             "required": ["x"],
         }
+        indexed_record_schema = {
+            "type": "object",
+            "$defs": {"choices": {"anyOf": [{"type": "integer", "minimum": 5}]}},
+            "properties": {"x": {"$ref": "#/$defs/choices/anyOf/0"}},
+            "required": ["x"],
+        }
+        for function in ("ai_extract_record", "ai_complete_record"):
+            for field_type, expected_value in ((None, "5"), ("integer", 5)):
+                schema = {
+                    **indexed_record_schema,
+                    "properties": {"x": dict(indexed_record_schema["properties"]["x"])},
+                }
+                if field_type:
+                    schema["properties"]["x"]["type"] = field_type
+                suffix = field_type or "untyped"
+                name = function + "_array_projection_" + suffix
+                responses[name] = [{"x": 5}]
+                call = expression(function, name, schema)
+                selection = "SELECT " + call + " AS r" if function == "ai_extract_record" else "SELECT * FROM " + call
+                before = len(calls)
+                columns = execute("DESCRIBE " + selection)
+                column_type = "BIGINT" if field_type else "VARCHAR"
+                expected_type = f"STRUCT(x {column_type})" if function == "ai_extract_record" else column_type
+                assert columns[0]["column_type"] == expected_type, (function, columns)
+                assert len(calls) == before, "DESCRIBE must not call a provider"
+                projection = (
+                    "SELECT r.x AS x FROM (" + selection + ")" if function == "ai_extract_record" else selection
+                )
+                assert execute(projection) == [{"x": expected_value}], function
+                check(function + "_array_invalid_" + suffix, schema, {"x": 4}, False, function=function)
+
         for function in ("ai_extract_record", "ai_complete_record"):
             check(function + "_invalid", record_schema, {"x": 4}, False, function=function)
             check(function + "_valid", record_schema, {"x": 5}, True, function=function)
@@ -360,7 +391,7 @@ def run(duckdb_path):
         }, cache
         assert calls.count("cache_recovery") == 2, calls
         print(
-            f"schema reference smoke passed: {len(cases)} schema cases, typed records, usage, errors and cache recovery"
+            f"schema reference smoke passed: {len(cases)} schema cases, typed records, legacy projections, usage, errors and cache recovery"
         )
     finally:
         server.shutdown()

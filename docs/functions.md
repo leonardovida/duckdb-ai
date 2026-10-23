@@ -378,6 +378,9 @@ typed DuckDB columns.
 Schema `integer` fields project as `BIGINT` without rounding through `DOUBLE`.
 Values outside the signed 64-bit range fail projection. With
 `fail_on_error := false`, a failed table result contains null columns.
+Reference paths that include array indices retain their existing projection
+types, including the `VARCHAR` fallback when no explicit type is supplied.
+Local validation still enforces the referenced constraints.
 
 Example:
 
@@ -401,6 +404,8 @@ type. Fields follow the order of the schema properties. Local `$ref`/`$defs`
 are followed and an `anyOf`/`oneOf` with one non-null branch maps like that
 branch, so pydantic-generated schemas work. A property with several types
 becomes `VARCHAR`. JSON inside a code fence or after a sentence is accepted.
+References with array indices retain their existing projection types while
+their constraints are validated.
 
 Integer fields preserve exact `BIGINT` values. Schema or projection failures
 follow `on_error`/`fail_on_error`; with `fail_on_error := false`, the entire
