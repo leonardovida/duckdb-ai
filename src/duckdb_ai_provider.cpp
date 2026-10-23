@@ -2127,6 +2127,51 @@ std::string SchemaTypeName(const JsonValue &schema) {
 	return "json";
 }
 
+// Resolve the local JSON Pointer subset shared by record binding and response validation.
+const JsonValue *ResolveLocalSchemaReference(const JsonValue &root, const std::string &reference) {
+	if (reference.empty() || reference[0] != '#') {
+		return nullptr;
+	}
+	auto pointer = reference.substr(1);
+	const JsonValue *node = &root;
+	size_t position = 0;
+	while (node && position < pointer.size()) {
+		if (pointer[position] != '/') {
+			return nullptr;
+		}
+		auto next = pointer.find('/', position + 1);
+		auto token = pointer.substr(position + 1, next == std::string::npos ? std::string::npos : next - position - 1);
+		std::string unescaped;
+		for (size_t i = 0; i < token.size(); i++) {
+			if (token[i] == '~') {
+				if (i + 1 >= token.size() || (token[i + 1] != '0' && token[i + 1] != '1')) {
+					return nullptr;
+				}
+				unescaped += token[++i] == '0' ? '~' : '/';
+			} else {
+				unescaped += token[i];
+			}
+		}
+		if (node->type == JsonValueType::ARRAY) {
+			if (unescaped.empty() || (unescaped.size() > 1 && unescaped[0] == '0')) {
+				return nullptr;
+			}
+			idx_t index = 0;
+			for (auto digit : unescaped) {
+				if (digit < '0' || digit > '9' || index >= node->array_value.size()) {
+					return nullptr;
+				}
+				index = index * 10 + static_cast<idx_t>(digit - '0');
+			}
+			node = index < node->array_value.size() ? &node->array_value[index] : nullptr;
+		} else {
+			node = ObjectField(*node, unescaped);
+		}
+		position = next == std::string::npos ? pointer.size() : next;
+	}
+	return node;
+}
+
 //! Follows a local "$ref" (for example "#/$defs/Address") and unwraps an anyOf or oneOf with one non-null branch,
 //! so {"anyOf": [{"type": "string"}, {"type": "null"}]} maps like {"type": "string"}.
 const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schema, idx_t depth = 0) {
@@ -2135,29 +2180,7 @@ const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schem
 	}
 	auto ref = ObjectField(*schema, "$ref");
 	if (ref && ref->type == JsonValueType::STRING && !ref->string_value.empty() && ref->string_value[0] == '#') {
-		auto pointer = ref->string_value.substr(1);
-		const JsonValue *node = &root;
-		size_t position = 0;
-		while (node && position < pointer.size()) {
-			if (pointer[position] != '/') {
-				node = nullptr;
-				break;
-			}
-			auto next = pointer.find('/', position + 1);
-			auto token =
-			    pointer.substr(position + 1, next == std::string::npos ? std::string::npos : next - position - 1);
-			std::string unescaped;
-			for (size_t i = 0; i < token.size(); i++) {
-				if (token[i] == '~' && i + 1 < token.size() && (token[i + 1] == '0' || token[i + 1] == '1')) {
-					unescaped += token[i + 1] == '0' ? '~' : '/';
-					i++;
-				} else {
-					unescaped += token[i];
-				}
-			}
-			node = ObjectField(*node, unescaped);
-			position = next == std::string::npos ? pointer.size() : next;
-		}
+		auto node = ResolveLocalSchemaReference(root, ref->string_value);
 		return node ? ResolveSchemaNode(root, node, depth + 1) : schema;
 	}
 	if (ObjectField(*schema, "type") || ObjectField(*schema, "properties")) {
@@ -2256,8 +2279,14 @@ bool RegexMatches(const std::string &value, const std::string &pattern, const st
 	}
 }
 
+struct SchemaValidationContext {
+	const JsonValue &root;
+	std::vector<std::pair<const JsonValue *, const JsonValue *>> references;
+	std::string schema_error;
+};
+
 bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &schema, const std::string &path,
-                                    std::string &error) {
+                                    std::string &error, SchemaValidationContext &context) {
 	if (schema.type == JsonValueType::BOOLEAN) {
 		if (!schema.boolean_value) {
 			error = path + " is not allowed by false schema";
@@ -2267,11 +2296,35 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	if (schema.type != JsonValueType::OBJECT) {
 		return true;
 	}
+	auto ref = ObjectField(schema, "$ref");
+	if (ref) {
+		auto target =
+		    ref->type == JsonValueType::STRING ? ResolveLocalSchemaReference(context.root, ref->string_value) : nullptr;
+		if (!target || (target->type != JsonValueType::OBJECT && target->type != JsonValueType::BOOLEAN)) {
+			context.schema_error = path + " has an unresolved or unsupported schema $ref";
+			error = context.schema_error;
+			return false;
+		}
+		auto edge = std::make_pair(&value, &schema);
+		if (context.references.size() >= 128 ||
+		    std::find(context.references.begin(), context.references.end(), edge) != context.references.end()) {
+			context.schema_error = path + " has a cyclic or excessively nested schema $ref";
+			error = context.schema_error;
+			return false;
+		}
+		context.references.push_back(edge);
+		auto valid = ValidateJsonValueAgainstSchema(value, *target, path, error, context);
+		context.references.pop_back();
+		if (!valid) {
+			return false;
+		}
+		// A reference and its sibling constraints must both hold.
+	}
 	auto all_of_schema = ObjectField(schema, "allOf");
 	if (all_of_schema && all_of_schema->type == JsonValueType::ARRAY) {
 		for (idx_t i = 0; i < all_of_schema->array_value.size(); i++) {
 			std::string child_error;
-			if (!ValidateJsonValueAgainstSchema(value, all_of_schema->array_value[i], path, child_error)) {
+			if (!ValidateJsonValueAgainstSchema(value, all_of_schema->array_value[i], path, child_error, context)) {
 				error = path + " failed allOf schema " + std::to_string(i) + ": " + child_error;
 				return false;
 			}
@@ -2282,7 +2335,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		auto matched = false;
 		for (auto &candidate : any_of_schema->array_value) {
 			std::string child_error;
-			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error)) {
+			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error, context)) {
 				matched = true;
 				break;
 			}
@@ -2297,7 +2350,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		idx_t matches = 0;
 		for (auto &candidate : one_of_schema->array_value) {
 			std::string child_error;
-			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error)) {
+			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error, context)) {
 				matches++;
 			}
 		}
@@ -2309,7 +2362,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	auto not_schema = ObjectField(schema, "not");
 	if (not_schema) {
 		std::string child_error;
-		if (ValidateJsonValueAgainstSchema(value, *not_schema, path, child_error)) {
+		if (ValidateJsonValueAgainstSchema(value, *not_schema, path, child_error, context)) {
 			error = path + " matched schema in not";
 			return false;
 		}
@@ -2451,7 +2504,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 				property_name.type = JsonValueType::STRING;
 				property_name.string_value = property.first;
 				if (!ValidateJsonValueAgainstSchema(property_name, *property_names_schema,
-				                                    JsonPathChild(path, property.first), error)) {
+				                                    JsonPathChild(path, property.first), error, context)) {
 					return false;
 				}
 			}
@@ -2461,7 +2514,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 				auto property = value.object_value.find(property_schema.first);
 				if (property != value.object_value.end() &&
 				    !ValidateJsonValueAgainstSchema(property->second, property_schema.second,
-				                                    JsonPathChild(path, property_schema.first), error)) {
+				                                    JsonPathChild(path, property_schema.first), error, context)) {
 					return false;
 				}
 			}
@@ -2482,7 +2535,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 						matched_pattern_properties.insert(property.first);
 					}
 					if (!ValidateJsonValueAgainstSchema(property.second, pattern_schema.second,
-					                                    JsonPathChild(path, property.first), error)) {
+					                                    JsonPathChild(path, property.first), error, context)) {
 						return false;
 					}
 				}
@@ -2519,7 +2572,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 					return false;
 				}
 				if (!ValidateJsonValueAgainstSchema(property.second, *additional_schema,
-				                                    JsonPathChild(path, property.first), error)) {
+				                                    JsonPathChild(path, property.first), error, context)) {
 					return false;
 				}
 			}
@@ -2556,8 +2609,8 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		auto items_schema = ObjectField(schema, "items");
 		if (items_schema && items_schema->type != JsonValueType::ARRAY) {
 			for (idx_t i = 0; i < value.array_value.size(); i++) {
-				if (!ValidateJsonValueAgainstSchema(value.array_value[i], *items_schema, JsonPathIndex(path, i),
-				                                    error)) {
+				if (!ValidateJsonValueAgainstSchema(value.array_value[i], *items_schema, JsonPathIndex(path, i), error,
+				                                    context)) {
 					return false;
 				}
 			}
@@ -2567,7 +2620,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			idx_t matches = 0;
 			for (auto &item : value.array_value) {
 				std::string child_error;
-				if (ValidateJsonValueAgainstSchema(item, *contains_schema, path, child_error)) {
+				if (ValidateJsonValueAgainstSchema(item, *contains_schema, path, child_error, context)) {
 					matches++;
 				}
 			}
@@ -6650,7 +6703,13 @@ bool ValidateJsonAgainstSchema(const std::string &input, const std::string &sche
 		error = "schema must be a JSON object";
 		return false;
 	}
-	return ValidateJsonValueAgainstSchema(value, schema_value, "$", error);
+	SchemaValidationContext context {schema_value, {}, {}};
+	auto valid = ValidateJsonValueAgainstSchema(value, schema_value, "$", error, context);
+	if (!context.schema_error.empty()) {
+		error = context.schema_error;
+		return false;
+	}
+	return valid;
 }
 
 } // namespace duckdb_ai

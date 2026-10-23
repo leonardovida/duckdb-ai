@@ -5,6 +5,26 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## 0.8.3 - 2026-10-23
+
+### Fixed
+
+- JSON responses now enforce constraints behind local `$ref` definitions in
+  `ai_complete_json`, `ai_complete_record`, and `ai_extract_record`. Previously,
+  record binding followed those references but local response validation
+  silently skipped them, accepting values that violated referenced types,
+  bounds, or required fields. Reference siblings also apply. Encountered
+  unresolved, unsupported, cyclic, or excessively nested references fail
+  validation instead of being accepted.
+- Failed provider transports retain their actual retry count in `ai_usage()`,
+  including packed embeddings and redaction. Cache waiters still report zero
+  retries and token/cost accounting is unchanged.
+
+### Maintenance
+
+- Share checked JSON integer conversion across provider response readers while
+  preserving overflow rejection and lookup precedence.
+
 ## 0.8.2 - 2026-10-16
 
 ### Fixed
