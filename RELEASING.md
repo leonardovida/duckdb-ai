@@ -41,15 +41,36 @@ Use the CHANGELOG section as the release notes body.
 
 ## 3. Publish to the DuckDB community extension repository
 
-The duckdb.org page and `INSTALL ai FROM community` binaries only update when
-the pinned commit in [duckdb/community-extensions](https://github.com/duckdb/community-extensions)
-moves. Open a small PR there:
+The duckdb.org page and `INSTALL ai FROM community` binaries only update after
+publication through [duckdb/community-extensions](https://github.com/duckdb/community-extensions).
+A GitHub release and verified distribution bundles do not establish community
+catalog availability.
+
+### DuckDB 1.5.6 maintenance releases
+
+The catalog now targets DuckDB 2.0 by default. For this repository's DuckDB
+1.5.6 release line, follow the upstream
+[version transition notice](https://github.com/duckdb/community-extensions/issues/3081):
 
 - Edit `extensions/ai/description.yml`:
-  - `extension.version`: the new version.
-  - `repo.ref`: the release merge commit SHA on `main`.
-- PR title convention: `ai: bump to vX.Y.Z`.
+  - `extension.version`: the new maintenance version.
+  - `repo.variegata`: the exact release merge commit SHA.
+  - Keep `repo.ref` unchanged for a release that only supports DuckDB 1.5.6.
+- Start the PR description with an explicit request to build and deploy the
+  DuckDB 1.5.6 / `variegata` line. Link the release, exact-commit CI and immutable
+  artifact verification.
+- Request the maintainer's supported-version build and deployment with matching
+  DuckDB 1.5.6 CI tooling/tag and tests enabled. Legacy publication is not
+  automatic, and requires upstream permissions.
+- Verify the terminal upstream workflow and a fresh isolated
+  `INSTALL ai FROM community; LOAD ai;` with DuckDB 1.5.6 before claiming catalog
+  publication. Read back `extension_version` from `duckdb_extensions()`.
 
-Once merged, community CI rebuilds the extension for every platform and
-regenerates the docs page (including the Added Functions / Added Settings
-tables) from the new binary.
+PR title example: `ai: update v1.5.6/variegata to vX.Y.Z`.
+
+### Newer DuckDB release lines
+
+Update `repo.ref` only after the extension has been made compatible with the
+catalog's current default DuckDB version and its corresponding checks pass.
+The current 2.0 C++ API port is separate from a 1.5.6 maintenance release. Do not
+change or bypass required checks to publish an unsupported build.
