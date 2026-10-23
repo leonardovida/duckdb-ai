@@ -351,7 +351,11 @@ Result: `STRUCT(response VARCHAR, error VARCHAR)`
 Description: Calls a completion provider, asks for JSON-only output, and
 validates that the returned text is a top-level JSON object or array. If
 `response_schema` or `json_schema` is supplied, the output is also validated
-against the supported JSON Schema subset.
+against the supported JSON Schema subset. Local JSON Pointer references such
+as `#/$defs/Address` enforce the referenced constraints, together with sibling
+constraints. Encountered unresolved or external references fail validation.
+Non-progressing reference cycles and more than 128 active references also fail;
+nullable unions keep accepting JSON null. References do not fetch remote schemas.
 
 Example:
 
