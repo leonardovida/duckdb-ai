@@ -5,7 +5,19 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
-## 0.8.3 - 2026-10-23
+## 0.8.4 - 2026-10-23
+
+### Fixed
+
+- Preserve existing record projection types for schema references whose paths
+  traverse arrays while enforcing their constraints locally. The 0.8.3 build
+  candidate unintentionally changed these projections from `VARCHAR` to the
+  referenced type. It was held before GitHub release publication; its tag is
+  retained unchanged.
+- Includes the schema-reference validation, retry-attribution and maintenance
+  changes listed below.
+
+## 0.8.3 - 2026-10-23 (unpublished build candidate)
 
 ### Fixed
 

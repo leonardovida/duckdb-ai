@@ -2128,7 +2128,8 @@ std::string SchemaTypeName(const JsonValue &schema) {
 }
 
 // Resolve the local JSON Pointer subset shared by record binding and response validation.
-const JsonValue *ResolveLocalSchemaReference(const JsonValue &root, const std::string &reference) {
+const JsonValue *ResolveLocalSchemaReference(const JsonValue &root, const std::string &reference,
+                                             bool allow_array_elements) {
 	if (reference.empty() || reference[0] != '#') {
 		return nullptr;
 	}
@@ -2152,7 +2153,7 @@ const JsonValue *ResolveLocalSchemaReference(const JsonValue &root, const std::s
 				unescaped += token[i];
 			}
 		}
-		if (node->type == JsonValueType::ARRAY) {
+		if (node->type == JsonValueType::ARRAY && allow_array_elements) {
 			if (unescaped.empty() || (unescaped.size() > 1 && unescaped[0] == '0')) {
 				return nullptr;
 			}
@@ -2180,7 +2181,8 @@ const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schem
 	}
 	auto ref = ObjectField(*schema, "$ref");
 	if (ref && ref->type == JsonValueType::STRING && !ref->string_value.empty() && ref->string_value[0] == '#') {
-		auto node = ResolveLocalSchemaReference(root, ref->string_value);
+		// Preserve the existing object-only reference lookup used to choose SQL column types.
+		auto node = ResolveLocalSchemaReference(root, ref->string_value, false);
 		return node ? ResolveSchemaNode(root, node, depth + 1) : schema;
 	}
 	if (ObjectField(*schema, "type") || ObjectField(*schema, "properties")) {
@@ -2298,8 +2300,9 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	}
 	auto ref = ObjectField(schema, "$ref");
 	if (ref) {
-		auto target =
-		    ref->type == JsonValueType::STRING ? ResolveLocalSchemaReference(context.root, ref->string_value) : nullptr;
+		auto target = ref->type == JsonValueType::STRING
+		                  ? ResolveLocalSchemaReference(context.root, ref->string_value, true)
+		                  : nullptr;
 		if (!target || (target->type != JsonValueType::OBJECT && target->type != JsonValueType::BOOLEAN)) {
 			context.schema_error = path + " has an unresolved or unsupported schema $ref";
 			error = context.schema_error;
