@@ -14,6 +14,7 @@ from response_lookup_smoke import run as response_lookups
 from token_budget_smoke import run as token_budgets
 from jev_typed_smoke import run as typed_jev
 from transport_retry_smoke import run as transport_retries
+from json_escaping_smoke import run as json_escaping
 from schema_reference_smoke import run as schema_references
 
 
@@ -46,6 +47,7 @@ def main():
         token_budgets(wrapper)
         typed_jev(wrapper)
         transport_retries(wrapper)
+        json_escaping(wrapper)
         schema_references(wrapper)
         subprocess.run(
             ["python3", str(Path(__file__).with_name("reliability_smoke.py")), "--duckdb", str(wrapper)], check=True

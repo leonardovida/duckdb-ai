@@ -2922,6 +2922,7 @@ def main():
     from repository_pass2_smoke import run as run_repository_pass2_smoke
     from volatile_offset_smoke import run as run_volatile_offset_smoke
     from response_lookup_smoke import run as run_response_lookup_smoke
+    from json_escaping_smoke import run as run_json_escaping_smoke
     from schema_reference_smoke import run as run_schema_reference_smoke
     from token_budget_smoke import run as run_token_budget_smoke
     from transport_retry_smoke import run as run_transport_retry_smoke
@@ -2976,6 +2977,7 @@ def main():
         MockProviderHandler.reset()
         run_duckdb_embedding_validation(args.duckdb)
         run_response_lookup_smoke(args.duckdb)
+        run_json_escaping_smoke(args.duckdb)
         run_schema_reference_smoke(args.duckdb)
         run_transport_retry_smoke(args.duckdb)
         run_token_budget_smoke(args.duckdb)
