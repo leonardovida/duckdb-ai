@@ -1,5 +1,6 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb_ai_provider.hpp"
+#include "duckdb_ai_json.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -850,44 +851,7 @@ std::string CurrentTimestamp() {
 }
 
 std::string JsonEscape(const std::string &input) {
-	std::string out;
-	out.reserve(input.size());
-	const char *hex = "0123456789abcdef";
-	for (auto c : input) {
-		switch (c) {
-		case '\\':
-			out += "\\\\";
-			break;
-		case '"':
-			out += "\\\"";
-			break;
-		case '\b':
-			out += "\\b";
-			break;
-		case '\f':
-			out += "\\f";
-			break;
-		case '\n':
-			out += "\\n";
-			break;
-		case '\r':
-			out += "\\r";
-			break;
-		case '\t':
-			out += "\\t";
-			break;
-		default:
-			if (static_cast<unsigned char>(c) < 0x20) {
-				auto value = static_cast<unsigned char>(c);
-				out += "\\u00";
-				out.push_back(hex[(value >> 4) & 0xf]);
-				out.push_back(hex[value & 0xf]);
-			} else {
-				out.push_back(c);
-			}
-		}
-	}
-	return out;
+	return detail::EscapeJsonString(input, true);
 }
 
 std::string JsonDouble(double input) {

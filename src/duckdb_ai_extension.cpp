@@ -2,6 +2,7 @@
 
 #include "ai_extension.hpp"
 #include "duckdb_ai_provider.hpp"
+#include "duckdb_ai_json.hpp"
 #include "yyjson.hpp"
 
 #include "duckdb.hpp"
@@ -5086,37 +5087,7 @@ unique_ptr<FunctionData> AiClassifyResultBind(ClientContext &context, ScalarFunc
 }
 
 std::string JsonEscapeSqlText(const std::string &input) {
-	std::string output;
-	for (auto c : input) {
-		switch (c) {
-		case '\\':
-			output += "\\\\";
-			break;
-		case '"':
-			output += "\\\"";
-			break;
-		case '\n':
-			output += "\\n";
-			break;
-		case '\r':
-			output += "\\r";
-			break;
-		case '\t':
-			output += "\\t";
-			break;
-		default:
-			if (static_cast<unsigned char>(c) < 0x20) {
-				static const char hex[] = "0123456789abcdef";
-				output += "\\u00";
-				output += hex[(static_cast<unsigned char>(c) >> 4) & 0xf];
-				output += hex[static_cast<unsigned char>(c) & 0xf];
-			} else {
-				output.push_back(c);
-			}
-			break;
-		}
-	}
-	return output;
+	return duckdb_ai::detail::EscapeJsonString(input, false);
 }
 
 Value AiClassifyResultValue(const LogicalType &result_type, const std::vector<std::string> &labels,
