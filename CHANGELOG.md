@@ -30,7 +30,13 @@ This release moves the extension to DuckDB 2.0.0. It loads only in DuckDB
 
 - AI calls honor DuckDB 2.0's `max_execution_time`. Waits on cached responses,
   retry backoff and requests in flight stop at the deadline with DuckDB's own
-  timeout error, as they already did for cancellation.
+  timeout error.
+
+### Fixed
+
+- A cancelled or timed-out query now fails in every `on_error` mode. Previously
+  `on_error := 'null'`, `ai_try_complete` and the capturing classifiers turned
+  the interruption into NULL or error rows and returned a result.
 - `ai_sql` and `ai_schema_prompt` qualify tables in nested schemas (new in
   DuckDB 2.0) with their full schema path. A qualified `include_tables` or
   `exclude_tables` entry must name that whole path, so `reports.q3` does not

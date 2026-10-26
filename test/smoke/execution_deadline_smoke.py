@@ -54,15 +54,19 @@ class SlowServer:
         self.httpd.server_close()
 
 
-def run_until_deadline(duckdb, server, mode, options):
+def run_until_deadline(duckdb, server, mode, options, function="ai_complete"):
     server.mode = mode
     server.requests = 0
-    env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_") and key != "AI_AGENT"}
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("DUCKDB_AI_") and key not in ("AI_AGENT", "CLAUDECODE")
+    }
     env["OPENAI_API_KEY"] = "deadline-dummy"
     sql = (
         "SET max_execution_time = 1000; "
-        f"SELECT ai_complete('deadline input', provider := 'openai', model := 'deadline-model', "
-        f"base_url := '{server.base_url}', cache := false, {options});"
+        f"SELECT {function}('deadline input ' || i, provider := 'openai', model := 'deadline-model', "
+        f"base_url := '{server.base_url}', cache := false, {options}) FROM range(3) t(i);"
     )
     started = time.monotonic()
     result = subprocess.run(
@@ -88,9 +92,15 @@ def run(duckdb):
         in_flight = run_until_deadline(duckdb, server, "slow", "retry_count := 0, timeout_seconds := 60")
         # A retry backoff sleep stops at the deadline instead of finishing every attempt.
         backoff = run_until_deadline(duckdb, server, "busy", "retry_count := 5, retry_backoff_ms := 3000")
+        # A timeout is not a row failure: on_error := 'null' and capturing functions still fail the query.
+        null_mode = run_until_deadline(duckdb, server, "slow", "retry_count := 0, on_error := 'null'")
+        captured = run_until_deadline(duckdb, server, "slow", "retry_count := 0", function="ai_try_complete")
     finally:
         server.close()
-    print(f"Execution deadline smoke passed (in flight {in_flight:.1f}s, backoff {backoff:.1f}s)")
+    print(
+        f"Execution deadline smoke passed (in flight {in_flight:.1f}s, backoff {backoff:.1f}s, "
+        f"on_error null {null_mode:.1f}s, captured {captured:.1f}s)"
+    )
 
 
 if __name__ == "__main__":

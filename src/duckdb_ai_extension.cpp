@@ -2089,10 +2089,19 @@ void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
 	}
 	auto worker_count = ProviderWorkerCount(jobs);
 	std::atomic<bool> stop {false};
+	// A cancelled or timed-out query stops every job and fails, whatever on_error says.
+	std::mutex interrupt_mutex;
+	std::exception_ptr interrupt;
 	auto run_one = [&](JOB &job) {
 		try {
 			callback(job);
 			job.completed = true;
+		} catch (InterruptException &) {
+			std::lock_guard<std::mutex> guard(interrupt_mutex);
+			if (!interrupt) {
+				interrupt = std::current_exception();
+			}
+			stop.store(true);
 		} catch (std::exception &ex) {
 			job.exception = std::current_exception();
 			job.error_message = ex.what();
@@ -2111,9 +2120,12 @@ void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
 	if (worker_count <= 1) {
 		for (auto &job : jobs) {
 			if (stop.load()) {
-				return;
+				break;
 			}
 			run_one(job);
+		}
+		if (interrupt) {
+			std::rethrow_exception(interrupt);
 		}
 		return;
 	}
@@ -2146,6 +2158,9 @@ void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
 	}
 	std::unique_lock<std::mutex> lock(wait_state->mutex);
 	wait_state->cv.wait(lock, [&]() { return wait_state->remaining == 0; });
+	if (interrupt) {
+		std::rethrow_exception(interrupt);
+	}
 }
 
 bool ReadRuntimeOptions(ClientContext &context, const duckdb_ai::CompletionOptions &base_options, bool has_model_arg,
@@ -2301,6 +2316,8 @@ void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &resul
 			job.fail_on_error = options.fail_on_error;
 			job.input = std::move(prompt);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -2401,6 +2418,8 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 			job.fail_on_error = false;
 			job.input = prompt;
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			result.SetValue(row, AiTryCompleteValue(result_type, "", true, ex.what()));
 		}
@@ -2709,6 +2728,8 @@ void AiRecordFunction(ClientContext &context, TableFunctionInput &input, DataChu
 			output.data[column_index].SetValue(0, values[column_index]);
 		}
 		output.SetChildCardinality(1);
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &) {
 		if (bind_data.options.fail_on_error) {
 			throw;
@@ -2803,6 +2824,8 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 			job.fail_on_error = options.fail_on_error;
 			job.input = std::move(input_text);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -2964,6 +2987,8 @@ std::vector<JOB> PrepareEmbeddingJobs(ClientContext &context, DataChunk &args, c
 			job.fail_on_error = options.fail_on_error;
 			job.input = std::move(input);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &) {
 			if (options.fail_on_error) {
 				throw;
@@ -3120,6 +3145,8 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			job.left = std::move(query);
 			job.right = std::move(candidate);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -3239,6 +3266,8 @@ void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<Provider
 				jobs[row].has_left_embedding = true;
 				jobs[row].has_right_embedding = true;
 			}
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			for (auto row : group_rows) {
 				jobs[row].exception = std::current_exception();
@@ -3290,6 +3319,8 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 			job.left = std::move(left);
 			job.right = std::move(right);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -3366,6 +3397,8 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 				jobs[i].output = std::move(outputs[i].values);
 				jobs[i].completed = true;
 			}
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			for (auto &job : jobs) {
 				job.exception = std::current_exception();
@@ -3898,6 +3931,8 @@ struct AiAggregateOperation {
 			}
 			auto output = RunHierarchicalAggregate(bind_data, values, state.row_count);
 			target = finalize_data.ReturnString(string_t(output));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (bind_data.options.fail_on_error) {
 				throw;
@@ -4835,6 +4870,8 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			job.input = std::move(input);
 			job.parameter = std::move(parameter);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -4952,6 +4989,8 @@ void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &r
 			job.input = std::move(input);
 			job.parameter = std::move(labels);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -5070,6 +5109,8 @@ void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &r
 			job.input = std::move(input);
 			job.parameter = std::move(labels);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			result.SetValue(row,
 			                AiClassifyResultValue(result_type, {}, ex.what(),
@@ -5476,6 +5517,8 @@ struct ClassifierBuildOperation {
 		try {
 			auto artifact = BuildClassifierArtifact(bind_data, state);
 			target = finalize_data.ReturnString(string_t(artifact));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &) {
 			if (bind_data.label_options.fail_on_error) {
 				throw;
@@ -5561,6 +5604,8 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			job.input = std::move(input);
 			job.parameter = std::move(predicate);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -6133,6 +6178,8 @@ unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctio
 		                                   fix_attempts, "ai_query_data_fix_attempt");
 		StorePromptQueryCachedSql(context, cache_key, generated_sql);
 		return ParseReadOnlySubquery(generated_sql, context);
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &ex) {
 		if (options.fail_on_error) {
 			throw;
@@ -6195,6 +6242,8 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 			job.input = std::move(question);
 			job.parameter = std::move(schema_context);
 			jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			if (options.fail_on_error) {
 				throw;
@@ -6215,6 +6264,8 @@ void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result
 			try {
 				job.output = RepairGeneratedSql(state.GetContext(), job.input, std::move(job.output), job.parameter,
 				                                job.options, bind_data.fix_attempts, "ai_sql_fix_attempt");
+			} catch (InterruptException &) {
+				throw;
 			} catch (std::exception &) {
 				job.exception = std::current_exception();
 			}
@@ -6549,6 +6600,8 @@ void PromptAssistantFunction(ClientContext &context, TableFunctionInput &input, 
 			output.data[1].SetValue(0, Value(TrimAscii(replacement)));
 		}
 		output.SetChildCardinality(1);
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &ex) {
 		if (bind_data.options.fail_on_error) {
 			throw;
@@ -7384,6 +7437,8 @@ void DecisionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		auto config = duckdb_ai::ResolveProvider(options);
 		model = QuoteJevString(config.model);
 		row_batching = config.protocol == "typesafe_jev";
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &) {
 		if (options.fail_on_error) {
 			throw;
@@ -7732,6 +7787,8 @@ void LoadDocumentElements(const DocumentParseBindData &bind_data, DocumentParseS
 			result.error = root_error.empty() ? "AI document parser returned no elements" : root_error;
 			state.elements.push_back(std::move(result));
 		}
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &ex) {
 		if (bind_data.options.fail_on_error) {
 			throw;
@@ -7991,6 +8048,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 				ApplyAiProviderSecretCached(state.GetContext(), row.artifact.embedding_options, embedding_secret_cache);
 			}
 			rows.push_back(std::move(row));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			auto metadata = "{\"path\":\"error\",\"reason\":\"invalid classifier artifact\"}";
 			result.SetValue(row_index,
@@ -8027,6 +8086,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 			for (auto row : group_rows) {
 				rows[row].embedding = embeddings[input_indexes[rows[row].input]].values;
 			}
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			for (auto row : group_rows) {
 				rows[row].local_error = std::string("local embedding failed: ") + ex.what();
@@ -8063,6 +8124,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 					continue;
 				}
 				row.local_error = "centroid margin below confidence threshold";
+			} catch (InterruptException &) {
+				throw;
 			} catch (std::exception &ex) {
 				row.local_error = std::string("local classification failed: ") + ex.what();
 			}
@@ -8078,6 +8141,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 			job.fail_on_error = false;
 			fallback_row_indexes[job.row] = row_index;
 			fallback_jobs.push_back(std::move(job));
+		} catch (InterruptException &) {
+			throw;
 		} catch (std::exception &ex) {
 			auto metadata = OptimizedClassifierMetadata(row, "fallback", row.local_error);
 			result.SetValue(row.row,
@@ -8389,6 +8454,8 @@ void PrepareSearchContext(ClientContext &context, const AiChunkBindData &bind_da
 		                   "Create a concise document-level retrieval context. Preserve the subject, entities, dates, "
 		                   "and terminology needed to disambiguate individual chunks. Return only the context.");
 		state.document_context = duckdb_ai::Complete(state.input, options).text;
+	} catch (InterruptException &) {
+		throw;
 	} catch (std::exception &ex) {
 		if (bind_data.options.fail_on_error) {
 			throw;
@@ -9532,7 +9599,9 @@ public:
 		return token.text;
 	}
 
-	//! A quoted string, or the unquoted tokens up to the next ',' or ')' joined as written without spaces.
+	//! A quoted string, or the unquoted tokens up to the next ',' or ')' joined without spaces, which keeps model names
+	//! such as gpt-4o-mini and llama3.2 and URLs intact. The tokens do not say where whitespace was, so a value with
+	//! spaces has to be quoted.
 	std::string ValueText() {
 		if (AtEnd()) {
 			throw ParserException("Expected an external model option value");

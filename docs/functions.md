@@ -1364,6 +1364,10 @@ SELECT ai_complete('Summarize this ticket.', profile := 'support_model');
 SELECT * FROM ai_models();
 ```
 
+Quote option values. An unquoted value is read up to the next `,` or `)` with
+its whitespace removed, so `model = gpt-4o-mini` works but a value containing
+spaces must be quoted.
+
 Embedding profiles can set `max_batch_inputs`, `max_inputs`,
 `max_batch_tokens`, `max_request_bytes`, `context_size`, `max_input_tokens`,
 `token_estimate_multiplier`,
