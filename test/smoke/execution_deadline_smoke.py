@@ -29,6 +29,8 @@ class SlowServer:
                 if owner.mode == "slow":
                     time.sleep(10)
                     status, payload = 200, b'{"choices":[{"message":{"content":"too late"}}]}'
+                elif owner.mode == "fast":
+                    status, payload = 200, b'{"choices":[{"message":{"content":"on time"}}]}'
                 else:
                     status, payload = 503, b'{"error":{"message":"busy"}}'
                 try:
@@ -54,7 +56,7 @@ class SlowServer:
         self.httpd.server_close()
 
 
-def run_until_deadline(duckdb, server, mode, options, function="ai_complete"):
+def run_until_deadline(duckdb, server, mode, options, function="ai_complete", setup=""):
     server.mode = mode
     server.requests = 0
     env = {
@@ -64,7 +66,7 @@ def run_until_deadline(duckdb, server, mode, options, function="ai_complete"):
     }
     env["OPENAI_API_KEY"] = "deadline-dummy"
     sql = (
-        "SET max_execution_time = 1000; "
+        f"SET max_execution_time = 1000; {setup}"
         f"SELECT {function}('deadline input ' || i, provider := 'openai', model := 'deadline-model', "
         f"base_url := '{server.base_url}', cache := false, {options}) FROM range(3) t(i);"
     )
@@ -87,6 +89,7 @@ def run_until_deadline(duckdb, server, mode, options, function="ai_complete"):
 
 def run(duckdb):
     server = SlowServer()
+    log_server = SlowServer()
     try:
         # A request in flight is aborted by the transfer progress callback.
         in_flight = run_until_deadline(duckdb, server, "slow", "retry_count := 0, timeout_seconds := 60")
@@ -95,11 +98,21 @@ def run(duckdb):
         # A timeout is not a row failure: on_error := 'null' and capturing functions still fail the query.
         null_mode = run_until_deadline(duckdb, server, "slow", "retry_count := 0, on_error := 'null'")
         captured = run_until_deadline(duckdb, server, "slow", "retry_count := 0", function="ai_try_complete")
+        # A strict usage log is sent inside the query, so a hung log endpoint also stops at the deadline.
+        log_server.mode = "slow"
+        strict_log = run_until_deadline(
+            duckdb,
+            server,
+            "fast",
+            "retry_count := 0, on_error := 'null'",
+            setup=f"SET duckdb_ai_log_endpoint = '{log_server.base_url}/logs'; SET duckdb_ai_log_strict = true; ",
+        )
     finally:
         server.close()
+        log_server.close()
     print(
         f"Execution deadline smoke passed (in flight {in_flight:.1f}s, backoff {backoff:.1f}s, "
-        f"on_error null {null_mode:.1f}s, captured {captured:.1f}s)"
+        f"on_error null {null_mode:.1f}s, captured {captured:.1f}s, strict log {strict_log:.1f}s)"
     )
 
 

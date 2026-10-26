@@ -5440,6 +5440,9 @@ void SubmitUsageLog(const CompletionOptions &options, const std::string &log_end
 		job.retry_count = RetryCount(options);
 		job.retry_backoff_ms = RetryBackoffMs(options);
 		EnqueueUsageLog(RuntimeState(options), std::move(job));
+	} catch (InterruptException &) {
+		// A strict log POST runs inside the query, so a cancellation or timeout during it stops the query.
+		throw;
 	} catch (std::exception &ex) {
 		if (log_strict) {
 			throw IOException("%s: %s", error_prefix, ex.what());
