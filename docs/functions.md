@@ -28,6 +28,10 @@ FROM ai_usage();
   `ai_provider_call` is the exception: its body must be JSON text.
 - Positional model and provider arguments can be columns or macro parameters,
   so each row can use a different model: `ai_complete(prompt, model_column)`.
+- Named options use `name := value` and follow every positional argument.
+  An unknown or misspelled option name is an error, and an argument passed by
+  position is always positional, even when its column is called `model` or
+  `temperature`.
 - Named options must be constant, but they can come from `getvariable(...)`,
   macro parameters and prepared-statement parameters (`model := $1`). A NULL
   option, for example an unset variable, leaves the session or provider

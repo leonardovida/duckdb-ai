@@ -5,6 +5,35 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## 0.9.0 - 2026-10-26
+
+This release moves the extension to DuckDB 2.0.0. It loads only in DuckDB
+2.0; 0.8.4 remains the DuckDB 1.5.6 release.
+
+### Changed
+
+- Build, test and distribute against DuckDB 2.0.0 and extension CI tooling
+  `v2.0-cyanoptera`, including the sanitizer host and platform builds.
+- Named options are real keyword arguments. Scalar and aggregate functions take
+  their inputs by position, positional model/provider values after them, and
+  `name := value` options last, so DuckDB itself matches them:
+  - A misspelled option name is an error. Previously a misspelled option with a
+    text value, such as `modle := 'gpt-x'`, was silently used as the positional
+    model.
+  - An argument passed by position stays positional whatever its column is
+    called; a column named `temperature` is no longer read as that option.
+  - A positional argument after a named option is rejected.
+- `ai_agg`, `ai_summarize_agg` and `ai_build_classifier` are single overloads
+  with positional and named options instead of fixed-arity overload lists.
+
+### Added
+
+- AI calls honor DuckDB 2.0's `max_execution_time`. Waits on cached responses,
+  retry backoff and requests in flight stop at the deadline with DuckDB's own
+  timeout error, as they already did for cancellation.
+- `ai_sql` and `ai_schema_prompt` qualify tables in nested schemas (new in
+  DuckDB 2.0) with their full schema path.
+
 ## 0.8.4 - 2026-10-23
 
 ### Fixed

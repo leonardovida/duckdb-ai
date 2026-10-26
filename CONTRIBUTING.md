@@ -32,7 +32,7 @@ deterministic in the default test suite.
 Run extension checks from the repository root:
 
 ```bash
-PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
+GEN=ninja make format-check
 GEN=ninja make tidy-check-ai
 GEN=ninja make release
 GEN=ninja make test
@@ -89,10 +89,10 @@ After building the normal release core, instrument only the loadable extension:
 ```sh
 cmake -G Ninja -S duckdb -B build/release -DAI_ENABLE_SANITIZERS=ON
 cmake --build build/release --target ai_loadable_extension -j2
-python3 test/smoke/sanitizer_smoke.py --duckdb /path/to/vanilla-duckdb-v1.5.6 --extension build/release/extension/ai/ai.duckdb_extension
+python3 test/smoke/sanitizer_smoke.py --duckdb /path/to/vanilla-duckdb-v2.0.0 --extension build/release/extension/ai/ai.duckdb_extension
 ```
 
-The host must use DuckDB v1.5.6. Static DuckDB linkage is required for C++ RTTI;
+The host must use DuckDB v2.0.0. Static DuckDB linkage is required for C++ RTTI;
 the two project-owned sources are instrumented while core/vendor code remains
 uninstrumented. Restore `AI_ENABLE_SANITIZERS=OFF` and rebuild before publishing
 normal extension artifacts. CI performs this after the regular checks and also

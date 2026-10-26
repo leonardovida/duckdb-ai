@@ -11,6 +11,7 @@
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -122,7 +123,7 @@ bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duck
 	       left.query_id == right.query_id && left.model_options == right.model_options;
 }
 
-void AddTableColumns(vector<LogicalType> &return_types, vector<string> &names,
+void AddTableColumns(vector<LogicalType> &return_types, vector<Identifier> &names,
                      std::initializer_list<std::pair<const char *, LogicalType>> columns) {
 	for (auto &column : columns) {
 		names.emplace_back(column.first);
@@ -525,6 +526,8 @@ struct SchemaSampleRow {
 struct SchemaTableInfo {
 	std::string catalog;
 	std::string schema;
+	//! The schema and the schemas it is nested in, outermost first
+	vector<std::string> schema_path;
 	std::string table;
 	std::string comment;
 	std::string sql;
@@ -781,6 +784,12 @@ struct AiPromptSqlBindData : public FunctionData {
 	}
 };
 
+std::string LowerAscii(std::string input);
+
+std::string LowerAscii(const Identifier &input) {
+	return LowerAscii(input.GetIdentifierName());
+}
+
 std::string LowerAscii(std::string input) {
 	std::transform(input.begin(), input.end(), input.begin(),
 	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -859,136 +868,45 @@ LogicalType OptionType(const std::string &name) {
 	                      name);
 }
 
-LogicalType PromptSqlOptionType(const std::string &name) {
-	if (name == "schema_context" || name == "schema") {
-		return LogicalType::VARCHAR;
-	}
-	if (name == "include_tables" || name == "exclude_tables") {
-		return LogicalType::LIST(LogicalType::VARCHAR);
-	}
-	if (name == "sample_rows") {
-		return LogicalType::BIGINT;
-	}
-	return OptionType(name);
+std::string FunctionName(const BoundSimpleFunction &function) {
+	return function.GetName().GetIdentifierName();
 }
 
-bool IsAiOptionName(const std::string &name) {
-	static const std::set<std::string> names = {"allowed_hosts",
-	                                            "api",
-	                                            "base_url",
-	                                            "batch_size",
-	                                            "cache",
-	                                            "cache_max_entries",
-	                                            "cache_ttl_seconds",
-	                                            "chunk_size",
-	                                            "confidence_margin",
-	                                            "connect_timeout_seconds",
-	                                            "dry_run",
-	                                            "embedding_model",
-	                                            "embedding_profile",
-	                                            "embedding_provider",
-	                                            "endpoint",
-	                                            "enrich",
-	                                            "error",
-	                                            "examples",
-	                                            "exclude_tables",
-	                                            "fail_on_error",
-	                                            "fallback_profile",
-	                                            "fix_attempts",
-	                                            "include_tables",
-	                                            "input_token_price_per_million",
-	                                            "instruction",
-	                                            "instructions",
-	                                            "json_schema",
-	                                            "label_descriptions",
-	                                            "log_format",
-	                                            "log_include_text",
-	                                            "log_sample_rate",
-	                                            "log_strict",
-	                                            "log_tags",
-	                                            "max_concurrent_requests",
-	                                            "max_context_chars",
-	                                            "max_hourly_cost_usd",
-	                                            "max_request_bytes",
-	                                            "max_tokens",
-	                                            "metadata",
-	                                            "min_request_interval_ms",
-	                                            "mode",
-	                                            "model",
-	                                            "on_error",
-	                                            "optimization",
-	                                            "output_token_price_per_million",
-	                                            "overflow_policy",
-	                                            "overlap_percent",
-	                                            "pages",
-	                                            "profile",
-	                                            "prompt_cache",
-	                                            "provider",
-	                                            "quality_threshold",
-	                                            "request_options",
-	                                            "response_format",
-	                                            "response_schema",
-	                                            "retry_backoff_ms",
-	                                            "retry_count",
-	                                            "sample_rows",
-	                                            "sample_size",
-	                                            "schema",
-	                                            "schema_context",
-	                                            "secret",
-	                                            "secret_name",
-	                                            "separator",
-	                                            "source_id",
-	                                            "strategy",
-	                                            "system_prompt",
-	                                            "task",
-	                                            "temperature",
-	                                            "timeout_seconds",
-	                                            "title",
-	                                            "token_limit_per_minute",
-	                                            "use_builtin_model_prices"};
-	return names.count(name) > 0;
+//! `name := value` arguments reach the "**options" parameter after every positional argument, so only they carry an
+//! option name. A column or macro parameter passed by position stays positional whatever it is called.
+std::string ArgumentOptionName(const BoundSimpleFunction &function, idx_t index) {
+	auto positional_count = function.GetPositionalArgumentCount();
+	auto &names = function.GetNamedArguments();
+	if (index < positional_count || index - positional_count >= names.size()) {
+		return std::string();
+	}
+	return LowerAscii(names[index - positional_count].GetIdentifierName());
 }
 
-//! `name := value` reaches bind only as an alias, but DuckDB also aliases a column reference or a substituted macro
-//! parameter with its own name. An alias is an option name only when it names an AI option; otherwise the argument
-//! is positional. A non-constant value aliased with the next positional slot's name (a column called model) fills
-//! that slot, since named options must be constant anyway.
-std::string ArgumentOptionName(const Expression &expr, const char *next_positional_slot = nullptr) {
-	auto alias = LowerAscii(expr.GetAlias());
-	if (alias.empty()) {
-		return alias;
-	}
-	if (!IsAiOptionName(alias)) {
-		// Keep a misspelled option with a non-text constant (max_token := 5) as an option so it is reported.
-		auto type = expr.return_type.id();
-		if (expr.IsFoldable() && type != LogicalTypeId::VARCHAR && type != LogicalTypeId::UNKNOWN) {
-			return alias;
+//! Text inputs are registered as ANY and resolved as VARCHAR, so DuckDB casts numbers, dates, UUIDs, BLOBs, lists,
+//! structs and whole rows to text instead of rejecting them. Positional values after the declared inputs (model,
+//! provider, ...) are text too. Prepared parameters then resolve as VARCHAR. Named options keep their own type and
+//! are cast when bind evaluates them.
+template <class BOUND_FUNCTION>
+void ResolveTextArgumentTypes(BOUND_FUNCTION &function, idx_t text_count) {
+	auto &types = function.GetArguments();
+	auto positional_count = MinValue<idx_t>(function.GetPositionalArgumentCount(), types.size());
+	for (idx_t i = 0; i < positional_count; i++) {
+		if (i < text_count || function.GetArgumentParameterKind(i) == FunctionParameterKind::VAR_POSITIONAL) {
+			types[i] = LogicalType::VARCHAR;
 		}
-		return std::string();
-	}
-	if (next_positional_slot && alias == next_positional_slot && !expr.IsFoldable() && !expr.HasParameter()) {
-		return std::string();
-	}
-	return alias;
-}
-
-//! Text inputs are registered as ANY and bound as VARCHAR, so DuckDB casts numbers, dates, UUIDs, BLOBs, lists,
-//! structs and whole rows to text instead of rejecting them. Prepared parameters then resolve as VARCHAR.
-template <class FUNCTION>
-void BindTextArguments(FUNCTION &function, idx_t count) {
-	for (idx_t i = 0; i < count && i < function.arguments.size(); i++) {
-		function.arguments[i] = LogicalType::VARCHAR;
 	}
 }
 
-const char *ModelProviderSlot(idx_t positional_option_count) {
-	return positional_option_count == 0 ? "model" : positional_option_count == 1 ? "provider" : nullptr;
+template <idx_t TEXT_COUNT>
+void ResolveAiTextArguments(ResolveScalarFunctionTypesInput &input) {
+	ResolveTextArgumentTypes(input.GetBoundFunction(), TEXT_COUNT);
 }
 
 //! Prepared-statement parameters, and the placeholders DuckDB binds while creating a macro, have no value yet.
 //! ParameterNotResolvedException makes DuckDB bind again once the value is known.
 void RequireResolvedArgument(const Expression &expr) {
-	if (expr.HasParameter() || expr.return_type.id() == LogicalTypeId::UNKNOWN) {
+	if (expr.HasParameter() || expr.GetReturnType().id() == LogicalTypeId::UNKNOWN) {
 		throw ParameterNotResolvedException();
 	}
 }
@@ -1027,7 +945,7 @@ std::string DuckValueToJson(const Value &value) {
 		auto &child_types = StructType::GetChildTypes(type);
 		std::string json = "{";
 		for (idx_t i = 0; i < children.size(); i++) {
-			json += (i ? "," : "") + std::string("\"") + JsonEscapeSqlText(child_types[i].first) +
+			json += (i ? "," : "") + std::string("\"") + JsonEscapeSqlText(child_types[i].first.GetIdentifierName()) +
 			        "\":" + DuckValueToJson(children[i]);
 		}
 		return json + "}";
@@ -1420,7 +1338,7 @@ void ApplyAggregateOption(ClientContext &context, AiAggregateBindData &bind_data
 }
 
 bool TryGetSetting(ClientContext &context, const std::string &name, Value &value) {
-	return context.TryGetCurrentSetting(name, value) && !value.IsNull();
+	return context.TryGetCurrentSetting(Identifier(name), value) && !value.IsNull();
 }
 
 enum class AiModelSettingKind { GENERIC, COMPLETION, TASK, AGGREGATE, EMBEDDING, SQL_ASSISTANT };
@@ -1624,7 +1542,7 @@ void ApplySettings(ClientContext &context, duckdb_ai::CompletionOptions &options
 
 bool TryReadSecretString(const KeyValueSecret &secret, const std::string &key, std::string &target) {
 	Value value;
-	if (!secret.TryGetValue(key, value) || value.IsNull()) {
+	if (!secret.TryGetValue(Identifier(key), value) || value.IsNull()) {
 		return false;
 	}
 	value = value.DefaultCastAs(LogicalType::VARCHAR);
@@ -1774,7 +1692,7 @@ void ApplyAiProviderSecret(ClientContext &context, duckdb_ai::CompletionOptions 
 }
 
 template <class BIND_DATA>
-void BindModelProviderPositionalOption(BIND_DATA &bind_data, ScalarFunction &bound_function, idx_t argument_index,
+void BindModelProviderPositionalOption(BIND_DATA &bind_data, BoundScalarFunction &bound_function, idx_t argument_index,
                                        idx_t &positional_option_count,
                                        const std::string &option_context = std::string()) {
 	positional_option_count++;
@@ -1785,43 +1703,40 @@ void BindModelProviderPositionalOption(BIND_DATA &bind_data, ScalarFunction &bou
 		bind_data.has_provider_arg = true;
 		bind_data.provider_index = argument_index;
 	} else {
-		throw BinderException("%s supports at most two positional options%s: model and provider", bound_function.name,
-		                      option_context);
+		throw BinderException("%s supports at most two positional options%s: model and provider",
+		                      FunctionName(bound_function), option_context);
 	}
-	bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 }
 
-unique_ptr<FunctionData> AiCompletionBindInternal(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiCompletionBindInternal(ClientContext &context, BoundScalarFunction &bound_function,
                                                   vector<unique_ptr<Expression>> &arguments,
                                                   bool validate_json_output = false) {
-	BindTextArguments(bound_function, 1);
 	auto bind_data = make_uniq<AiCompletionBindData>(false, validate_json_output);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::COMPLETION);
-	StampProviderFunction(bind_data->options, bound_function.name);
+	StampProviderFunction(bind_data->options, FunctionName(bound_function));
 	if (arguments.empty()) {
-		throw BinderException("%s requires a prompt argument", bound_function.name);
+		throw BinderException("%s requires a prompt argument", FunctionName(bound_function));
 	}
 
 	idx_t positional_option_count = 0;
 	for (idx_t i = 1; i < arguments.size(); i++) {
-		auto alias = ArgumentOptionName(*arguments[i], ModelProviderSlot(positional_option_count));
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(OptionType(alias));
 	}
 	bound_function.SetReturnType(LogicalType::VARCHAR);
 	return std::move(bind_data);
 }
 
-unique_ptr<FunctionData> AiCompleteBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiCompleteBind(ClientContext &context, BoundScalarFunction &bound_function,
                                         vector<unique_ptr<Expression>> &arguments) {
 	return AiCompletionBindInternal(context, bound_function, arguments);
 }
 
-unique_ptr<FunctionData> AiProviderCallBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiProviderCallBind(ClientContext &context, BoundScalarFunction &bound_function,
                                             vector<unique_ptr<Expression>> &arguments) {
 	auto result = AiCompletionBindInternal(context, bound_function, arguments);
 	auto &data = result->Cast<AiCompletionBindData>();
@@ -1831,14 +1746,14 @@ unique_ptr<FunctionData> AiProviderCallBind(ClientContext &context, ScalarFuncti
 	return result;
 }
 
-unique_ptr<FunctionData> AiCompletionRequestJsonBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiCompletionRequestJsonBind(ClientContext &context, BoundScalarFunction &bound_function,
                                                      vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiCompletionBindInternal(context, bound_function, arguments);
 	bind_data->Cast<AiCompletionBindData>().request_json = true;
 	return bind_data;
 }
 
-unique_ptr<FunctionData> AiCompleteJsonBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiCompleteJsonBind(ClientContext &context, BoundScalarFunction &bound_function,
                                             vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiCompletionBindInternal(context, bound_function, arguments, true);
 	auto &completion_bind_data = bind_data->Cast<AiCompletionBindData>();
@@ -1857,7 +1772,7 @@ unique_ptr<FunctionData> AiCompleteJsonBind(ClientContext &context, ScalarFuncti
 struct StringVectorReader {
 	// DuckDB vectors are chunk-oriented; cache the unified format once instead of per row.
 	StringVectorReader(DataChunk &args, idx_t column) {
-		args.data[column].ToUnifiedFormat(args.size(), data);
+		args.data[column].ToUnifiedFormat(data);
 		values = UnifiedVectorFormat::GetData<string_t>(data);
 	}
 
@@ -1898,10 +1813,10 @@ std::string FormatClassificationLabels(const vector<std::string> &labels) {
 struct StringListVectorReader {
 	StringListVectorReader(DataChunk &args, idx_t column) {
 		auto &list_vector = args.data[column];
-		list_vector.ToUnifiedFormat(args.size(), data);
+		list_vector.ToUnifiedFormat(data);
 		entries = UnifiedVectorFormat::GetData<list_entry_t>(data);
-		auto &child_vector = ListVector::GetEntry(list_vector);
-		child_vector.ToUnifiedFormat(ListVector::GetListSize(list_vector), child_data);
+		auto &child_vector = ListVector::GetChild(list_vector);
+		child_vector.ToUnifiedFormat(child_data);
 		child_values = UnifiedVectorFormat::GetData<string_t>(child_data);
 	}
 
@@ -2349,11 +2264,11 @@ bool ValidateJsonCompletionOutput(const std::string &output, const std::string &
 
 void AiCompletionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiCompletionBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<string_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader prompt_reader(args, bind_data.prompt_index);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
@@ -2426,7 +2341,7 @@ LogicalType AiTryCompleteReturnType() {
 	return LogicalType::STRUCT(std::move(children));
 }
 
-unique_ptr<FunctionData> AiTryCompleteBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiTryCompleteBind(ClientContext &context, BoundScalarFunction &bound_function,
                                            vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiCompletionBindInternal(context, bound_function, arguments);
 	auto &completion_bind_data = bind_data->Cast<AiCompletionBindData>();
@@ -2452,11 +2367,11 @@ Value AiTryCompleteValue(const LogicalType &result_type, const std::string &resp
 
 void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiCompletionBindData>();
 	auto result_type = AiTryCompleteReturnType();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::Validity(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader prompt_reader(args, bind_data.prompt_index);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
@@ -2639,10 +2554,8 @@ Value AiRecordValue(const duckdb_ai::JsonExtractedValue &value, const AiRecordCo
 			throw InvalidInputException("%s field \"%s\" expected integer", function_name, column.name);
 		}
 		{
-			Value integer;
-			std::string error;
-			if (Value(value.json_value).DefaultTryCastAs(column.type, integer, &error)) {
-				return integer;
+			if (auto integer = Value(value.json_value).DefaultTryCastAs(column.type)) {
+				return std::move(*integer);
 			}
 			throw InvalidInputException("%s field \"%s\" integer is out of BIGINT range", function_name, column.name);
 		}
@@ -2702,7 +2615,7 @@ void ValidateRecordFieldNames(const LogicalType &type, const std::string &functi
 		if (child.first.empty()) {
 			throw BinderException("%s response_schema property names must not be empty", function_name);
 		}
-		if (!seen.insert(child.first).second) {
+		if (!seen.insert(child.first.GetIdentifierName()).second) {
 			throw BinderException("%s response_schema property names must be unique ignoring case: \"%s\"",
 			                      function_name, child.first);
 		}
@@ -2711,7 +2624,7 @@ void ValidateRecordFieldNames(const LogicalType &type, const std::string &functi
 }
 
 unique_ptr<FunctionData> AiRecordBind(ClientContext &context, TableFunctionBindInput &input,
-                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() < 2 || input.inputs.size() > 4) {
 		throw BinderException("ai_complete_record expects prompt, response_schema, optional model, optional provider");
 	}
@@ -2793,17 +2706,17 @@ void AiRecordFunction(ClientContext &context, TableFunctionInput &input, DataChu
 			values = ProjectAiRecord(response.text, bind_data.response_schema, bind_data.columns, "ai_complete_record");
 		});
 		for (idx_t column_index = 0; column_index < bind_data.columns.size(); column_index++) {
-			output.SetValue(column_index, 0, values[column_index]);
+			output.data[column_index].SetValue(0, values[column_index]);
 		}
-		output.SetCardinality(1);
+		output.SetChildCardinality(1);
 	} catch (std::exception &) {
 		if (bind_data.options.fail_on_error) {
 			throw;
 		}
 		for (idx_t column_index = 0; column_index < bind_data.columns.size(); column_index++) {
-			output.SetValue(column_index, 0, Value(bind_data.columns[column_index].type));
+			output.data[column_index].SetValue(0, Value(bind_data.columns[column_index].type));
 		}
-		output.SetCardinality(1);
+		output.SetChildCardinality(1);
 	}
 	state.emitted = true;
 }
@@ -2812,55 +2725,54 @@ struct ProviderRecordJob : public ProviderStringJob {
 	Value record;
 };
 
-unique_ptr<FunctionData> AiExtractRecordBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiExtractRecordBind(ClientContext &context, BoundScalarFunction &bound_function,
                                              vector<unique_ptr<Expression>> &arguments) {
-	BindTextArguments(bound_function, 2);
 	if (arguments.size() < 2) {
-		throw BinderException("%s requires text and response_schema arguments", bound_function.name);
+		throw BinderException("%s requires text and response_schema arguments", FunctionName(bound_function));
 	}
 	auto bind_data = make_uniq<AiExtractRecordBindData>();
 	ApplySettings(context, bind_data->options, AiModelSettingKind::COMPLETION);
-	StampProviderFunction(bind_data->options, bound_function.name);
+	StampProviderFunction(bind_data->options, FunctionName(bound_function));
 	bind_data->response_schema =
 	    StringValue::Get(EvaluateConstantOption(context, *arguments[1], "response_schema", LogicalType::VARCHAR));
-	ValidateResponseSchemaValue(bind_data->response_schema, bound_function.name);
+	ValidateResponseSchemaValue(bind_data->response_schema, FunctionName(bound_function));
 	bind_data->options.response_schema = bind_data->response_schema;
 	bind_data->options.response_format = "json_schema";
 
 	idx_t positional_option_count = 0;
 	for (idx_t i = 2; i < arguments.size(); i++) {
-		auto alias = ArgumentOptionName(*arguments[i], ModelProviderSlot(positional_option_count));
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count,
 			                                  " after response_schema");
 			continue;
 		}
 		if (alias == "response_schema" || alias == "json_schema" || alias == "response_format") {
-			throw BinderException("%s takes response_schema as the second argument", bound_function.name);
+			throw BinderException("%s takes response_schema as the second argument", FunctionName(bound_function));
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(OptionType(alias));
 	}
 
 	vector<duckdb_ai::JsonSchemaProperty> properties;
 	std::string error;
 	if (!duckdb_ai::ExtractJsonSchemaProperties(bind_data->response_schema, properties, error)) {
-		throw BinderException("%s response_schema cannot be projected as a record: %s", bound_function.name, error);
+		throw BinderException("%s response_schema cannot be projected as a record: %s", FunctionName(bound_function),
+		                      error);
 	}
 	for (auto &property : properties) {
 		bind_data->columns.push_back(BuildAiRecordColumn(property));
 	}
-	ValidateRecordFieldNames(AiRecordStructType(bind_data->columns), bound_function.name);
+	ValidateRecordFieldNames(AiRecordStructType(bind_data->columns), FunctionName(bound_function));
 	bound_function.SetReturnType(AiRecordStructType(bind_data->columns));
 	return std::move(bind_data);
 }
 
 void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiExtractRecordBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiExtractRecordBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::Validity(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
@@ -2925,19 +2837,18 @@ bool IsEmbeddingOption(const std::string &name) {
 	       name == "log_sample_rate";
 }
 
-unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, BoundScalarFunction &bound_function,
                                                  vector<unique_ptr<Expression>> &arguments, bool request_json) {
-	BindTextArguments(bound_function, 1);
 	auto bind_data = make_uniq<AiCompletionBindData>(request_json);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::EMBEDDING);
-	StampProviderFunction(bind_data->options, bound_function.name);
+	StampProviderFunction(bind_data->options, FunctionName(bound_function));
 	if (arguments.empty()) {
-		throw BinderException("%s requires an input argument", bound_function.name);
+		throw BinderException("%s requires an input argument", FunctionName(bound_function));
 	}
 
 	idx_t positional_option_count = 0;
 	for (idx_t i = 1; i < arguments.size(); i++) {
-		auto alias = ArgumentOptionName(*arguments[i], ModelProviderSlot(positional_option_count));
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
@@ -2953,35 +2864,33 @@ unique_ptr<FunctionData> AiEmbeddingBindInternal(ClientContext &context, ScalarF
 			    alias);
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(OptionType(alias));
 	}
 	bound_function.SetReturnType(request_json ? LogicalType::VARCHAR : LogicalType::LIST(LogicalType::DOUBLE));
 	return std::move(bind_data);
 }
 
-unique_ptr<FunctionData> AiEmbedBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiEmbedBind(ClientContext &context, BoundScalarFunction &bound_function,
                                      vector<unique_ptr<Expression>> &arguments) {
 	return AiEmbeddingBindInternal(context, bound_function, arguments, false);
 }
 
-unique_ptr<FunctionData> AiEmbeddingRequestJsonBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiEmbeddingRequestJsonBind(ClientContext &context, BoundScalarFunction &bound_function,
                                                     vector<unique_ptr<Expression>> &arguments) {
 	return AiEmbeddingBindInternal(context, bound_function, arguments, true);
 }
 
-unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, BoundScalarFunction &bound_function,
                                           vector<unique_ptr<Expression>> &arguments) {
-	BindTextArguments(bound_function, 2);
 	auto bind_data = make_uniq<AiCompletionBindData>(false);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::EMBEDDING);
-	StampProviderFunction(bind_data->options, bound_function.name);
+	StampProviderFunction(bind_data->options, FunctionName(bound_function));
 	if (arguments.size() < 2) {
-		throw BinderException("%s requires two text arguments", bound_function.name);
+		throw BinderException("%s requires two text arguments", FunctionName(bound_function));
 	}
 
 	idx_t positional_option_count = 0;
 	for (idx_t i = 2; i < arguments.size(); i++) {
-		auto alias = ArgumentOptionName(*arguments[i], ModelProviderSlot(positional_option_count));
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
@@ -2997,31 +2906,28 @@ unique_ptr<FunctionData> AiSimilarityBind(ClientContext &context, ScalarFunction
 			    alias);
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(OptionType(alias));
 	}
 	bound_function.SetReturnType(LogicalType::DOUBLE);
 	return std::move(bind_data);
 }
 
-unique_ptr<FunctionData> AiRerankBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiRerankBind(ClientContext &context, BoundScalarFunction &bound_function,
                                       vector<unique_ptr<Expression>> &arguments) {
-	BindTextArguments(bound_function, 2);
 	auto bind_data = make_uniq<AiCompletionBindData>(false);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::COMPLETION);
-	StampProviderFunction(bind_data->options, bound_function.name);
+	StampProviderFunction(bind_data->options, FunctionName(bound_function));
 	if (arguments.size() < 2) {
-		throw BinderException("%s requires query and candidate text arguments", bound_function.name);
+		throw BinderException("%s requires query and candidate text arguments", FunctionName(bound_function));
 	}
 
 	idx_t positional_option_count = 0;
 	for (idx_t i = 2; i < arguments.size(); i++) {
-		auto alias = ArgumentOptionName(*arguments[i], ModelProviderSlot(positional_option_count));
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(OptionType(alias));
 	}
 	bound_function.SetReturnType(LogicalType::DOUBLE);
 	return std::move(bind_data);
@@ -3176,12 +3082,12 @@ bool ParseRerankScore(const std::string &input, double &score) {
 
 void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
-	auto generic_score = func_expr.function.name == "ai_score";
+	auto &bind_data = func_expr.BindInfo()->Cast<AiCompletionBindData>();
+	auto generic_score = func_expr.Function().GetName() == "ai_score";
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader query_reader(args, 0);
 	StringVectorReader candidate_reader(args, 1);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
@@ -3233,8 +3139,8 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		duckdb_ai::Complete(prompt, job.options, [&](const duckdb_ai::CompletionResult &response) {
 			auto parsed = ParseRerankScore(response.text, job.output);
 			if (!parsed) {
-				throw InvalidInputException("%s expected a numeric score from 0 to 1, got: %s", func_expr.function.name,
-				                            response.text);
+				throw InvalidInputException("%s expected a numeric score from 0 to 1, got: %s",
+				                            func_expr.Function().GetName(), response.text);
 			}
 		});
 	});
@@ -3347,11 +3253,11 @@ void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<Provider
 
 void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiCompletionBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader left_reader(args, 0);
 	StringVectorReader right_reader(args, 1);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
@@ -3411,11 +3317,11 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 
 void AiEmbeddingRequestJsonFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiCompletionBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<string_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	auto jobs = PrepareEmbeddingJobs<ProviderStringJob>(state.GetContext(), args, bind_data, result_validity);
 
 	RunProviderJobs(jobs, [&](ProviderStringJob &job) {
@@ -3432,11 +3338,11 @@ void AiEmbeddingRequestJsonFunction(DataChunk &args, ExpressionState &state, Vec
 
 void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiCompletionBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	auto jobs = PrepareEmbeddingJobs<ProviderEmbeddingJob>(state.GetContext(), args, bind_data, result_validity);
 
 	auto can_batch = jobs.size() > 1;
@@ -3483,20 +3389,19 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 }
 
-unique_ptr<FunctionData> AiTaskBindInternal(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiTaskBindInternal(ClientContext &context, BoundScalarFunction &bound_function,
                                             vector<unique_ptr<Expression>> &arguments, AiTaskKind task,
                                             idx_t required_args) {
-	BindTextArguments(bound_function, 1);
 	auto bind_data = make_uniq<AiTaskBindData>(task, required_args);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::TASK);
-	StampProviderFunction(bind_data->options, bound_function.name);
+	StampProviderFunction(bind_data->options, FunctionName(bound_function));
 	if (arguments.size() < required_args) {
-		throw BinderException("%s requires %llu argument(s)", bound_function.name, required_args);
+		throw BinderException("%s requires %llu argument(s)", FunctionName(bound_function), required_args);
 	}
 
 	idx_t positional_option_count = 0;
 	for (idx_t i = required_args; i < arguments.size(); i++) {
-		auto alias = ArgumentOptionName(*arguments[i], ModelProviderSlot(positional_option_count));
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			BindModelProviderPositionalOption(*bind_data, bound_function, i, positional_option_count);
 			continue;
@@ -3512,67 +3417,65 @@ unique_ptr<FunctionData> AiTaskBindInternal(ClientContext &context, ScalarFuncti
 			} else {
 				bind_data->examples = std::move(text);
 			}
-			bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 			continue;
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(OptionType(alias));
 	}
 	bound_function.SetReturnType(LogicalType::VARCHAR);
 	return std::move(bind_data);
 }
 
-unique_ptr<FunctionData> AiSummarizeBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiSummarizeBind(ClientContext &context, BoundScalarFunction &bound_function,
                                          vector<unique_ptr<Expression>> &arguments) {
 	return AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::SUMMARIZE, 1);
 }
 
-unique_ptr<FunctionData> AiSentimentBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiSentimentBind(ClientContext &context, BoundScalarFunction &bound_function,
                                          vector<unique_ptr<Expression>> &arguments) {
 	return AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::SENTIMENT, 1);
 }
 
-unique_ptr<FunctionData> AiFixGrammarBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiFixGrammarBind(ClientContext &context, BoundScalarFunction &bound_function,
                                           vector<unique_ptr<Expression>> &arguments) {
 	return AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::FIX_GRAMMAR, 1);
 }
 
-unique_ptr<FunctionData> AiRedactBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiRedactBind(ClientContext &context, BoundScalarFunction &bound_function,
                                       vector<unique_ptr<Expression>> &arguments) {
 	return AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::REDACT, 1);
 }
 
-unique_ptr<FunctionData> AiTranslateBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiTranslateBind(ClientContext &context, BoundScalarFunction &bound_function,
                                          vector<unique_ptr<Expression>> &arguments) {
 	return AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::TRANSLATE, 2);
 }
 
 //! Labels can be a list or fixed-size array of labels, a comma-separated or JSON-array string, or a constant MAP of
 //! label to description. A MAP becomes its key list, and its descriptions are added to the label descriptions.
-void BindClassificationLabels(ClientContext &context, ScalarFunction &bound_function,
+void BindClassificationLabels(ClientContext &context, BoundScalarFunction &bound_function,
                               vector<unique_ptr<Expression>> &arguments, AiTaskBindData &bind_data) {
 	if (arguments.size() < 2) {
 		return;
 	}
 	auto &labels = arguments[1];
-	auto type = labels->return_type.id();
+	auto type = labels->GetReturnType().id();
 	if (type == LogicalTypeId::MAP) {
 		RequireResolvedArgument(*labels);
 		if (!labels->IsFoldable()) {
 			throw BinderException("%s MAP labels must be constant; pass map_keys(...) for per-row labels",
-			                      bound_function.name);
+			                      FunctionName(bound_function));
 		}
 		auto map = ExpressionExecutor::EvaluateScalar(context, *labels)
 		               .DefaultCastAs(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 		if (map.IsNull()) {
-			throw BinderException("%s labels must not be NULL", bound_function.name);
+			throw BinderException("%s labels must not be NULL", FunctionName(bound_function));
 		}
 		vector<Value> keys;
 		std::string descriptions;
 		for (auto &entry : ListValue::GetChildren(map)) {
 			auto &pair = StructValue::GetChildren(entry);
 			if (pair[0].IsNull()) {
-				throw BinderException("%s labels must not contain NULL", bound_function.name);
+				throw BinderException("%s labels must not contain NULL", FunctionName(bound_function));
 			}
 			keys.push_back(pair[0]);
 			if (!pair[1].IsNull() && !StringValue::Get(pair[1]).empty()) {
@@ -3585,29 +3488,41 @@ void BindClassificationLabels(ClientContext &context, ScalarFunction &bound_func
 			                                   : bind_data.label_descriptions + "\n" + descriptions;
 		}
 		labels = make_uniq<BoundConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(keys)));
+		bound_function.GetArguments()[1] = LogicalType::LIST(LogicalType::VARCHAR);
 		type = LogicalTypeId::LIST;
 	}
 	if (type == LogicalTypeId::STRUCT) {
 		throw BinderException("%s labels must be a list of labels, a comma-separated string, or a MAP of label to "
 		                      "description",
-		                      bound_function.name);
+		                      FunctionName(bound_function));
 	}
-	if (type == LogicalTypeId::LIST || type == LogicalTypeId::ARRAY) {
-		bind_data.parameter_is_label_list = true;
-		bound_function.arguments[1] = LogicalType::LIST(LogicalType::VARCHAR);
-	} else {
-		bound_function.arguments[1] = LogicalType::VARCHAR;
-	}
+	bind_data.parameter_is_label_list = type == LogicalTypeId::LIST;
 }
 
-unique_ptr<FunctionData> AiClassifyBind(ClientContext &context, ScalarFunction &bound_function,
+//! Lists and arrays of labels resolve as VARCHAR[] and anything else as text. A MAP stays as is: bind replaces it with
+//! its key list, and rejects a STRUCT.
+void ResolveClassifyArguments(ResolveScalarFunctionTypesInput &input) {
+	auto &function = input.GetBoundFunction();
+	ResolveTextArgumentTypes(function, 1);
+	if (input.GetArgumentCount() < 2 || function.GetPositionalArgumentCount() < 2) {
+		return;
+	}
+	auto type = input.GetArgumentType(1).id();
+	if (type == LogicalTypeId::MAP || type == LogicalTypeId::STRUCT) {
+		return;
+	}
+	auto is_list = type == LogicalTypeId::LIST || type == LogicalTypeId::ARRAY;
+	function.GetArguments()[1] = is_list ? LogicalType::LIST(LogicalType::VARCHAR) : LogicalType::VARCHAR;
+}
+
+unique_ptr<FunctionData> AiClassifyBind(ClientContext &context, BoundScalarFunction &bound_function,
                                         vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::CLASSIFY, 2);
 	BindClassificationLabels(context, bound_function, arguments, bind_data->Cast<AiTaskBindData>());
 	return bind_data;
 }
 
-unique_ptr<FunctionData> AiClassifyLabelsBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiClassifyLabelsBind(ClientContext &context, BoundScalarFunction &bound_function,
                                               vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::CLASSIFY, 2);
 	BindClassificationLabels(context, bound_function, arguments, bind_data->Cast<AiTaskBindData>());
@@ -3615,87 +3530,76 @@ unique_ptr<FunctionData> AiClassifyLabelsBind(ClientContext &context, ScalarFunc
 	return bind_data;
 }
 
-unique_ptr<FunctionData> AiExtractBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiExtractBind(ClientContext &context, BoundScalarFunction &bound_function,
                                        vector<unique_ptr<Expression>> &arguments) {
 	return AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::EXTRACT, 2);
 }
 
-unique_ptr<FunctionData> AiFilterBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiFilterBind(ClientContext &context, BoundScalarFunction &bound_function,
                                       vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiTaskBindInternal(context, bound_function, arguments, AiTaskKind::FILTER, 2);
 	bound_function.SetReturnType(LogicalType::BOOLEAN);
 	return bind_data;
 }
 
-unique_ptr<FunctionData> AiPromptSqlBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiPromptSqlBind(ClientContext &context, BoundScalarFunction &bound_function,
                                          vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = make_uniq<AiPromptSqlBindData>();
 	ApplySettings(context, bind_data->options, AiModelSettingKind::SQL_ASSISTANT);
-	StampProviderFunction(bind_data->options, bound_function.name);
+	StampProviderFunction(bind_data->options, FunctionName(bound_function));
 	if (arguments.empty()) {
-		throw BinderException("%s requires a question argument", bound_function.name);
+		throw BinderException("%s requires a question argument", FunctionName(bound_function));
 	}
 
 	idx_t positional_option_count = 0;
 	for (idx_t i = 1; i < arguments.size(); i++) {
-		static const char *const slots[] = {"schema_context", "model", "provider"};
-		auto alias =
-		    ArgumentOptionName(*arguments[i], positional_option_count < 3 ? slots[positional_option_count] : nullptr);
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			positional_option_count++;
 			if (positional_option_count == 1) {
 				bind_data->has_schema_context_arg = true;
 				bind_data->schema_context_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 			} else if (positional_option_count == 2) {
 				bind_data->has_model_arg = true;
 				bind_data->model_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 			} else if (positional_option_count == 3) {
 				bind_data->has_provider_arg = true;
 				bind_data->provider_index = i;
-				bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 			} else {
 				throw BinderException("%s supports at most three positional options: schema_context, model, and "
 				                      "provider",
-				                      bound_function.name);
+				                      FunctionName(bound_function));
 			}
 			continue;
 		}
 		if (alias == "schema_context" || alias == "schema") {
 			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::VARCHAR);
 			bind_data->schema_context = StringValue::Get(value);
-			bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 			continue;
 		}
 		if (alias == "include_tables") {
 			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::ANY);
 			bind_data->schema_options.include_tables =
-			    ReadIncludeTablesValue(value, "include_tables", bound_function.name);
-			bound_function.arguments.emplace_back(arguments[i]->return_type);
+			    ReadIncludeTablesValue(value, "include_tables", FunctionName(bound_function));
 			continue;
 		}
 		if (alias == "exclude_tables") {
 			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::ANY);
 			bind_data->schema_options.exclude_tables =
-			    ReadIncludeTablesValue(value, "exclude_tables", bound_function.name);
-			bound_function.arguments.emplace_back(arguments[i]->return_type);
+			    ReadIncludeTablesValue(value, "exclude_tables", FunctionName(bound_function));
 			continue;
 		}
 		if (alias == "sample_rows") {
 			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::BIGINT);
-			bind_data->schema_options.sample_rows = ReadSampleRowsValue(value, bound_function.name);
-			bound_function.arguments.emplace_back(LogicalType::BIGINT);
+			bind_data->schema_options.sample_rows = ReadSampleRowsValue(value, FunctionName(bound_function));
 			continue;
 		}
 		if (alias == "fix_attempts") {
 			auto value = EvaluateConstantOption(context, *arguments[i], alias, LogicalType::BIGINT);
-			bind_data->fix_attempts = ReadFixAttemptsValue(value, bound_function.name);
-			bound_function.arguments.emplace_back(LogicalType::BIGINT);
+			bind_data->fix_attempts = ReadFixAttemptsValue(value, FunctionName(bound_function));
 			continue;
 		}
 		ApplyNamedOption(context, bind_data->options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(PromptSqlOptionType(alias));
 	}
 	bound_function.SetReturnType(LogicalType::VARCHAR);
 	return std::move(bind_data);
@@ -3706,28 +3610,25 @@ std::string EvaluateConstantString(ClientContext &context, Expression &expr, con
 	return StringValue::Get(value);
 }
 
-unique_ptr<FunctionData> AiAggregateBindInternal(ClientContext &context, AggregateFunction &function,
+unique_ptr<FunctionData> AiAggregateBindInternal(ClientContext &context, BoundAggregateFunction &function,
                                                  vector<unique_ptr<Expression>> &arguments, AiAggregateKind kind) {
-	BindTextArguments(function, 1);
+	ResolveTextArgumentTypes(function, 1);
 	auto bind_data = make_uniq<AiAggregateBindData>(kind);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::AGGREGATE);
-	StampProviderFunction(bind_data->options, function.name);
+	StampProviderFunction(bind_data->options, FunctionName(function));
 	duckdb_ai::AttachProviderRuntimeState(bind_data->options, context);
 	if (arguments.empty()) {
-		throw BinderException("%s requires an input text argument", function.name);
+		throw BinderException("%s requires an input text argument", FunctionName(function));
 	}
 
 	bool has_instruction = kind == AiAggregateKind::SUMMARIZE;
 	idx_t positional_option_count = 0;
-	vector<idx_t> erase_indexes;
 	for (idx_t i = 1; i < arguments.size(); i++) {
-		auto alias = ArgumentOptionName(*arguments[i],
-		                                has_instruction ? ModelProviderSlot(positional_option_count) : "instruction");
+		auto alias = ArgumentOptionName(function, i);
 		if (alias.empty()) {
 			if (!has_instruction) {
 				bind_data->instruction = EvaluateConstantString(context, *arguments[i], "instruction");
 				has_instruction = true;
-				erase_indexes.push_back(i);
 				continue;
 			}
 			positional_option_count++;
@@ -3738,35 +3639,30 @@ unique_ptr<FunctionData> AiAggregateBindInternal(ClientContext &context, Aggrega
 			} else {
 				throw BinderException("%s supports at most two positional options after the instruction: model and "
 				                      "provider",
-				                      function.name);
+				                      FunctionName(function));
 			}
-			erase_indexes.push_back(i);
 			continue;
 		}
 		ApplyAggregateOption(context, *bind_data, *arguments[i], alias);
 		if (alias == "instruction" || alias == "task") {
 			has_instruction = true;
 		}
-		erase_indexes.push_back(i);
 	}
 	if (!has_instruction) {
-		throw BinderException("%s requires a constant instruction argument", function.name);
+		throw BinderException("%s requires a constant instruction argument", FunctionName(function));
 	}
 	ApplyAiProviderSecret(context, bind_data->options);
 
-	for (idx_t erase_offset = erase_indexes.size(); erase_offset > 0; erase_offset--) {
-		Function::EraseArgument(function, arguments, erase_indexes[erase_offset - 1]);
-	}
 	function.SetReturnType(LogicalType::VARCHAR);
 	return std::move(bind_data);
 }
 
-unique_ptr<FunctionData> AiAggBind(ClientContext &context, AggregateFunction &function,
+unique_ptr<FunctionData> AiAggBind(ClientContext &context, BoundAggregateFunction &function,
                                    vector<unique_ptr<Expression>> &arguments) {
 	return AiAggregateBindInternal(context, function, arguments, AiAggregateKind::GENERIC);
 }
 
-unique_ptr<FunctionData> AiSummarizeAggBind(ClientContext &context, AggregateFunction &function,
+unique_ptr<FunctionData> AiSummarizeAggBind(ClientContext &context, BoundAggregateFunction &function,
                                             vector<unique_ptr<Expression>> &arguments) {
 	return AiAggregateBindInternal(context, function, arguments, AiAggregateKind::SUMMARIZE);
 }
@@ -4519,8 +4415,14 @@ std::string QuoteSqlIdentifier(const std::string &identifier) {
 }
 
 std::string QualifiedTableName(const SchemaTableInfo &table) {
-	return QuoteSqlIdentifier(table.catalog) + "." + QuoteSqlIdentifier(table.schema) + "." +
-	       QuoteSqlIdentifier(table.table);
+	auto result = QuoteSqlIdentifier(table.catalog);
+	if (table.schema_path.empty()) {
+		result += "." + QuoteSqlIdentifier(table.schema);
+	}
+	for (auto &schema : table.schema_path) {
+		result += "." + QuoteSqlIdentifier(schema);
+	}
+	return result + "." + QuoteSqlIdentifier(table.table);
 }
 
 std::string ValueToOptionalString(const Value &value_p) {
@@ -4610,7 +4512,7 @@ bool MatchesAnyTableSpec(const SchemaTableInfo &table, const vector<TableSpec> &
 
 std::string TableCreateSql(TableCatalogEntry &table) {
 	auto table_info = table.GetInfo();
-	table_info->catalog.clear();
+	table_info->StripCatalogQualification();
 	return table_info->ToString();
 }
 
@@ -4640,7 +4542,7 @@ vector<SchemaColumnInfo> ExtractSchemaColumns(TableCatalogEntry &table) {
 	for (idx_t i = 0; i < column_count; i++) {
 		auto &column = table.GetColumn(LogicalIndex(i));
 		SchemaColumnInfo info;
-		info.name = column.Name();
+		info.name = column.Name().GetIdentifierName();
 		info.type = column.Type().ToString();
 		info.nullable = not_null_cols.find(i) == not_null_cols.end();
 		if (column.Generated()) {
@@ -4694,7 +4596,7 @@ bool TryCollectSampleRows(ClientContext &context, TableCatalogEntry &table, Sche
 			}
 			column_ids.push_back(table.GetStorageIndex(ColumnIndex(i)));
 			column_types.push_back(column.Type());
-			column_names.push_back(column.Name());
+			column_names.push_back(column.Name().GetIdentifierName());
 		}
 		if (column_ids.empty()) {
 			return false;
@@ -4743,7 +4645,7 @@ std::string BuildPromptSchemaContext(ClientContext &context, const PromptSchemaO
                                      bool allow_actual_samples = false) {
 	auto include_specs = ParseTableSpecs(options.include_tables, "include_tables");
 	auto exclude_specs = ParseTableSpecs(options.exclude_tables, "exclude_tables");
-	auto current_database = DatabaseManager::GetDefaultDatabase(context);
+	auto current_database = DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
 	auto current_database_lower = LowerAscii(current_database);
 	vector<SchemaTableInfo> tables;
 
@@ -4759,9 +4661,12 @@ std::string BuildPromptSchemaContext(ClientContext &context, const PromptSchemaO
 			}
 
 			SchemaTableInfo info;
-			info.catalog = table.catalog.GetName();
-			info.schema = table.schema.name;
-			info.table = table.name;
+			info.catalog = table.catalog.GetName().GetIdentifierName();
+			info.schema = table.schema.name.GetIdentifierName();
+			for (auto &schema_name : table.schema.GetSchemaPath()) {
+				info.schema_path.push_back(schema_name.GetIdentifierName());
+			}
+			info.table = table.name.GetIdentifierName();
 			auto included = include_specs.empty() || MatchesAnyTableSpec(info, include_specs);
 			auto excluded = MatchesAnyTableSpec(info, exclude_specs);
 			if (!included || excluded) {
@@ -4780,8 +4685,8 @@ std::string BuildPromptSchemaContext(ClientContext &context, const PromptSchemaO
 		if (left.catalog != right.catalog) {
 			return left.catalog < right.catalog;
 		}
-		if (left.schema != right.schema) {
-			return left.schema < right.schema;
+		if (left.schema_path != right.schema_path) {
+			return left.schema_path < right.schema_path;
 		}
 		return left.table < right.table;
 	});
@@ -4864,11 +4769,11 @@ void RequireValidClassificationLabels(const std::string &function_name, const st
 
 void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiTaskBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiTaskBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<string_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	auto parameter_reader =
 	    OptionalStringReader(args, bind_data.required_args == 2 && !bind_data.parameter_is_label_list, 1);
@@ -4985,11 +4890,11 @@ void AiTaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 
 void AiClassifyLabelsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiTaskBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiTaskBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	for (idx_t row = 0; row < args.size(); row++) {
 		result_data[row] = list_entry_t(0, 0);
 	}
@@ -5076,7 +4981,7 @@ LogicalType AiClassifyResultReturnType() {
 	return LogicalType::STRUCT(std::move(children));
 }
 
-unique_ptr<FunctionData> AiClassifyResultBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiClassifyResultBind(ClientContext &context, BoundScalarFunction &bound_function,
                                               vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiClassifyLabelsBind(context, bound_function, arguments);
 	auto &task_bind_data = bind_data->Cast<AiTaskBindData>();
@@ -5111,10 +5016,10 @@ Value AiClassifyResultValue(const LogicalType &result_type, const std::vector<st
 
 void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiTaskBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiTaskBindData>();
 	auto result_type = AiClassifyResultReturnType();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::Validity(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	auto label_reader = OptionalStringReader(args, !bind_data.parameter_is_label_list, 1);
 	unique_ptr<StringListVectorReader> label_list_reader;
@@ -5233,7 +5138,7 @@ std::vector<std::string> ReadClassifierLabels(ClientContext &context, Expression
 	return labels;
 }
 
-unique_ptr<FunctionData> ClassifierBuildBind(ClientContext &context, AggregateFunction &function,
+unique_ptr<FunctionData> ClassifierBuildBind(ClientContext &context, BoundAggregateFunction &function,
                                              vector<unique_ptr<Expression>> &arguments) {
 	if (arguments.size() < 2) {
 		throw BinderException("ai_build_classifier requires input text and a constant label list");
@@ -5246,9 +5151,8 @@ unique_ptr<FunctionData> ClassifierBuildBind(ClientContext &context, AggregateFu
 	duckdb_ai::AttachProviderRuntimeState(bind_data->label_options, context);
 	duckdb_ai::AttachProviderRuntimeState(bind_data->embedding_options, context);
 	bind_data->labels = ReadClassifierLabels(context, *arguments[1]);
-	vector<idx_t> erase_indexes {1};
 	for (idx_t i = 2; i < arguments.size(); i++) {
-		auto alias = LowerAscii(arguments[i]->GetAlias());
+		auto alias = ArgumentOptionName(function, i);
 		if (alias.empty()) {
 			throw BinderException("ai_build_classifier options must use named arguments");
 		}
@@ -5289,13 +5193,9 @@ unique_ptr<FunctionData> ClassifierBuildBind(ClientContext &context, AggregateFu
 		} else {
 			ApplyNamedOption(context, bind_data->label_options, *arguments[i], alias);
 		}
-		erase_indexes.push_back(i);
 	}
 	ApplyAiProviderSecret(context, bind_data->label_options);
 	ApplyAiProviderSecret(context, bind_data->embedding_options);
-	for (idx_t offset = erase_indexes.size(); offset > 0; offset--) {
-		Function::EraseArgument(function, arguments, erase_indexes[offset - 1]);
-	}
 	function.SetReturnType(LogicalType::VARCHAR);
 	return std::move(bind_data);
 }
@@ -5608,11 +5508,11 @@ bool ParseAiBooleanResult(const std::string &input, bool &value) {
 
 void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiTaskBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiTaskBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<bool>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<bool>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	StringVectorReader predicate_reader(args, 1);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
@@ -5685,7 +5585,7 @@ void AiFilterFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 }
 
-unique_ptr<FunctionData> AiCountTokensBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiCountTokensBind(ClientContext &context, BoundScalarFunction &bound_function,
                                            vector<unique_ptr<Expression>> &arguments) {
 	auto bind_data = AiCompletionBindInternal(context, bound_function, arguments, false);
 	bound_function.SetReturnType(LogicalType::BIGINT);
@@ -5694,11 +5594,11 @@ unique_ptr<FunctionData> AiCountTokensBind(ClientContext &context, ScalarFunctio
 
 void AiCountTokensFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiCompletionBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiCompletionBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<int64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<int64_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, bind_data.prompt_index);
 
 	for (idx_t row = 0; row < args.size(); row++) {
@@ -5768,8 +5668,8 @@ int64_t RecommendedBatchSize(double input_tokens_per_row, double max_output_toke
 
 void AiRecommendedBatchSizeFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<int64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<int64_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t row = 0; row < args.size(); row++) {
 		bool is_null = false;
@@ -5788,7 +5688,7 @@ void AiRecommendedBatchSizeFunction(DataChunk &args, ExpressionState &, Vector &
 }
 
 bool ValidateReadOnlySql(const std::string &sql, std::string &error) {
-	Parser parser;
+	auto parser = Parser::GetBuiltinParser();
 	try {
 		parser.ParseQuery(sql);
 	} catch (std::exception &ex) {
@@ -5811,7 +5711,7 @@ bool ValidateReadOnlySql(const std::string &sql, std::string &error) {
 
 bool VerifySqlBinds(ClientContext &context, const std::string &sql, std::string &error) {
 	try {
-		Parser parser(context.GetParserOptions());
+		Parser parser(context);
 		parser.ParseQuery(sql);
 		if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
 			error = "expected exactly one SELECT statement";
@@ -6011,8 +5911,8 @@ std::string RepairGeneratedSql(ClientContext &context, const std::string &questi
 	return generated_sql;
 }
 
-unique_ptr<TableRef> ParseReadOnlySubquery(const std::string &sql, const ParserOptions &options) {
-	Parser parser(options);
+unique_ptr<TableRef> ParseReadOnlySubquery(const std::string &sql, ClientContext &context) {
+	Parser parser(context);
 	parser.ParseQuery(sql);
 	if (parser.statements.size() != 1) {
 		throw ParserException("AI generated SQL must be exactly one SELECT statement");
@@ -6057,8 +5957,8 @@ void ApplyPromptQueryValueOption(duckdb_ai::CompletionOptions &options, std::str
 	}
 }
 
-unique_ptr<TableRef> EmptyPromptQueryResult(const ParserOptions &options) {
-	return ParseReadOnlySubquery("SELECT NULL::VARCHAR AS ai_query_data_error WHERE FALSE", options);
+unique_ptr<TableRef> EmptyPromptQueryResult(ClientContext &context) {
+	return ParseReadOnlySubquery("SELECT NULL::VARCHAR AS ai_query_data_error WHERE FALSE", context);
 }
 
 PromptQueryCacheState &PromptQueryCache(ClientContext &context) {
@@ -6208,7 +6108,7 @@ unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctio
 				duckdb_ai::RecordLocalUsageEvent(&context, "ai_query_data_cache_hit",
 				                                 duckdb_ai::Utf8CharacterCount(question),
 				                                 duckdb_ai::Utf8CharacterCount(generated_sql));
-				return ParseReadOnlySubquery(generated_sql, context.GetParserOptions());
+				return ParseReadOnlySubquery(generated_sql, context);
 			}
 			// the cached SQL no longer binds (e.g. the schema changed): fall through and regenerate
 		}
@@ -6216,22 +6116,22 @@ unique_ptr<TableRef> PromptQueryBindReplace(ClientContext &context, TableFunctio
 		generated_sql = RepairGeneratedSql(context, question, std::move(generated_sql), schema_context, options,
 		                                   fix_attempts, "ai_query_data_fix_attempt");
 		StorePromptQueryCachedSql(context, cache_key, generated_sql);
-		return ParseReadOnlySubquery(generated_sql, context.GetParserOptions());
+		return ParseReadOnlySubquery(generated_sql, context);
 	} catch (std::exception &ex) {
 		if (options.fail_on_error) {
 			throw;
 		}
-		return EmptyPromptQueryResult(context.GetParserOptions());
+		return EmptyPromptQueryResult(context);
 	}
 }
 
 void AiPromptSqlFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<AiPromptSqlBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<AiPromptSqlBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<string_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	std::string auto_schema_context;
 	bool has_auto_schema_context = false;
 	StringVectorReader question_reader(args, 0);
@@ -6403,7 +6303,7 @@ PromptSchemaOptions PromptSchemaOptionsFromInput(TableFunctionBindInput &input) 
 }
 
 unique_ptr<FunctionData> PromptSchemaBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("summary");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	auto options = PromptSchemaOptionsFromInput(input);
@@ -6421,8 +6321,8 @@ void PromptSchemaFunction(ClientContext &context, TableFunctionInput &input, Dat
 	}
 	auto &bind_data = input.bind_data->Cast<PromptSchemaBindData>();
 	auto summary = BuildPromptSchemaContext(context, bind_data.options, true);
-	output.SetValue(0, 0, Value(summary));
-	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value(summary));
+	output.SetChildCardinality(1);
 	state.emitted = true;
 	duckdb_ai::RecordLocalUsageEvent(&context, "ai_schema_prompt", 0, duckdb_ai::Utf8CharacterCount(summary));
 }
@@ -6519,7 +6419,7 @@ PromptAssistantKind PromptFixSqlKindFromInput(TableFunctionBindInput &input) {
 }
 
 unique_ptr<FunctionData> PromptAssistantBindInternal(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<LogicalType> &return_types, vector<string> &names,
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names,
                                                      PromptAssistantKind kind, const std::string &function_name) {
 	auto bind_data = make_uniq<PromptAssistantBindData>(kind);
 	ApplySettings(context, bind_data->options, AiModelSettingKind::SQL_ASSISTANT);
@@ -6564,13 +6464,13 @@ unique_ptr<FunctionData> PromptAssistantBindInternal(ClientContext &context, Tab
 }
 
 unique_ptr<FunctionData> PromptExplainBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return PromptAssistantBindInternal(context, input, return_types, names, PromptAssistantKind::EXPLAIN,
 	                                   "ai_explain_sql");
 }
 
 unique_ptr<FunctionData> PromptFixupBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return PromptAssistantBindInternal(context, input, return_types, names, PromptFixSqlKindFromInput(input),
 	                                   "ai_fix_sql");
 }
@@ -6581,12 +6481,12 @@ unique_ptr<GlobalTableFunctionState> PromptAssistantInit(ClientContext &, TableF
 
 void PromptAssistantNullRow(const PromptAssistantBindData &bind_data, DataChunk &output) {
 	if (bind_data.kind == PromptAssistantKind::FIX_LINE) {
-		output.SetValue(0, 0, Value());
-		output.SetValue(1, 0, Value());
+		output.data[0].SetValue(0, Value());
+		output.data[1].SetValue(0, Value());
 	} else {
-		output.SetValue(0, 0, Value());
+		output.data[0].SetValue(0, Value());
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 }
 
 void PromptAssistantFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
@@ -6604,13 +6504,13 @@ void PromptAssistantFunction(ClientContext &context, TableFunctionInput &input, 
 			AppendSystemPrompt(options, BuildPromptExplainSystemPrompt(bind_data.schema_context));
 			auto prompt = BuildPromptExplainPrompt(bind_data.sql);
 			auto explanation = duckdb_ai::Complete(prompt, options).text;
-			output.SetValue(0, 0, Value(explanation));
+			output.data[0].SetValue(0, Value(explanation));
 		} else if (bind_data.kind == PromptAssistantKind::FIXUP) {
 			auto fixed_sql =
 			    GeneratePromptFixupSql(bind_data.sql, bind_data.schema_context, options, bind_data.error_message);
 			fixed_sql = RepairGeneratedSql(context, "", std::move(fixed_sql), bind_data.schema_context, options,
 			                               bind_data.fix_attempts, "ai_fix_sql_fix_attempt");
-			output.SetValue(0, 0, Value(fixed_sql));
+			output.data[0].SetValue(0, Value(fixed_sql));
 		} else {
 			auto line_number = ExtractLineNumber(bind_data.error_message);
 			auto line_count = static_cast<idx_t>(std::count(bind_data.sql.begin(), bind_data.sql.end(), '\n')) + 1;
@@ -6629,10 +6529,10 @@ void PromptAssistantFunction(ClientContext &context, TableFunctionInput &input, 
 				                            "statement: %s",
 				                            error);
 			}
-			output.SetValue(0, 0, Value::BIGINT(static_cast<int64_t>(line_number)));
-			output.SetValue(1, 0, Value(TrimAscii(replacement)));
+			output.data[0].SetValue(0, Value::BIGINT(static_cast<int64_t>(line_number)));
+			output.data[1].SetValue(0, Value(TrimAscii(replacement)));
 		}
-		output.SetCardinality(1);
+		output.SetChildCardinality(1);
 	} catch (std::exception &ex) {
 		if (bind_data.options.fail_on_error) {
 			throw;
@@ -6720,7 +6620,7 @@ bool SecretHasNonEmptyValue(const KeyValueSecret &secret, const std::string &key
 }
 
 unique_ptr<FunctionData> AiSecretsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                       vector<string> &names) {
+                                       vector<Identifier> &names) {
 	AddTableColumns(return_types, names,
 	                {{"name", LogicalType::VARCHAR},
 	                 {"provider", LogicalType::VARCHAR},
@@ -6760,17 +6660,17 @@ void AiSecretsFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 		TryReadSecretString(*secret, "base_url", base_url);
 
 		idx_t col = 0;
-		output.SetValue(col++, count, Value(entry.secret->GetName()));
-		output.SetValue(col++, count, provider.empty() ? Value() : Value(provider));
-		output.SetValue(col++, count, model.empty() ? Value() : Value(model));
-		output.SetValue(col++, count, base_url.empty() ? Value() : Value(base_url));
-		output.SetValue(col++, count, Value(ScopeString(entry.secret->GetScope())));
-		output.SetValue(col++, count, Value(entry.storage_mode));
-		output.SetValue(col++, count, Value::BOOLEAN(entry.persist_type == SecretPersistType::PERSISTENT));
-		output.SetValue(col++, count, Value::BOOLEAN(SecretHasNonEmptyValue(*secret, "api_key")));
+		output.data[col++].SetValue(count, Value(entry.secret->GetName()));
+		output.data[col++].SetValue(count, provider.empty() ? Value() : Value(provider));
+		output.data[col++].SetValue(count, model.empty() ? Value() : Value(model));
+		output.data[col++].SetValue(count, base_url.empty() ? Value() : Value(base_url));
+		output.data[col++].SetValue(count, Value(ScopeString(entry.secret->GetScope())));
+		output.data[col++].SetValue(count, Value(entry.storage_mode));
+		output.data[col++].SetValue(count, Value::BOOLEAN(entry.persist_type == SecretPersistType::PERSISTENT));
+		output.data[col++].SetValue(count, Value::BOOLEAN(SecretHasNonEmptyValue(*secret, "api_key")));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 bool ExternalModelHasCapability(const std::string &capabilities, const std::string &expected) {
@@ -6790,7 +6690,7 @@ bool ExternalModelHasCapability(const std::string &capabilities, const std::stri
 }
 
 unique_ptr<FunctionData> AiModelsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                      vector<string> &names) {
+                                      vector<Identifier> &names) {
 	AddTableColumns(return_types, names,
 	                {{"name", LogicalType::VARCHAR},
 	                 {"provider", LogicalType::VARCHAR},
@@ -6905,44 +6805,42 @@ void AiModelsFunction(ClientContext &context, TableFunctionInput &data_p, DataCh
 				}
 			}
 		}
-		auto name = entry.secret->GetName();
+		auto name = entry.secret->GetName().GetIdentifierName();
 		auto prefix = ExternalModelSecretName("");
 		if (StartsWith(name, prefix)) {
 			name = name.substr(prefix.size());
 		}
 		idx_t col = 0;
-		output.SetValue(col++, count, Value(name));
-		output.SetValue(col++, count, Value(provider));
-		output.SetValue(col++, count, Value(model));
-		output.SetValue(col++, count, location.empty() ? Value() : Value(location));
-		output.SetValue(col++, count, credential.empty() ? Value() : Value(credential));
-		output.SetValue(col++, count, model_type.empty() ? Value() : Value(model_type));
-		output.SetValue(col++, count, capabilities.empty() ? Value() : Value(capabilities));
-		output.SetValue(col++, count, options.empty() ? Value() : Value(options));
-		output.SetValue(col++, count,
-		                has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_batch_inputs) : Value());
-		output.SetValue(col++, count,
-		                has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_batch_tokens) : Value());
-		output.SetValue(col++, count,
-		                has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_request_bytes) : Value());
-		output.SetValue(col++, count,
-		                has_runtime_capabilities && runtime_capabilities.context_tokens >= 0
-		                    ? Value::BIGINT(runtime_capabilities.context_tokens)
-		                    : Value());
-		output.SetValue(col++, count,
-		                has_runtime_capabilities && runtime_capabilities.embedding_dimensions >= 0
-		                    ? Value::BIGINT(runtime_capabilities.embedding_dimensions)
-		                    : Value());
-		output.SetValue(col++, count,
-		                has_runtime_capabilities ? Value::BOOLEAN(runtime_capabilities.native_batch_jobs) : Value());
-		output.SetValue(col++, count, input_price >= 0 ? Value::DOUBLE(input_price) : Value());
-		output.SetValue(col++, count, output_price >= 0 ? Value::DOUBLE(output_price) : Value());
-		output.SetValue(col++, count, Value(entry.storage_mode));
-		output.SetValue(col++, count, Value::BOOLEAN(entry.persist_type == SecretPersistType::PERSISTENT));
-		output.SetValue(col++, count, Value(validation_status));
+		output.data[col++].SetValue(count, Value(name));
+		output.data[col++].SetValue(count, Value(provider));
+		output.data[col++].SetValue(count, Value(model));
+		output.data[col++].SetValue(count, location.empty() ? Value() : Value(location));
+		output.data[col++].SetValue(count, credential.empty() ? Value() : Value(credential));
+		output.data[col++].SetValue(count, model_type.empty() ? Value() : Value(model_type));
+		output.data[col++].SetValue(count, capabilities.empty() ? Value() : Value(capabilities));
+		output.data[col++].SetValue(count, options.empty() ? Value() : Value(options));
+		output.data[col++].SetValue(
+		    count, has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_batch_inputs) : Value());
+		output.data[col++].SetValue(
+		    count, has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_batch_tokens) : Value());
+		output.data[col++].SetValue(
+		    count, has_runtime_capabilities ? Value::BIGINT(runtime_capabilities.max_request_bytes) : Value());
+		output.data[col++].SetValue(count, has_runtime_capabilities && runtime_capabilities.context_tokens >= 0
+		                                       ? Value::BIGINT(runtime_capabilities.context_tokens)
+		                                       : Value());
+		output.data[col++].SetValue(count, has_runtime_capabilities && runtime_capabilities.embedding_dimensions >= 0
+		                                       ? Value::BIGINT(runtime_capabilities.embedding_dimensions)
+		                                       : Value());
+		output.data[col++].SetValue(
+		    count, has_runtime_capabilities ? Value::BOOLEAN(runtime_capabilities.native_batch_jobs) : Value());
+		output.data[col++].SetValue(count, input_price >= 0 ? Value::DOUBLE(input_price) : Value());
+		output.data[col++].SetValue(count, output_price >= 0 ? Value::DOUBLE(output_price) : Value());
+		output.data[col++].SetValue(count, Value(entry.storage_mode));
+		output.data[col++].SetValue(count, Value::BOOLEAN(entry.persist_type == SecretPersistType::PERSISTENT));
+		output.data[col++].SetValue(count, Value(validation_status));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 std::string ExternalModelInputString(const Value &input) {
@@ -6954,7 +6852,7 @@ std::string ExternalModelInputString(const Value &input) {
 }
 
 unique_ptr<FunctionData> ExternalModelBind(ClientContext &, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 9) {
 		throw BinderException("CREATE EXTERNAL MODEL internal plan expected nine arguments");
 	}
@@ -6995,7 +6893,7 @@ void ExternalModelFunction(ClientContext &context, TableFunctionInput &data_p, D
 	CreateSecretInput input;
 	input.type = "duckdb_ai_model";
 	input.provider = "config";
-	input.name = ExternalModelSecretName(bind_data.name);
+	input.name = Identifier(ExternalModelSecretName(bind_data.name));
 	input.on_conflict = bind_data.replace ? OnCreateConflict::REPLACE_ON_CONFLICT : OnCreateConflict::ERROR_ON_CONFLICT;
 	input.persist_type = SecretPersistType::DEFAULT;
 	input.options["ai_provider"] = Value(bind_data.provider);
@@ -7016,9 +6914,9 @@ void ExternalModelFunction(ClientContext &context, TableFunctionInput &data_p, D
 		input.options["options"] = Value(bind_data.options);
 	}
 	SecretManager::Get(context).CreateSecret(context, input);
-	output.SetValue(0, 0, Value(bind_data.name));
-	output.SetValue(1, 0, Value::BOOLEAN(true));
-	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value(bind_data.name));
+	output.data[1].SetValue(0, Value::BOOLEAN(true));
+	output.SetChildCardinality(1);
 	state.emitted = true;
 }
 
@@ -7067,7 +6965,7 @@ ExternalModelDefinition GetExternalModel(ClientContext &context, const std::stri
 }
 
 unique_ptr<FunctionData> ControlPlaneBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names,
+                                          vector<LogicalType> &return_types, vector<Identifier> &names,
                                           ControlPlaneOperation operation) {
 	if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
 		throw BinderException("AI control-plane functions require one non-NULL profile or operation id");
@@ -7113,17 +7011,17 @@ unique_ptr<FunctionData> ControlPlaneBind(ClientContext &context, TableFunctionB
 }
 
 unique_ptr<FunctionData> ProvisionEndpointBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return ControlPlaneBind(context, input, return_types, names, ControlPlaneOperation::PROVISION);
 }
 
 unique_ptr<FunctionData> EndpointStatusBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return ControlPlaneBind(context, input, return_types, names, ControlPlaneOperation::STATUS);
 }
 
 unique_ptr<FunctionData> DeprovisionEndpointBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return ControlPlaneBind(context, input, return_types, names, ControlPlaneOperation::DEPROVISION);
 }
 
@@ -7203,15 +7101,13 @@ struct DecisionBindData : public FunctionData {
 //! fixed-size arrays of levels all work.
 Value NormalizeDecisionCriteria(const std::string &name, const Value &value) {
 	auto type = value.type().id();
-	Value result;
-	std::string error;
 	if (type == LogicalTypeId::LIST || type == LogicalTypeId::ARRAY) {
-		if (value.DefaultTryCastAs(LogicalType::LIST(LogicalType::VARCHAR), result, &error)) {
-			return result;
+		if (auto result = value.DefaultTryCastAs(LogicalType::LIST(LogicalType::VARCHAR))) {
+			return std::move(*result);
 		}
 	} else if (type == LogicalTypeId::MAP) {
-		if (value.DefaultTryCastAs(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR), result, &error)) {
-			return result;
+		if (auto result = value.DefaultTryCastAs(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR))) {
+			return std::move(*result);
 		}
 	}
 	throw BinderException("%s criteria must be a MAP of label to description or a list of levels", name);
@@ -7288,14 +7184,12 @@ void ParseDecisionQuestion(const std::string &name, const Value &value, Decision
 			ParseDecisionCriteria(name, children[i], question);
 			has_criteria = true;
 		} else if (field == "instructions") {
-			Value instructions;
-			std::string cast_error;
-			if (children[i].IsNull() ||
-			    !children[i].DefaultTryCastAs(LogicalType::VARCHAR, instructions, &cast_error) ||
-			    StringValue::Get(instructions).empty()) {
+			auto instructions =
+			    children[i].IsNull() ? optional<Value>() : children[i].DefaultTryCastAs(LogicalType::VARCHAR);
+			if (!instructions || StringValue::Get(*instructions).empty()) {
 				throw BinderException("%s question instructions must be a nonempty VARCHAR", name);
 			}
-			question.instructions = StringValue::Get(instructions);
+			question.instructions = StringValue::Get(*instructions);
 		} else {
 			throw BinderException("%s question STRUCT accepts only instructions and criteria", name);
 		}
@@ -7305,10 +7199,9 @@ void ParseDecisionQuestion(const std::string &name, const Value &value, Decision
 	}
 }
 
-unique_ptr<FunctionData> DecisionBind(ClientContext &context, ScalarFunction &function,
+unique_ptr<FunctionData> DecisionBind(ClientContext &context, BoundScalarFunction &function,
                                       vector<unique_ptr<Expression>> &arguments) {
-	BindTextArguments(function, 1);
-	const auto name = function.name;
+	const auto name = FunctionName(function);
 	const bool jev = name == "ai_jev";
 	if (arguments.size() >= 2) {
 		RequireResolvedArgument(*arguments[1]);
@@ -7357,14 +7250,15 @@ unique_ptr<FunctionData> DecisionBind(ClientContext &context, ScalarFunction &fu
 		} else {
 			ParseDecisionQuestion(name, values[i], question);
 		}
-		add_field(names[i].first, question.kind == "choice" ? LogicalType::VARCHAR : LogicalType::DOUBLE);
+		add_field(names[i].first.GetIdentifierName(),
+		          question.kind == "choice" ? LogicalType::VARCHAR : LogicalType::DOUBLE);
 		if (question.kind != "noul") {
-			add_field(names[i].first + "_confidence", LogicalType::DOUBLE);
+			add_field(names[i].first.GetIdentifierName() + "_confidence", LogicalType::DOUBLE);
 		}
 		data->questions.push_back(std::move(question));
 	}
 	for (idx_t i = 2; i < arguments.size(); i++) {
-		auto option = LowerAscii(arguments[i]->GetAlias());
+		auto option = ArgumentOptionName(function, i);
 		if (option == "batch_size" || option == "max_request_bytes") {
 			auto value = BigIntValue::Get(EvaluateConstantOption(context, *arguments[i], option, LogicalType::BIGINT));
 			auto min_value = option == "batch_size" ? 1 : 1024;
@@ -7373,7 +7267,6 @@ unique_ptr<FunctionData> DecisionBind(ClientContext &context, ScalarFunction &fu
 				throw BinderException("%s %s must be between %d and %d", name, option, min_value, max_value);
 			}
 			(option == "batch_size" ? data->batch_size : data->max_request_bytes) = NumericCast<idx_t>(value);
-			function.arguments.emplace_back(LogicalType::BIGINT);
 		} else {
 			static const std::set<std::string> allowed = {"model",
 			                                              "secret",
@@ -7392,7 +7285,6 @@ unique_ptr<FunctionData> DecisionBind(ClientContext &context, ScalarFunction &fu
 				throw BinderException("Unsupported %s option: %s", name, option);
 			}
 			ApplyNamedOption(context, data->options, *arguments[i], option);
-			function.arguments.emplace_back(OptionType(option));
 		}
 	}
 	if (data->options.on_error == "capture") {
@@ -7451,7 +7343,7 @@ std::string DecisionRowQuestions(const std::string &input, idx_t row, const std:
 }
 
 void DecisionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &data = state.expr.Cast<BoundFunctionExpression>().bind_info->Cast<DecisionBindData>();
+	auto &data = state.expr.Cast<BoundFunctionExpression>().BindInfo()->Cast<DecisionBindData>();
 	auto &name = data.function_name;
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	StringVectorReader inputs(args, 0);
@@ -7661,13 +7553,13 @@ void ControlPlaneFunction(ClientContext &context, TableFunctionInput &data_p, Da
 		has_estimated_cost = SqlJsonDouble(root, "estimated_hourly_cost_usd", estimated_cost);
 	}
 	idx_t col = 0;
-	output.SetValue(col++, 0, operation_id.empty() ? Value() : Value(operation_id));
-	output.SetValue(col++, 0, status.empty() ? Value() : Value(status));
-	output.SetValue(col++, 0, endpoint_url.empty() ? Value() : Value(endpoint_url));
-	output.SetValue(col++, 0, has_estimated_cost ? Value::DOUBLE(estimated_cost) : Value());
-	output.SetValue(col++, 0, action_required.empty() ? Value() : Value(action_required));
-	output.SetValue(col++, 0, Value(response));
-	output.SetCardinality(1);
+	output.data[col++].SetValue(0, operation_id.empty() ? Value() : Value(operation_id));
+	output.data[col++].SetValue(0, status.empty() ? Value() : Value(status));
+	output.data[col++].SetValue(0, endpoint_url.empty() ? Value() : Value(endpoint_url));
+	output.data[col++].SetValue(0, has_estimated_cost ? Value::DOUBLE(estimated_cost) : Value());
+	output.data[col++].SetValue(0, action_required.empty() ? Value() : Value(action_required));
+	output.data[col++].SetValue(0, Value(response));
+	output.SetChildCardinality(1);
 	state.emitted = true;
 }
 
@@ -7727,7 +7619,7 @@ int64_t SqlJsonInteger(duckdb_yyjson::yyjson_val *root, const char *name) {
 }
 
 unique_ptr<FunctionData> DocumentParseBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 3 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
 		throw BinderException("ai_parse_document requires non-NULL content, mime_type, and parser_profile arguments");
 	}
@@ -7842,19 +7734,19 @@ void DocumentParseFunction(ClientContext &, TableFunctionInput &data_p, DataChun
 	while (data.offset < data.elements.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &element = data.elements[data.offset++];
 		idx_t col = 0;
-		output.SetValue(col++, count, element.document_id.empty() ? Value() : Value(element.document_id));
-		output.SetValue(col++, count, element.page < 0 ? Value() : Value::BIGINT(element.page));
-		output.SetValue(col++, count, element.element_index < 0 ? Value() : Value::BIGINT(element.element_index));
-		output.SetValue(col++, count, element.element_type.empty() ? Value() : Value(element.element_type));
-		output.SetValue(col++, count, element.text.empty() ? Value() : Value(element.text));
-		output.SetValue(col++, count, element.markdown.empty() ? Value() : Value(element.markdown));
-		output.SetValue(col++, count, element.bbox.empty() ? Value() : Value(element.bbox));
-		output.SetValue(col++, count, element.has_confidence ? Value::DOUBLE(element.confidence) : Value());
-		output.SetValue(col++, count, element.metadata.empty() ? Value() : Value(element.metadata));
-		output.SetValue(col++, count, element.error.empty() ? Value() : Value(element.error));
+		output.data[col++].SetValue(count, element.document_id.empty() ? Value() : Value(element.document_id));
+		output.data[col++].SetValue(count, element.page < 0 ? Value() : Value::BIGINT(element.page));
+		output.data[col++].SetValue(count, element.element_index < 0 ? Value() : Value::BIGINT(element.element_index));
+		output.data[col++].SetValue(count, element.element_type.empty() ? Value() : Value(element.element_type));
+		output.data[col++].SetValue(count, element.text.empty() ? Value() : Value(element.text));
+		output.data[col++].SetValue(count, element.markdown.empty() ? Value() : Value(element.markdown));
+		output.data[col++].SetValue(count, element.bbox.empty() ? Value() : Value(element.bbox));
+		output.data[col++].SetValue(count, element.has_confidence ? Value::DOUBLE(element.confidence) : Value());
+		output.data[col++].SetValue(count, element.metadata.empty() ? Value() : Value(element.metadata));
+		output.data[col++].SetValue(count, element.error.empty() ? Value() : Value(element.error));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 struct ParsedClassifierArtifact {
@@ -8001,9 +7893,8 @@ Value AiOptimizedClassifierResultValue(const LogicalType &result_type, const std
 	return Value::STRUCT(result_type, std::move(children));
 }
 
-unique_ptr<FunctionData> AiOptimizedClassifierBind(ClientContext &context, ScalarFunction &bound_function,
+unique_ptr<FunctionData> AiOptimizedClassifierBind(ClientContext &context, BoundScalarFunction &bound_function,
                                                    vector<unique_ptr<Expression>> &arguments) {
-	BindTextArguments(bound_function, 1);
 	if (arguments.size() < 2) {
 		throw BinderException("ai_classify_optimized requires input and classifier artifact arguments");
 	}
@@ -8012,13 +7903,12 @@ unique_ptr<FunctionData> AiOptimizedClassifierBind(ClientContext &context, Scala
 	StampProviderFunction(bind_data->fallback_options, "ai_classify_optimized_fallback");
 	duckdb_ai::AttachProviderRuntimeState(bind_data->fallback_options, context);
 	for (idx_t i = 2; i < arguments.size(); i++) {
-		auto alias = LowerAscii(arguments[i]->GetAlias());
+		auto alias = ArgumentOptionName(bound_function, i);
 		if (alias.empty()) {
 			throw BinderException("ai_classify_optimized options must use named arguments");
 		}
 		if (alias == "fallback_profile") {
 			bind_data->fallback_options.secret_name = EvaluateConstantString(context, *arguments[i], alias);
-			bound_function.arguments.emplace_back(LogicalType::VARCHAR);
 			continue;
 		}
 		LogicalType option_type;
@@ -8026,7 +7916,6 @@ unique_ptr<FunctionData> AiOptimizedClassifierBind(ClientContext &context, Scala
 			throw BinderException("Unsupported ai_classify_optimized option \"%s\"", alias);
 		}
 		ApplyNamedOption(context, bind_data->fallback_options, *arguments[i], alias);
-		bound_function.arguments.emplace_back(option_type);
 	}
 	bind_data->fallback_options.on_error = "capture";
 	bind_data->fallback_options.fail_on_error = false;
@@ -8059,10 +7948,10 @@ std::string OptimizedClassifierMetadata(const OptimizedClassifierRow &row, const
 
 void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = func_expr.bind_info->Cast<OptimizedClassifierBindData>();
+	auto &bind_data = func_expr.BindInfo()->Cast<OptimizedClassifierBindData>();
 	auto result_type = AiOptimizedClassifierReturnType();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::Validity(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	StringVectorReader artifact_reader(args, 1);
 	std::vector<OptimizedClassifierRow> rows;
@@ -8393,7 +8282,7 @@ std::string ApplyChunkOption(AiChunkBindData &data, const std::string &name_p, c
 }
 
 unique_ptr<FunctionData> AiChunkBindInternal(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names,
+                                             vector<LogicalType> &return_types, vector<Identifier> &names,
                                              bool prep_search) {
 	auto function_name = prep_search ? "ai_prep_search" : "ai_generate_chunks";
 	// Constant arguments arrive as one input value. A lateral call such as FROM docs, ai_generate_chunks(docs.body)
@@ -8410,7 +8299,7 @@ unique_ptr<FunctionData> AiChunkBindInternal(ClientContext &context, TableFuncti
 		duckdb_ai::AttachProviderRuntimeState(bind_data->options, context);
 	}
 	for (auto &parameter : input.named_parameters) {
-		auto error = ApplyChunkOption(*bind_data, parameter.first, parameter.second);
+		auto error = ApplyChunkOption(*bind_data, parameter.first.GetIdentifierName(), parameter.second);
 		if (!error.empty()) {
 			throw BinderException(error);
 		}
@@ -8419,7 +8308,8 @@ unique_ptr<FunctionData> AiChunkBindInternal(ClientContext &context, TableFuncti
 		for (idx_t i = 1; i < input.input_table_types.size(); i++) {
 			auto name = i < input.input_table_names.size() ? LowerAscii(input.input_table_names[i]) : std::string();
 			// Check the option name now so a misspelled option fails before any row runs.
-			if (!input.table_function.named_parameters.count(name)) {
+			auto options = input.table_function.GetSignature().GetTypedKwargs();
+			if (name.empty() || !options || !options->Find(Identifier(name))) {
 				throw BinderException("%s options must use named arguments, for example chunk_size := 500; got \"%s\"",
 				                      function_name, name);
 			}
@@ -8457,12 +8347,12 @@ unique_ptr<FunctionData> AiChunkBindInternal(ClientContext &context, TableFuncti
 }
 
 unique_ptr<FunctionData> AiGenerateChunksBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return AiChunkBindInternal(context, input, return_types, names, false);
 }
 
 unique_ptr<FunctionData> AiPrepSearchBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return AiChunkBindInternal(context, input, return_types, names, true);
 }
 
@@ -8559,7 +8449,7 @@ OperatorResultType AiChunkFunction(ExecutionContext &context, TableFunctionInput
 					break;
 				}
 				data.input_row = 0;
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return OperatorResultType::NEED_MORE_INPUT;
 			}
 			LoadChunkInputRow(context.client, data_p.bind_data->Cast<AiChunkBindData>(), input, data);
@@ -8572,33 +8462,33 @@ OperatorResultType AiChunkFunction(ExecutionContext &context, TableFunctionInput
 		}
 		auto &chunk = data.chunks[data.offset++];
 		idx_t col = 0;
-		output.SetValue(col++, count, Value(chunk.source_id));
-		output.SetValue(col++, count, Value(chunk.chunk_id));
-		output.SetValue(col++, count, Value::UBIGINT(chunk.chunk_index));
+		output.data[col++].SetValue(count, Value(chunk.source_id));
+		output.data[col++].SetValue(count, Value(chunk.chunk_id));
+		output.data[col++].SetValue(count, Value::UBIGINT(chunk.chunk_index));
 		if (bind_data.prep_search) {
-			output.SetValue(col++, count, Value(chunk.text));
-			output.SetValue(col++, count, Value(ChunkEmbeddingText(bind_data, data, chunk)));
-			output.SetValue(col++, count, chunk.heading.empty() ? Value() : Value(chunk.heading));
-			output.SetValue(col++, count, Value::UBIGINT(chunk.page));
-			output.SetValue(col++, count, Value::UBIGINT(chunk.start_offset));
-			output.SetValue(col++, count, Value::UBIGINT(chunk.end_offset));
-			output.SetValue(col++, count, bind_data.metadata.empty() ? Value() : Value(bind_data.metadata));
-			output.SetValue(col++, count, data.enrichment_error.empty() ? Value() : Value(data.enrichment_error));
+			output.data[col++].SetValue(count, Value(chunk.text));
+			output.data[col++].SetValue(count, Value(ChunkEmbeddingText(bind_data, data, chunk)));
+			output.data[col++].SetValue(count, chunk.heading.empty() ? Value() : Value(chunk.heading));
+			output.data[col++].SetValue(count, Value::UBIGINT(chunk.page));
+			output.data[col++].SetValue(count, Value::UBIGINT(chunk.start_offset));
+			output.data[col++].SetValue(count, Value::UBIGINT(chunk.end_offset));
+			output.data[col++].SetValue(count, bind_data.metadata.empty() ? Value() : Value(bind_data.metadata));
+			output.data[col++].SetValue(count, data.enrichment_error.empty() ? Value() : Value(data.enrichment_error));
 		} else {
-			output.SetValue(col++, count, Value::UBIGINT(chunk.start_offset));
-			output.SetValue(col++, count, Value::UBIGINT(chunk.end_offset));
-			output.SetValue(col++, count, Value::UBIGINT(chunk.end_offset - chunk.start_offset));
-			output.SetValue(col++, count, Value::BIGINT(duckdb_ai::EstimateTokenCount(chunk.text)));
-			output.SetValue(col++, count, Value(chunk.text));
+			output.data[col++].SetValue(count, Value::UBIGINT(chunk.start_offset));
+			output.data[col++].SetValue(count, Value::UBIGINT(chunk.end_offset));
+			output.data[col++].SetValue(count, Value::UBIGINT(chunk.end_offset - chunk.start_offset));
+			output.data[col++].SetValue(count, Value::BIGINT(duckdb_ai::EstimateTokenCount(chunk.text)));
+			output.data[col++].SetValue(count, Value(chunk.text));
 		}
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	return OperatorResultType::HAVE_MORE_OUTPUT;
 }
 
 unique_ptr<FunctionData> AiUsageBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                     vector<string> &names) {
+                                     vector<Identifier> &names) {
 	AddTableColumns(return_types, names,
 	                {{"event_id", LogicalType::UBIGINT},
 	                 {"created_at", LogicalType::VARCHAR},
@@ -8643,52 +8533,53 @@ void AiUsageFunction(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 	while (data.offset < data.events.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &event = data.events[data.offset++];
 		idx_t col = 0;
-		output.SetValue(col++, count, Value::UBIGINT(event.event_id));
-		output.SetValue(col++, count, Value(event.created_at));
-		output.SetValue(col++, count, Value(event.event));
-		output.SetValue(col++, count, event.function_name.empty() ? Value() : Value(event.function_name));
-		output.SetValue(col++, count, event.query_id.empty() ? Value() : Value(event.query_id));
-		output.SetValue(col++, count, event.operation_id.empty() ? Value() : Value(event.operation_id));
-		output.SetValue(col++, count, event.parent_operation_id.empty() ? Value() : Value(event.parent_operation_id));
-		output.SetValue(col++, count, Value(event.provider));
-		output.SetValue(col++, count, Value(event.protocol));
-		output.SetValue(col++, count, Value(event.model));
+		output.data[col++].SetValue(count, Value::UBIGINT(event.event_id));
+		output.data[col++].SetValue(count, Value(event.created_at));
+		output.data[col++].SetValue(count, Value(event.event));
+		output.data[col++].SetValue(count, event.function_name.empty() ? Value() : Value(event.function_name));
+		output.data[col++].SetValue(count, event.query_id.empty() ? Value() : Value(event.query_id));
+		output.data[col++].SetValue(count, event.operation_id.empty() ? Value() : Value(event.operation_id));
+		output.data[col++].SetValue(count,
+		                            event.parent_operation_id.empty() ? Value() : Value(event.parent_operation_id));
+		output.data[col++].SetValue(count, Value(event.provider));
+		output.data[col++].SetValue(count, Value(event.protocol));
+		output.data[col++].SetValue(count, Value(event.model));
 		// Counts the provider did not report are NULL rather than -1, so sum() and avg() skip them.
 		auto known = [](int64_t value) {
 			return value >= 0 ? Value::BIGINT(value) : Value(LogicalType::BIGINT);
 		};
-		output.SetValue(col++, count, known(event.prompt_chars));
-		output.SetValue(col++, count, known(event.response_chars));
-		output.SetValue(col++, count, known(event.input_chars));
-		output.SetValue(col++, count, known(event.dimensions));
-		output.SetValue(col++, count, known(event.prompt_tokens));
-		output.SetValue(col++, count, known(event.completion_tokens));
-		output.SetValue(col++, count, known(event.total_tokens));
-		output.SetValue(col++, count, known(event.cached_prompt_tokens));
-		output.SetValue(col++, count, known(event.cache_creation_prompt_tokens));
-		output.SetValue(col++, count, known(event.elapsed_ms));
-		output.SetValue(col++, count, Value::BIGINT(event.retries));
-		output.SetValue(col++, count,
-		                event.http_status > 0 ? Value::BIGINT(event.http_status) : Value(LogicalType::BIGINT));
-		output.SetValue(col++, count, Value::BOOLEAN(event.cache_hit));
-		output.SetValue(col++, count, Value(event.status));
+		output.data[col++].SetValue(count, known(event.prompt_chars));
+		output.data[col++].SetValue(count, known(event.response_chars));
+		output.data[col++].SetValue(count, known(event.input_chars));
+		output.data[col++].SetValue(count, known(event.dimensions));
+		output.data[col++].SetValue(count, known(event.prompt_tokens));
+		output.data[col++].SetValue(count, known(event.completion_tokens));
+		output.data[col++].SetValue(count, known(event.total_tokens));
+		output.data[col++].SetValue(count, known(event.cached_prompt_tokens));
+		output.data[col++].SetValue(count, known(event.cache_creation_prompt_tokens));
+		output.data[col++].SetValue(count, known(event.elapsed_ms));
+		output.data[col++].SetValue(count, Value::BIGINT(event.retries));
+		output.data[col++].SetValue(count, event.http_status > 0 ? Value::BIGINT(event.http_status)
+		                                                         : Value(LogicalType::BIGINT));
+		output.data[col++].SetValue(count, Value::BOOLEAN(event.cache_hit));
+		output.data[col++].SetValue(count, Value(event.status));
 		if (event.error.empty()) {
-			output.SetValue(col++, count, Value());
+			output.data[col++].SetValue(count, Value());
 		} else {
-			output.SetValue(col++, count, Value(event.error));
+			output.data[col++].SetValue(count, Value(event.error));
 		}
 		if (event.estimated_cost_usd >= 0 && std::isfinite(event.estimated_cost_usd)) {
-			output.SetValue(col++, count, Value::DOUBLE(event.estimated_cost_usd));
+			output.data[col++].SetValue(count, Value::DOUBLE(event.estimated_cost_usd));
 		} else {
-			output.SetValue(col++, count, Value());
+			output.data[col++].SetValue(count, Value());
 		}
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 unique_ptr<FunctionData> AiUsageSummaryBind(ClientContext &, TableFunctionBindInput &,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddTableColumns(return_types, names,
 	                {{"query_id", LogicalType::VARCHAR},
 	                 {"provider", LogicalType::VARCHAR},
@@ -8764,31 +8655,31 @@ void AiUsageSummaryFunction(ClientContext &, TableFunctionInput &data_p, DataChu
 	while (data.offset < data.rows.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &row = data.rows[data.offset++];
 		idx_t col = 0;
-		output.SetValue(col++, count, Value(row.query_id));
-		output.SetValue(col++, count, Value(row.provider));
-		output.SetValue(col++, count, row.model.empty() ? Value() : Value(row.model));
-		output.SetValue(col++, count, Value::UBIGINT(row.calls));
-		output.SetValue(col++, count, Value::UBIGINT(row.operation_ids.size()));
-		output.SetValue(col++, count, Value::UBIGINT(row.retries));
-		output.SetValue(col++, count, Value::UBIGINT(row.failures));
-		output.SetValue(col++, count, Value::UBIGINT(row.cache_hits));
+		output.data[col++].SetValue(count, Value(row.query_id));
+		output.data[col++].SetValue(count, Value(row.provider));
+		output.data[col++].SetValue(count, row.model.empty() ? Value() : Value(row.model));
+		output.data[col++].SetValue(count, Value::UBIGINT(row.calls));
+		output.data[col++].SetValue(count, Value::UBIGINT(row.operation_ids.size()));
+		output.data[col++].SetValue(count, Value::UBIGINT(row.retries));
+		output.data[col++].SetValue(count, Value::UBIGINT(row.failures));
+		output.data[col++].SetValue(count, Value::UBIGINT(row.cache_hits));
 		// Totals are NULL when no call in the group reported tokens or had a price.
-		output.SetValue(col++, count,
-		                row.has_total_tokens ? Value::BIGINT(row.total_tokens) : Value(LogicalType::BIGINT));
-		output.SetValue(col++, count, Value::BIGINT(row.elapsed_ms));
-		output.SetValue(col++, count,
-		                row.has_estimated_cost ? Value::DOUBLE(row.estimated_cost_usd) : Value(LogicalType::DOUBLE));
-		output.SetValue(col++, count, Value::UBIGINT(data.stats.retained_events));
-		output.SetValue(col++, count, Value::UBIGINT(data.stats.dropped_events));
-		output.SetValue(col++, count, Value::UBIGINT(data.stats.queued_log_events));
-		output.SetValue(col++, count, Value::UBIGINT(data.stats.dropped_log_events));
+		output.data[col++].SetValue(count, row.has_total_tokens ? Value::BIGINT(row.total_tokens)
+		                                                        : Value(LogicalType::BIGINT));
+		output.data[col++].SetValue(count, Value::BIGINT(row.elapsed_ms));
+		output.data[col++].SetValue(count, row.has_estimated_cost ? Value::DOUBLE(row.estimated_cost_usd)
+		                                                          : Value(LogicalType::DOUBLE));
+		output.data[col++].SetValue(count, Value::UBIGINT(data.stats.retained_events));
+		output.data[col++].SetValue(count, Value::UBIGINT(data.stats.dropped_events));
+		output.data[col++].SetValue(count, Value::UBIGINT(data.stats.queued_log_events));
+		output.data[col++].SetValue(count, Value::UBIGINT(data.stats.dropped_log_events));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 unique_ptr<FunctionData> AiClearUsageBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                          vector<string> &names) {
+                                          vector<Identifier> &names) {
 	AddTableColumns(return_types, names, {{"cleared", LogicalType::BOOLEAN}});
 	return nullptr;
 }
@@ -8803,13 +8694,13 @@ void AiClearUsageFunction(ClientContext &context, TableFunctionInput &data_p, Da
 		return;
 	}
 	duckdb_ai::ClearUsageEvents(context);
-	output.SetValue(0, 0, Value::BOOLEAN(true));
-	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value::BOOLEAN(true));
+	output.SetChildCardinality(1);
 	data.emitted = true;
 }
 
 unique_ptr<FunctionData> AiQueryCacheStatsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &types,
-                                               vector<string> &names) {
+                                               vector<Identifier> &names) {
 	for (auto name :
 	     {"entries", "bytes", "max_entries", "max_bytes", "hits", "misses", "evictions", "oversized_skips"}) {
 		names.emplace_back(name);
@@ -8834,14 +8725,14 @@ void AiQueryCacheStatsFunction(ClientContext &context, TableFunctionInput &input
 	                     cache.evictions,
 	                     cache.oversized_skips};
 	for (idx_t i = 0; i < 8; i++) {
-		output.SetValue(i, 0, Value::UBIGINT(values[i]));
+		output.data[i].SetValue(0, Value::UBIGINT(values[i]));
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	scan.emitted = true;
 }
 
 unique_ptr<FunctionData> AiUsageTotalsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &types,
-                                           vector<string> &names) {
+                                           vector<Identifier> &names) {
 	for (auto name : {"provider_events", "request_attempts", "failures", "cache_hits", "known_total_tokens",
 	                  "unknown_token_events"}) {
 		names.emplace_back(name);
@@ -8859,9 +8750,9 @@ void AiUsageTotalsFunction(ClientContext &context, TableFunctionInput &input, Da
 	uint64_t values[] = {totals.provider_events, totals.request_attempts,   totals.failures,
 	                     totals.cache_hits,      totals.known_total_tokens, totals.unknown_token_events};
 	for (idx_t i = 0; i < 6; i++) {
-		output.SetValue(i, 0, Value::UBIGINT(values[i]));
+		output.data[i].SetValue(0, Value::UBIGINT(values[i]));
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	scan.emitted = true;
 }
 
@@ -8873,13 +8764,13 @@ void AiClearCacheFunction(ClientContext &context, TableFunctionInput &data_p, Da
 	duckdb_ai::ClearResponseCache(context);
 	ClearPromptQueryCache(context);
 	ClearSimilarityCache(context);
-	output.SetValue(0, 0, Value::BOOLEAN(true));
-	output.SetCardinality(1);
+	output.data[0].SetValue(0, Value::BOOLEAN(true));
+	output.SetChildCardinality(1);
 	data.emitted = true;
 }
 
 unique_ptr<FunctionData> AiModelPricesBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                           vector<string> &names) {
+                                           vector<Identifier> &names) {
 	AddTableColumns(return_types, names,
 	                {{"provider", LogicalType::VARCHAR},
 	                 {"model", LogicalType::VARCHAR},
@@ -8906,29 +8797,29 @@ void AiModelPricesFunction(ClientContext &, TableFunctionInput &data_p, DataChun
 	while (data.offset < data.prices.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &price = data.prices[data.offset++];
 		idx_t col = 0;
-		output.SetValue(col++, count, Value(price.provider));
-		output.SetValue(col++, count, Value(price.model));
-		output.SetValue(col++, count, Value(price.operation));
-		output.SetValue(col++, count, Value::DOUBLE(price.input_token_price_per_million));
+		output.data[col++].SetValue(count, Value(price.provider));
+		output.data[col++].SetValue(count, Value(price.model));
+		output.data[col++].SetValue(count, Value(price.operation));
+		output.data[col++].SetValue(count, Value::DOUBLE(price.input_token_price_per_million));
 		if (price.output_token_price_per_million >= 0 && std::isfinite(price.output_token_price_per_million)) {
-			output.SetValue(col++, count, Value::DOUBLE(price.output_token_price_per_million));
+			output.data[col++].SetValue(count, Value::DOUBLE(price.output_token_price_per_million));
 		} else {
-			output.SetValue(col++, count, Value());
+			output.data[col++].SetValue(count, Value());
 		}
-		output.SetValue(col++, count, Value(price.source_url));
-		output.SetValue(col++, count, Value(price.source_note));
-		output.SetValue(col++, count, Value(price.last_reviewed));
+		output.data[col++].SetValue(count, Value(price.source_url));
+		output.data[col++].SetValue(count, Value(price.source_note));
+		output.data[col++].SetValue(count, Value(price.last_reviewed));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void AddSetting(DBConfig &config, const std::string &name, const std::string &description, LogicalType type,
                 const Value &default_value) {
-	if (config.HasExtensionOption(name)) {
+	if (config.HasExtensionOption(Identifier(name))) {
 		return;
 	}
-	config.AddExtensionOption(name, description, std::move(type), default_value);
+	config.AddExtensionOption(Identifier(name), description, std::move(type), default_value);
 }
 
 void RegisterSettingsForPrefix(DBConfig &config, const std::string &prefix) {
@@ -9033,7 +8924,7 @@ void RegisterSettings(ExtensionLoader &loader) {
 
 void RegisterAiProviderSecretType(ExtensionLoader &loader, const std::string &type_name) {
 	SecretType secret_type;
-	secret_type.name = type_name;
+	secret_type.name = Identifier(type_name);
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "config";
 	secret_type.extension = "duckdb_ai";
@@ -9221,8 +9112,9 @@ static const AiFunctionDocumentation AI_FUNCTION_DOCUMENTATION[] = {
 };
 
 void AttachAiFunctionDocumentation(CreateFunctionInfo &info) {
+	auto name = info.GetQualifiedName().Name().GetIdentifierName();
 	for (auto &doc : AI_FUNCTION_DOCUMENTATION) {
-		if (info.name == doc.name) {
+		if (name == doc.name) {
 			FunctionDescription description;
 			description.description = doc.description;
 			description.examples.emplace_back(doc.example);
@@ -9233,7 +9125,7 @@ void AttachAiFunctionDocumentation(CreateFunctionInfo &info) {
 			return;
 		}
 	}
-	throw InternalException("Missing documentation entry for AI function %s", info.name);
+	throw InternalException("Missing documentation entry for AI function %s", name);
 }
 
 void RegisterDocumentedFunction(ExtensionLoader &loader, ScalarFunctionSet set) {
@@ -9244,7 +9136,7 @@ void RegisterDocumentedFunction(ExtensionLoader &loader, ScalarFunctionSet set) 
 }
 
 void RegisterDocumentedFunction(ExtensionLoader &loader, ScalarFunction function) {
-	ScalarFunctionSet set(function.name);
+	ScalarFunctionSet set(function.GetName());
 	set.AddFunction(std::move(function));
 	RegisterDocumentedFunction(loader, std::move(set));
 }
@@ -9256,6 +9148,12 @@ void RegisterDocumentedFunction(ExtensionLoader &loader, AggregateFunctionSet se
 	loader.RegisterFunction(std::move(info));
 }
 
+void RegisterDocumentedFunction(ExtensionLoader &loader, AggregateFunction function) {
+	AggregateFunctionSet set(function.GetName());
+	set.AddFunction(std::move(function));
+	RegisterDocumentedFunction(loader, std::move(set));
+}
+
 void RegisterDocumentedFunction(ExtensionLoader &loader, TableFunctionSet set) {
 	CreateTableFunctionInfo info(std::move(set));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
@@ -9264,147 +9162,152 @@ void RegisterDocumentedFunction(ExtensionLoader &loader, TableFunctionSet set) {
 }
 
 void RegisterDocumentedFunction(ExtensionLoader &loader, TableFunction function) {
-	TableFunctionSet set(function.name);
+	TableFunctionSet set(function.GetName());
 	set.AddFunction(std::move(function));
 	RegisterDocumentedFunction(loader, std::move(set));
+}
+
+using ai_scalar_bind_t = unique_ptr<FunctionData> (*)(ClientContext &, BoundScalarFunction &,
+                                                      vector<unique_ptr<Expression>> &);
+using ai_aggregate_bind_t = unique_ptr<FunctionData> (*)(ClientContext &, BoundAggregateFunction &,
+                                                         vector<unique_ptr<Expression>> &);
+
+template <ai_scalar_bind_t BIND>
+unique_ptr<FunctionData> AiScalarBind(BindScalarFunctionInput &input) {
+	return BIND(input.GetClientContext(), input.GetBoundFunction(), input.GetArguments());
+}
+
+template <ai_aggregate_bind_t BIND>
+unique_ptr<FunctionData> AiAggregateBind(BindAggregateFunctionInput &input) {
+	return BIND(input.GetClientContext(), input.GetBoundFunction(), input.GetArguments());
+}
+
+//! Leading inputs are positional. Further positional values (model, provider, ...) go to "*args" when the function
+//! takes them, and `name := value` options to "**options", which bind checks against the options each function
+//! supports.
+FunctionSignature AiFunctionSignature(const vector<LogicalType> &inputs, LogicalType return_type,
+                                      bool positional_options) {
+	FunctionSignature signature;
+	for (auto &input : inputs) {
+		signature.AddParameter(input);
+	}
+	if (positional_options) {
+		signature.AddArgs("args", LogicalType::ANY);
+	}
+	signature.AddKwargs("options", LogicalType::ANY);
+	signature.SetReturnType(std::move(return_type));
+	return signature;
+}
+
+//! Model-backed scalars can fail per row and return a different answer per call, so DuckDB must neither fold nor
+//! deduplicate them. NULL inputs are handled by each function.
+ScalarFunction AiScalarFunction(const std::string &name, const vector<LogicalType> &inputs, LogicalType return_type,
+                                scalar_function_t function, bind_scalar_function_t bind,
+                                resolve_scalar_types_t resolve_types, bool positional_options = true) {
+	ScalarFunction result(Identifier(name), AiFunctionSignature(inputs, std::move(return_type), positional_options),
+	                      std::move(function));
+	result.SetBindCallback(bind);
+	result.SetResolveTypesCallback(resolve_types);
+	result.SetFallible();
+	result.SetVolatile();
+	result.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	return result;
 }
 
 void RegisterTaskFunction(ExtensionLoader &loader, const std::string &name, vector<LogicalType> arguments,
                           bind_scalar_function_t bind) {
 	arguments[0] = LogicalType::ANY;
-	auto function = ScalarFunction(name, std::move(arguments), LogicalType::VARCHAR, AiTaskFunction, bind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader, AiScalarFunction(name, arguments, LogicalType::VARCHAR, AiTaskFunction, bind,
+	                                                    ResolveAiTextArguments<1>));
 }
 
 void RegisterClassifyFunction(ExtensionLoader &loader) {
-	auto function = ScalarFunction("ai_classify", {LogicalType::ANY, LogicalType::ANY}, LogicalType::VARCHAR,
-	                               AiTaskFunction, AiClassifyBind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader, AiScalarFunction("ai_classify", {LogicalType::ANY, LogicalType::ANY},
+	                                                    LogicalType::VARCHAR, AiTaskFunction,
+	                                                    AiScalarBind<AiClassifyBind>, ResolveClassifyArguments));
 }
 
 void RegisterClassifyLabelsFunction(ExtensionLoader &loader) {
-	auto function =
-	    ScalarFunction("ai_classify_labels", {LogicalType::ANY, LogicalType::ANY},
-	                   LogicalType::LIST(LogicalType::VARCHAR), AiClassifyLabelsFunction, AiClassifyLabelsBind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader,
+	                           AiScalarFunction("ai_classify_labels", {LogicalType::ANY, LogicalType::ANY},
+	                                            LogicalType::LIST(LogicalType::VARCHAR), AiClassifyLabelsFunction,
+	                                            AiScalarBind<AiClassifyLabelsBind>, ResolveClassifyArguments));
 }
 
 void RegisterCompletionFunction(ExtensionLoader &loader, const std::string &name, bind_scalar_function_t bind) {
 	// ai_provider_call takes a JSON body, so only prompt functions accept any input type.
 	auto input_type = name == "ai_provider_call" ? LogicalType::VARCHAR : LogicalType::ANY;
-	auto function = ScalarFunction(name, {input_type}, LogicalType::VARCHAR, AiCompletionFunction, bind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader, AiScalarFunction(name, {input_type}, LogicalType::VARCHAR, AiCompletionFunction,
+	                                                    bind, ResolveAiTextArguments<1>));
 }
 
 void RegisterTryCompletionFunction(ExtensionLoader &loader) {
-	auto function = ScalarFunction("ai_try_complete", {LogicalType::ANY}, AiTryCompleteReturnType(),
-	                               AiTryCompleteFunction, AiTryCompleteBind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader, AiScalarFunction("ai_try_complete", {LogicalType::ANY},
+	                                                    AiTryCompleteReturnType(), AiTryCompleteFunction,
+	                                                    AiScalarBind<AiTryCompleteBind>, ResolveAiTextArguments<1>));
 }
 
 void RegisterEmbeddingFunction(ExtensionLoader &loader, const std::string &name) {
-	auto function =
-	    ScalarFunction(name, {LogicalType::ANY}, LogicalType::LIST(LogicalType::DOUBLE), AiEmbedFunction, AiEmbedBind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader,
+	                           AiScalarFunction(name, {LogicalType::ANY}, LogicalType::LIST(LogicalType::DOUBLE),
+	                                            AiEmbedFunction, AiScalarBind<AiEmbedBind>, ResolveAiTextArguments<1>));
 }
 
 void RegisterAiFilterFunction(ExtensionLoader &loader) {
-	auto function = ScalarFunction("ai_filter", {LogicalType::ANY, LogicalType::VARCHAR}, LogicalType::BOOLEAN,
-	                               AiFilterFunction, AiFilterBind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader, AiScalarFunction("ai_filter", {LogicalType::ANY, LogicalType::VARCHAR},
+	                                                    LogicalType::BOOLEAN, AiFilterFunction,
+	                                                    AiScalarBind<AiFilterBind>, ResolveAiTextArguments<1>));
 }
 
 void RegisterPromptSqlFunction(ExtensionLoader &loader, const std::string &name) {
-	auto function =
-	    ScalarFunction(name, {LogicalType::VARCHAR}, LogicalType::VARCHAR, AiPromptSqlFunction, AiPromptSqlBind);
-	function.varargs = LogicalType::ANY;
-	function.SetFallible();
-	function.SetVolatile();
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(function));
+	RegisterDocumentedFunction(loader,
+	                           AiScalarFunction(name, {LogicalType::VARCHAR}, LogicalType::VARCHAR, AiPromptSqlFunction,
+	                                            AiScalarBind<AiPromptSqlBind>, ResolveAiTextArguments<1>));
 }
 
-AggregateFunction BuildAiAggregateFunction(const std::string &name, idx_t argument_count,
-                                           bind_aggregate_function_t bind) {
-	vector<LogicalType> arguments;
-	arguments.emplace_back(LogicalType::ANY);
-	for (idx_t i = 1; i < argument_count; i++) {
-		arguments.emplace_back(LogicalType::ANY);
-	}
+//! The instruction, model and provider may follow the input text by position or be passed by name.
+void RegisterAiAggregateFunction(ExtensionLoader &loader, const std::string &name, bind_aggregate_function_t bind) {
 	auto function =
-	    AggregateFunction(name, arguments, LogicalType::VARCHAR, AggregateFunction::StateSize<AiAggregateState>,
+	    AggregateFunction(Identifier(name), {}, LogicalType::VARCHAR, AggregateFunction::StateSize<AiAggregateState>,
 	                      AggregateFunction::StateInitialize<AiAggregateState, AiAggregateOperation>,
 	                      AggregateFunction::UnaryScatterUpdate<AiAggregateState, string_t, AiAggregateOperation>,
 	                      AggregateFunction::StateCombine<AiAggregateState, AiAggregateOperation>,
 	                      AggregateFunction::StateFinalize<AiAggregateState, string_t, AiAggregateOperation>,
-	                      FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                      AggregateFunction::UnaryUpdate<AiAggregateState, string_t, AiAggregateOperation>, bind);
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, bind);
+	function.GetSignature() = AiFunctionSignature({LogicalType::ANY}, LogicalType::VARCHAR, true);
 	function.SetFallible();
 	function.SetVolatile();
-	return function;
-}
-
-void RegisterAiAggregateFunction(ExtensionLoader &loader, const std::string &name, bind_aggregate_function_t bind,
-                                 idx_t min_argument_count, idx_t max_argument_count) {
-	AggregateFunctionSet functions(name);
-	for (idx_t argument_count = min_argument_count; argument_count <= max_argument_count; argument_count++) {
-		functions.AddFunction(BuildAiAggregateFunction(name, argument_count, bind));
-	}
-	RegisterDocumentedFunction(loader, std::move(functions));
+	RegisterDocumentedFunction(loader, std::move(function));
 }
 
 void RegisterClassifierBuildFunction(ExtensionLoader &loader) {
-	AggregateFunctionSet functions("ai_build_classifier");
-	for (idx_t argument_count = 2; argument_count <= 32; argument_count++) {
-		vector<LogicalType> arguments;
-		arguments.emplace_back(LogicalType::VARCHAR);
-		for (idx_t i = 1; i < argument_count; i++) {
-			arguments.emplace_back(LogicalType::ANY);
-		}
-		auto function = AggregateFunction(
-		    "ai_build_classifier", arguments, LogicalType::VARCHAR, AggregateFunction::StateSize<ClassifierBuildState>,
-		    AggregateFunction::StateInitialize<ClassifierBuildState, ClassifierBuildOperation>,
-		    AggregateFunction::UnaryScatterUpdate<ClassifierBuildState, string_t, ClassifierBuildOperation>,
-		    AggregateFunction::StateCombine<ClassifierBuildState, ClassifierBuildOperation>,
-		    AggregateFunction::StateFinalize<ClassifierBuildState, string_t, ClassifierBuildOperation>,
-		    FunctionNullHandling::DEFAULT_NULL_HANDLING,
-		    AggregateFunction::UnaryUpdate<ClassifierBuildState, string_t, ClassifierBuildOperation>,
-		    ClassifierBuildBind);
-		function.SetStateDestructorCallback(
-		    AggregateFunction::StateDestroy<ClassifierBuildState, ClassifierBuildOperation>);
-		function.SetFallible();
-		function.SetVolatile();
-		functions.AddFunction(std::move(function));
+	auto function = AggregateFunction(
+	    Identifier("ai_build_classifier"), {}, LogicalType::VARCHAR, AggregateFunction::StateSize<ClassifierBuildState>,
+	    AggregateFunction::StateInitialize<ClassifierBuildState, ClassifierBuildOperation>,
+	    AggregateFunction::UnaryScatterUpdate<ClassifierBuildState, string_t, ClassifierBuildOperation>,
+	    AggregateFunction::StateCombine<ClassifierBuildState, ClassifierBuildOperation>,
+	    AggregateFunction::StateFinalize<ClassifierBuildState, string_t, ClassifierBuildOperation>,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, AiAggregateBind<ClassifierBuildBind>);
+	function.GetSignature() =
+	    AiFunctionSignature({LogicalType::VARCHAR, LogicalType::ANY}, LogicalType::VARCHAR, false);
+	function.SetStateDestructorCallback(
+	    AggregateFunction::StateDestroy<ClassifierBuildState, ClassifierBuildOperation>);
+	function.SetFallible();
+	function.SetVolatile();
+	RegisterDocumentedFunction(loader, std::move(function));
+}
+
+//! Table functions declare their options, so DuckDB rejects an unknown or misspelled name before bind and lists the
+//! supported ones.
+void AddNamedParameter(TableFunction &function, const char *name, const LogicalType &type) {
+	auto &signature = function.GetSignature();
+	if (!signature.GetTypedKwargs()) {
+		signature.AddTypedKwargs("options", TypedKwargs());
 	}
-	RegisterDocumentedFunction(loader, std::move(functions));
+	if (signature.GetTypedKwargs()->Find(Identifier(name))) {
+		return;
+	}
+	signature.ExtendTypedKwargs([&](TypedKwargs &options) { options.Add(Identifier(name), type); });
 }
 
 void AddCompletionNamedParameters(TableFunction &function, bool include_response_options,
@@ -9442,35 +9345,35 @@ void AddCompletionNamedParameters(TableFunction &function, bool include_response
 	                                           "fail_on_error"};
 	// JSON-valued options accept a STRUCT, MAP or LIST as well as JSON text.
 	for (auto name : completion_options) {
-		function.named_parameters[name] = IsJsonValuedOption(name) ? LogicalType::ANY : OptionType(name);
+		AddNamedParameter(function, name, IsJsonValuedOption(name) ? LogicalType::ANY : OptionType(name));
 	}
 	if (include_response_options) {
-		function.named_parameters["response_format"] = LogicalType::VARCHAR;
-		function.named_parameters["response_schema"] = LogicalType::ANY;
-		function.named_parameters["json_schema"] = LogicalType::ANY;
+		AddNamedParameter(function, "response_format", LogicalType::VARCHAR);
+		AddNamedParameter(function, "response_schema", LogicalType::ANY);
+		AddNamedParameter(function, "json_schema", LogicalType::ANY);
 	}
 	if (include_log_payload_options) {
-		function.named_parameters["log_include_text"] = LogicalType::BOOLEAN;
-		function.named_parameters["log_strict"] = LogicalType::BOOLEAN;
+		AddNamedParameter(function, "log_include_text", LogicalType::BOOLEAN);
+		AddNamedParameter(function, "log_strict", LogicalType::BOOLEAN);
 	}
 }
 
 void AddPromptQueryNamedParameters(TableFunction &function, bool include_fix_attempts = true) {
-	function.named_parameters["schema_context"] = LogicalType::VARCHAR;
-	function.named_parameters["schema"] = LogicalType::VARCHAR;
-	function.named_parameters["include_tables"] = LogicalType::ANY;
-	function.named_parameters["exclude_tables"] = LogicalType::ANY;
-	function.named_parameters["sample_rows"] = LogicalType::BIGINT;
+	AddNamedParameter(function, "schema_context", LogicalType::VARCHAR);
+	AddNamedParameter(function, "schema", LogicalType::VARCHAR);
+	AddNamedParameter(function, "include_tables", LogicalType::ANY);
+	AddNamedParameter(function, "exclude_tables", LogicalType::ANY);
+	AddNamedParameter(function, "sample_rows", LogicalType::BIGINT);
 	if (include_fix_attempts) {
-		function.named_parameters["fix_attempts"] = LogicalType::BIGINT;
+		AddNamedParameter(function, "fix_attempts", LogicalType::BIGINT);
 	}
 	AddCompletionNamedParameters(function, true, false);
 }
 
 void AddPromptSchemaNamedParameters(TableFunction &function) {
-	function.named_parameters["include_tables"] = LogicalType::ANY;
-	function.named_parameters["exclude_tables"] = LogicalType::ANY;
-	function.named_parameters["sample_rows"] = LogicalType::BIGINT;
+	AddNamedParameter(function, "include_tables", LogicalType::ANY);
+	AddNamedParameter(function, "exclude_tables", LogicalType::ANY);
+	AddNamedParameter(function, "sample_rows", LogicalType::BIGINT);
 }
 
 void AddAiRecordNamedParameters(TableFunction &function) {
@@ -9480,13 +9383,13 @@ void AddAiRecordNamedParameters(TableFunction &function) {
 void AddPromptAssistantNamedParameters(TableFunction &function, bool include_error) {
 	AddPromptQueryNamedParameters(function, include_error);
 	if (include_error) {
-		function.named_parameters["error"] = LogicalType::VARCHAR;
-		function.named_parameters["mode"] = LogicalType::VARCHAR;
+		AddNamedParameter(function, "error", LogicalType::VARCHAR);
+		AddNamedParameter(function, "mode", LogicalType::VARCHAR);
 	}
 }
 
 void RegisterPromptSchemaFunction(ExtensionLoader &loader, const std::string &name) {
-	TableFunctionSet ai_schema_prompt(name);
+	TableFunctionSet ai_schema_prompt {Identifier(name)};
 	vector<vector<LogicalType>> overloads = {
 	    {},
 	    {LogicalType::VARCHAR},
@@ -9514,17 +9417,14 @@ void RegisterAiRecordFunction(ExtensionLoader &loader) {
 	}
 	RegisterDocumentedFunction(loader, std::move(ai_complete_record));
 
-	auto ai_extract_record = ScalarFunction("ai_extract_record", {LogicalType::ANY, LogicalType::ANY}, LogicalType::ANY,
-	                                        AiExtractRecordFunction, AiExtractRecordBind);
-	ai_extract_record.varargs = LogicalType::ANY;
-	ai_extract_record.SetFallible();
-	ai_extract_record.SetVolatile();
-	ai_extract_record.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_extract_record));
+	// The schema may be JSON text or a STRUCT describing it, so bind evaluates it before any cast.
+	RegisterDocumentedFunction(loader, AiScalarFunction("ai_extract_record", {LogicalType::ANY, LogicalType::ANY},
+	                                                    LogicalType::ANY, AiExtractRecordFunction,
+	                                                    AiScalarBind<AiExtractRecordBind>, ResolveAiTextArguments<1>));
 }
 
 void RegisterPromptExplainFunction(ExtensionLoader &loader, const std::string &name) {
-	TableFunctionSet ai_explain_sql(name);
+	TableFunctionSet ai_explain_sql {Identifier(name)};
 	TableFunction function({LogicalType::VARCHAR}, PromptAssistantFunction, PromptExplainBind, PromptAssistantInit);
 	AddPromptAssistantNamedParameters(function, false);
 	ai_explain_sql.AddFunction(std::move(function));
@@ -9532,7 +9432,7 @@ void RegisterPromptExplainFunction(ExtensionLoader &loader, const std::string &n
 }
 
 void RegisterPromptFixupFunction(ExtensionLoader &loader, const std::string &name) {
-	TableFunctionSet ai_fix_sql(name);
+	TableFunctionSet ai_fix_sql {Identifier(name)};
 	vector<vector<LogicalType>> overloads = {
 	    {LogicalType::VARCHAR},
 	    {LogicalType::VARCHAR, LogicalType::VARCHAR},
@@ -9546,7 +9446,7 @@ void RegisterPromptFixupFunction(ExtensionLoader &loader, const std::string &nam
 }
 
 void RegisterPromptQueryFunction(ExtensionLoader &loader, const std::string &name) {
-	TableFunctionSet ai_query_data(name);
+	TableFunctionSet ai_query_data {Identifier(name)};
 	for (idx_t argument_count = 1; argument_count <= 4; argument_count++) {
 		vector<LogicalType> arguments;
 		for (idx_t i = 0; i < argument_count; i++) {
@@ -9578,34 +9478,22 @@ struct ExternalModelParseData : public ParserExtensionParseData {
 	}
 };
 
-class ExternalModelSqlScanner {
+//! Reads CREATE EXTERNAL MODEL from the tokens DuckDB's parser hands to extensions for a statement it cannot parse.
+class ExternalModelTokenScanner {
 public:
-	explicit ExternalModelSqlScanner(const std::string &query_p) : query(query_p) {
+	explicit ExternalModelTokenScanner(const vector<SimpleToken> &tokens_p) : tokens(tokens_p) {
 	}
 
-	void SkipWhitespace() {
-		while (position < query.size() && std::isspace(static_cast<unsigned char>(query[position]))) {
-			position++;
-		}
-	}
-
-	bool ConsumeKeyword(const std::string &keyword) {
-		SkipWhitespace();
-		if (position + keyword.size() > query.size() ||
-		    !StringUtil::CIEquals(query.substr(position, keyword.size()), keyword)) {
+	bool ConsumeKeyword(const char *keyword) {
+		if (AtEnd() || !StringUtil::CIEquals(tokens[position].text, keyword)) {
 			return false;
 		}
-		auto end = position + keyword.size();
-		if (end < query.size() && (std::isalnum(static_cast<unsigned char>(query[end])) || query[end] == '_')) {
-			return false;
-		}
-		position = end;
+		position++;
 		return true;
 	}
 
-	bool Consume(char expected) {
-		SkipWhitespace();
-		if (position >= query.size() || query[position] != expected) {
+	bool Consume(const char *symbol) {
+		if (AtEnd() || tokens[position].text != symbol) {
 			return false;
 		}
 		position++;
@@ -9613,83 +9501,78 @@ public:
 	}
 
 	std::string Identifier() {
-		SkipWhitespace();
-		if (position >= query.size()) {
+		if (AtEnd()) {
 			throw ParserException("Expected an external model identifier");
 		}
-		if (query[position] == '"') {
-			position++;
-			std::string value;
-			while (position < query.size()) {
-				if (query[position] == '"') {
-					if (position + 1 < query.size() && query[position + 1] == '"') {
-						value.push_back('"');
-						position += 2;
-						continue;
-					}
-					position++;
-					return value;
-				}
-				value.push_back(query[position++]);
-			}
-			throw ParserException("Unterminated quoted external model identifier");
-		}
-		auto start = position;
-		while (position < query.size() &&
-		       (std::isalnum(static_cast<unsigned char>(query[position])) || query[position] == '_')) {
-			position++;
-		}
-		if (start == position) {
+		auto &token = tokens[position];
+		if (token.type == TokenType::STRING_LITERAL || token.type == TokenType::NUMBER_LITERAL ||
+		    token.type == TokenType::OPERATOR) {
 			throw ParserException("Expected an external model identifier");
 		}
-		return query.substr(start, position - start);
+		position++;
+		if (token.text.size() >= 2 && token.text.front() == '"' && token.text.back() == '"') {
+			return Unquote(token.text, '"');
+		}
+		return token.text;
 	}
 
+	//! A quoted string, or the unquoted tokens up to the next ',' or ')' joined as written without spaces.
 	std::string ValueText() {
-		SkipWhitespace();
-		if (position >= query.size()) {
+		if (AtEnd()) {
 			throw ParserException("Expected an external model option value");
 		}
-		if (query[position] == '\'') {
+		auto &token = tokens[position];
+		if (token.type == TokenType::STRING_LITERAL && token.text.size() >= 2 && token.text.front() == '\'') {
 			position++;
-			std::string value;
-			while (position < query.size()) {
-				if (query[position] == '\'') {
-					if (position + 1 < query.size() && query[position + 1] == '\'') {
-						value.push_back('\'');
-						position += 2;
-						continue;
-					}
-					position++;
-					return value;
-				}
-				value.push_back(query[position++]);
-			}
-			throw ParserException("Unterminated external model option string");
+			return Unquote(token.text, '\'');
 		}
-		auto start = position;
-		while (position < query.size() && query[position] != ',' && query[position] != ')') {
-			position++;
+		std::string value;
+		while (!AtEnd() && tokens[position].text != "," && tokens[position].text != ")") {
+			value += tokens[position++].text;
 		}
-		auto value = query.substr(start, position - start);
-		StringUtil::Trim(value);
 		if (value.empty()) {
 			throw ParserException("Expected an external model option value");
 		}
 		return value;
 	}
 
-	bool Finished() {
-		SkipWhitespace();
-		if (position < query.size() && query[position] == ';') {
-			position++;
-			SkipWhitespace();
+	//! The statement must end here: returns how many tokens it spans, including a closing ';'.
+	optional_idx Finish() {
+		if (position >= tokens.size()) {
+			return position;
 		}
-		return position == query.size();
+		auto type = tokens[position].type;
+		if (type == TokenType::TERMINATOR) {
+			return position + 1;
+		}
+		if (type == TokenType::END_OF_INPUT || type == TokenType::END_OF_INPUT_AUTOCOMPLETE) {
+			return position;
+		}
+		return optional_idx();
 	}
 
 private:
-	const std::string &query;
+	bool AtEnd() const {
+		if (position >= tokens.size()) {
+			return true;
+		}
+		auto type = tokens[position].type;
+		return type == TokenType::TERMINATOR || type == TokenType::END_OF_INPUT ||
+		       type == TokenType::END_OF_INPUT_AUTOCOMPLETE;
+	}
+
+	static std::string Unquote(const std::string &text, char quote) {
+		std::string value;
+		for (idx_t i = 1; i + 1 < text.size(); i++) {
+			value.push_back(text[i]);
+			if (text[i] == quote && i + 2 < text.size() && text[i + 1] == quote) {
+				i++;
+			}
+		}
+		return value;
+	}
+
+	const vector<SimpleToken> &tokens;
 	idx_t position = 0;
 };
 
@@ -9700,9 +9583,15 @@ public:
 		plan_function = Plan;
 	}
 
-	static ParserExtensionParseResult Parse(ParserExtensionInfo *, const string &query) {
+	static ParserExtensionParseResult ParseError(std::string message) {
+		ParserExtensionParseResult result(std::move(message));
+		result.consumed_tokens = -1;
+		return result;
+	}
+
+	static ParserExtensionParseResult Parse(ParserExtensionInfo *, const vector<SimpleToken> &tokens) {
 		try {
-			ExternalModelSqlScanner scanner(query);
+			ExternalModelTokenScanner scanner(tokens);
 			if (!scanner.ConsumeKeyword("create")) {
 				return ParserExtensionParseResult();
 			}
@@ -9717,13 +9606,13 @@ public:
 				return ParserExtensionParseResult();
 			}
 			data->name = scanner.Identifier();
-			if (!scanner.ConsumeKeyword("with") || !scanner.Consume('(')) {
-				return ParserExtensionParseResult("CREATE EXTERNAL MODEL requires WITH (...)");
+			if (!scanner.ConsumeKeyword("with") || !scanner.Consume("(")) {
+				return ParseError("CREATE EXTERNAL MODEL requires WITH (...)");
 			}
 			while (true) {
 				auto key = LowerAscii(scanner.Identifier());
-				if (!scanner.Consume('=')) {
-					return ParserExtensionParseResult("Expected '=' after external model option " + key);
+				if (!scanner.Consume("=")) {
+					return ParseError("Expected '=' after external model option " + key);
 				}
 				if (key == "base_url" || key == "endpoint") {
 					key = "location";
@@ -9731,29 +9620,32 @@ public:
 				static const std::set<std::string> supported = {"provider",   "model",        "location", "credential",
 				                                                "model_type", "capabilities", "options"};
 				if (supported.find(key) == supported.end()) {
-					return ParserExtensionParseResult("Unsupported external model option: " + key);
+					return ParseError("Unsupported external model option: " + key);
 				}
 				if (data->options.find(key) != data->options.end()) {
-					return ParserExtensionParseResult("Duplicate external model option: " + key);
+					return ParseError("Duplicate external model option: " + key);
 				}
 				data->options[key] = scanner.ValueText();
-				if (scanner.Consume(')')) {
+				if (scanner.Consume(")")) {
 					break;
 				}
-				if (!scanner.Consume(',')) {
-					return ParserExtensionParseResult("Expected ',' or ')' in external model options");
+				if (!scanner.Consume(",")) {
+					return ParseError("Expected ',' or ')' in external model options");
 				}
 			}
-			if (!scanner.Finished()) {
-				return ParserExtensionParseResult("Unexpected text after CREATE EXTERNAL MODEL");
+			auto consumed = scanner.Finish();
+			if (!consumed.IsValid()) {
+				return ParseError("Unexpected text after CREATE EXTERNAL MODEL");
 			}
 			if (data->options.find("provider") == data->options.end() ||
 			    data->options.find("model") == data->options.end()) {
-				return ParserExtensionParseResult("CREATE EXTERNAL MODEL requires provider and model options");
+				return ParseError("CREATE EXTERNAL MODEL requires provider and model options");
 			}
-			return ParserExtensionParseResult(std::move(data));
+			ParserExtensionParseResult result(std::move(data));
+			result.consumed_tokens = NumericCast<int64_t>(consumed.GetIndex());
+			return result;
 		} catch (std::exception &ex) {
-			return ParserExtensionParseResult(ex.what());
+			return ParseError(ErrorData(ex).RawMessage());
 		}
 	}
 
@@ -9783,122 +9675,85 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	ParserExtension::Register(config, ExternalModelParserExtension());
 
-	RegisterCompletionFunction(loader, "ai_complete", AiCompleteBind);
-	RegisterCompletionFunction(loader, "ai_provider_call", AiProviderCallBind);
+	RegisterCompletionFunction(loader, "ai_complete", AiScalarBind<AiCompleteBind>);
+	RegisterCompletionFunction(loader, "ai_provider_call", AiScalarBind<AiProviderCallBind>);
 	for (auto name : {"ai_decide", "ai_jev"}) {
-		auto decision = ScalarFunction(name, {LogicalType::ANY, LogicalType::ANY}, LogicalType::ANY, DecisionFunction,
-		                               DecisionBind);
-		decision.varargs = LogicalType::ANY;
-		decision.SetFallible();
-		decision.SetVolatile();
-		decision.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-		RegisterDocumentedFunction(loader, std::move(decision));
+		RegisterDocumentedFunction(
+		    loader, AiScalarFunction(name, {LogicalType::ANY, LogicalType::ANY}, LogicalType::ANY, DecisionFunction,
+		                             AiScalarBind<DecisionBind>, ResolveAiTextArguments<1>, false));
 	}
 	RegisterTryCompletionFunction(loader);
-	RegisterCompletionFunction(loader, "ai_completion_request_json", AiCompletionRequestJsonBind);
-
-	auto ai_complete_json = ScalarFunction("ai_complete_json", {LogicalType::ANY}, LogicalType::VARCHAR,
-	                                       AiCompletionFunction, AiCompleteJsonBind);
-	ai_complete_json.varargs = LogicalType::ANY;
-	ai_complete_json.SetFallible();
-	ai_complete_json.SetVolatile();
-	ai_complete_json.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_complete_json));
+	RegisterCompletionFunction(loader, "ai_completion_request_json", AiScalarBind<AiCompletionRequestJsonBind>);
+	RegisterDocumentedFunction(loader, AiScalarFunction("ai_complete_json", {LogicalType::ANY}, LogicalType::VARCHAR,
+	                                                    AiCompletionFunction, AiScalarBind<AiCompleteJsonBind>,
+	                                                    ResolveAiTextArguments<1>));
 	RegisterAiRecordFunction(loader);
 
 	RegisterEmbeddingFunction(loader, "ai_embed");
+	RegisterDocumentedFunction(loader,
+	                           AiScalarFunction("ai_embedding_request_json", {LogicalType::ANY}, LogicalType::VARCHAR,
+	                                            AiEmbeddingRequestJsonFunction,
+	                                            AiScalarBind<AiEmbeddingRequestJsonBind>, ResolveAiTextArguments<1>));
+	RegisterDocumentedFunction(loader, AiScalarFunction("ai_similarity", {LogicalType::ANY, LogicalType::ANY},
+	                                                    LogicalType::DOUBLE, AiSimilarityFunction,
+	                                                    AiScalarBind<AiSimilarityBind>, ResolveAiTextArguments<2>));
+	for (auto name : {"ai_rerank", "ai_score"}) {
+		RegisterDocumentedFunction(loader, AiScalarFunction(name, {LogicalType::ANY, LogicalType::ANY},
+		                                                    LogicalType::DOUBLE, AiRerankFunction,
+		                                                    AiScalarBind<AiRerankBind>, ResolveAiTextArguments<2>));
+	}
 
-	auto ai_embedding_request_json =
-	    ScalarFunction("ai_embedding_request_json", {LogicalType::ANY}, LogicalType::VARCHAR,
-	                   AiEmbeddingRequestJsonFunction, AiEmbeddingRequestJsonBind);
-	ai_embedding_request_json.varargs = LogicalType::ANY;
-	ai_embedding_request_json.SetFallible();
-	ai_embedding_request_json.SetVolatile();
-	ai_embedding_request_json.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_embedding_request_json));
-
-	auto ai_similarity = ScalarFunction("ai_similarity", {LogicalType::ANY, LogicalType::ANY}, LogicalType::DOUBLE,
-	                                    AiSimilarityFunction, AiSimilarityBind);
-	ai_similarity.varargs = LogicalType::ANY;
-	ai_similarity.SetFallible();
-	ai_similarity.SetVolatile();
-	ai_similarity.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_similarity));
-
-	auto ai_rerank = ScalarFunction("ai_rerank", {LogicalType::ANY, LogicalType::ANY}, LogicalType::DOUBLE,
-	                                AiRerankFunction, AiRerankBind);
-	ai_rerank.varargs = LogicalType::ANY;
-	ai_rerank.SetFallible();
-	ai_rerank.SetVolatile();
-	ai_rerank.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_rerank));
-
-	auto ai_score = ScalarFunction("ai_score", {LogicalType::ANY, LogicalType::ANY}, LogicalType::DOUBLE,
-	                               AiRerankFunction, AiRerankBind);
-	ai_score.varargs = LogicalType::ANY;
-	ai_score.SetFallible();
-	ai_score.SetVolatile();
-	ai_score.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_score));
-
-	RegisterTaskFunction(loader, "ai_summarize", {LogicalType::VARCHAR}, AiSummarizeBind);
-	RegisterTaskFunction(loader, "ai_sentiment", {LogicalType::VARCHAR}, AiSentimentBind);
-	RegisterTaskFunction(loader, "ai_fix_grammar", {LogicalType::VARCHAR}, AiFixGrammarBind);
-	RegisterTaskFunction(loader, "ai_redact", {LogicalType::VARCHAR}, AiRedactBind);
-	RegisterTaskFunction(loader, "ai_translate", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AiTranslateBind);
+	RegisterTaskFunction(loader, "ai_summarize", {LogicalType::VARCHAR}, AiScalarBind<AiSummarizeBind>);
+	RegisterTaskFunction(loader, "ai_sentiment", {LogicalType::VARCHAR}, AiScalarBind<AiSentimentBind>);
+	RegisterTaskFunction(loader, "ai_fix_grammar", {LogicalType::VARCHAR}, AiScalarBind<AiFixGrammarBind>);
+	RegisterTaskFunction(loader, "ai_redact", {LogicalType::VARCHAR}, AiScalarBind<AiRedactBind>);
+	RegisterTaskFunction(loader, "ai_translate", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                     AiScalarBind<AiTranslateBind>);
 	RegisterClassifyFunction(loader);
 	RegisterClassifyLabelsFunction(loader);
-	auto ai_classify_result =
-	    ScalarFunction("ai_classify_result", {LogicalType::ANY, LogicalType::ANY}, AiClassifyResultReturnType(),
-	                   AiClassifyResultFunction, AiClassifyResultBind);
-	ai_classify_result.varargs = LogicalType::ANY;
-	ai_classify_result.SetFallible();
-	ai_classify_result.SetVolatile();
-	ai_classify_result.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_classify_result));
-	auto ai_classify_optimized =
-	    ScalarFunction("ai_classify_optimized", {LogicalType::ANY, LogicalType::VARCHAR},
-	                   AiOptimizedClassifierReturnType(), AiOptimizedClassifierFunction, AiOptimizedClassifierBind);
-	ai_classify_optimized.varargs = LogicalType::ANY;
-	ai_classify_optimized.SetFallible();
-	ai_classify_optimized.SetVolatile();
-	ai_classify_optimized.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	RegisterDocumentedFunction(loader, std::move(ai_classify_optimized));
-	RegisterTaskFunction(loader, "ai_extract", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AiExtractBind);
+	RegisterDocumentedFunction(loader, AiScalarFunction("ai_classify_result", {LogicalType::ANY, LogicalType::ANY},
+	                                                    AiClassifyResultReturnType(), AiClassifyResultFunction,
+	                                                    AiScalarBind<AiClassifyResultBind>, ResolveClassifyArguments));
+	RegisterDocumentedFunction(
+	    loader, AiScalarFunction("ai_classify_optimized", {LogicalType::ANY, LogicalType::VARCHAR},
+	                             AiOptimizedClassifierReturnType(), AiOptimizedClassifierFunction,
+	                             AiScalarBind<AiOptimizedClassifierBind>, ResolveAiTextArguments<1>, false));
+	RegisterTaskFunction(loader, "ai_extract", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                     AiScalarBind<AiExtractBind>);
 	RegisterAiFilterFunction(loader);
 
-	RegisterAiAggregateFunction(loader, "ai_agg", AiAggBind, 2, 10);
-	RegisterAiAggregateFunction(loader, "ai_summarize_agg", AiSummarizeAggBind, 1, 9);
+	RegisterAiAggregateFunction(loader, "ai_agg", AiAggregateBind<AiAggBind>);
+	RegisterAiAggregateFunction(loader, "ai_summarize_agg", AiAggregateBind<AiSummarizeAggBind>);
 	RegisterClassifierBuildFunction(loader);
 
 	auto ai_generate_chunks = TableFunction("ai_generate_chunks", {LogicalType::VARCHAR}, nullptr, AiGenerateChunksBind,
 	                                        nullptr, AiChunkInitLocal);
 	ai_generate_chunks.in_out_function = AiChunkFunction;
-	ai_generate_chunks.varargs = LogicalType::ANY;
-	ai_generate_chunks.named_parameters["chunk_size"] = LogicalType::BIGINT;
-	ai_generate_chunks.named_parameters["overlap_percent"] = LogicalType::DOUBLE;
-	ai_generate_chunks.named_parameters["strategy"] = LogicalType::VARCHAR;
-	ai_generate_chunks.named_parameters["source_id"] = LogicalType::VARCHAR;
+	ai_generate_chunks.GetSignature().AddArgs("args", LogicalType::ANY);
+	AddNamedParameter(ai_generate_chunks, "chunk_size", LogicalType::BIGINT);
+	AddNamedParameter(ai_generate_chunks, "overlap_percent", LogicalType::DOUBLE);
+	AddNamedParameter(ai_generate_chunks, "strategy", LogicalType::VARCHAR);
+	AddNamedParameter(ai_generate_chunks, "source_id", LogicalType::VARCHAR);
 	RegisterDocumentedFunction(loader, std::move(ai_generate_chunks));
 
 	auto ai_prep_search =
 	    TableFunction("ai_prep_search", {LogicalType::VARCHAR}, nullptr, AiPrepSearchBind, nullptr, AiChunkInitLocal);
 	ai_prep_search.in_out_function = AiChunkFunction;
-	ai_prep_search.varargs = LogicalType::ANY;
-	ai_prep_search.named_parameters["chunk_size"] = LogicalType::BIGINT;
-	ai_prep_search.named_parameters["overlap_percent"] = LogicalType::DOUBLE;
-	ai_prep_search.named_parameters["strategy"] = LogicalType::VARCHAR;
-	ai_prep_search.named_parameters["source_id"] = LogicalType::VARCHAR;
-	ai_prep_search.named_parameters["title"] = LogicalType::VARCHAR;
-	ai_prep_search.named_parameters["metadata"] = LogicalType::ANY;
-	ai_prep_search.named_parameters["enrich"] = LogicalType::BOOLEAN;
+	ai_prep_search.GetSignature().AddArgs("args", LogicalType::ANY);
+	AddNamedParameter(ai_prep_search, "chunk_size", LogicalType::BIGINT);
+	AddNamedParameter(ai_prep_search, "overlap_percent", LogicalType::DOUBLE);
+	AddNamedParameter(ai_prep_search, "strategy", LogicalType::VARCHAR);
+	AddNamedParameter(ai_prep_search, "source_id", LogicalType::VARCHAR);
+	AddNamedParameter(ai_prep_search, "title", LogicalType::VARCHAR);
+	AddNamedParameter(ai_prep_search, "metadata", LogicalType::ANY);
+	AddNamedParameter(ai_prep_search, "enrich", LogicalType::BOOLEAN);
 	AddCompletionNamedParameters(ai_prep_search, false, false);
 	RegisterDocumentedFunction(loader, std::move(ai_prep_search));
 
 	auto ai_parse_document =
 	    TableFunction("ai_parse_document", {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                  DocumentParseFunction, DocumentParseBind, DocumentParseInit);
-	ai_parse_document.named_parameters["pages"] = LogicalType::VARCHAR;
+	AddNamedParameter(ai_parse_document, "pages", LogicalType::VARCHAR);
 	AddCompletionNamedParameters(ai_parse_document, false, false);
 	RegisterDocumentedFunction(loader, std::move(ai_parse_document));
 
@@ -9909,26 +9764,33 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPromptFixupFunction(loader, "ai_fix_sql");
 	RegisterPromptQueryFunction(loader, "ai_query_data");
 
+	// These reject invalid SQL or unknown providers with an error, so DuckDB must know they can throw.
+	auto fallible = [](ScalarFunction function) {
+		function.SetFallible();
+		return function;
+	};
 	ScalarFunctionSet ai_is_read_only_sql("ai_is_read_only_sql");
 	ai_is_read_only_sql.AddFunction(
-	    ScalarFunction({LogicalType::VARCHAR}, LogicalType::BOOLEAN, AiIsReadOnlySqlFunction));
-	ai_is_read_only_sql.AddFunction(
-	    ScalarFunction({LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BOOLEAN, AiIsReadOnlySqlFunction));
+	    fallible(ScalarFunction({LogicalType::VARCHAR}, LogicalType::BOOLEAN, AiIsReadOnlySqlFunction)));
+	ai_is_read_only_sql.AddFunction(fallible(
+	    ScalarFunction({LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::BOOLEAN, AiIsReadOnlySqlFunction)));
 	RegisterDocumentedFunction(loader, std::move(ai_is_read_only_sql));
 	ScalarFunctionSet ai_validate_read_only_sql("ai_validate_read_only_sql");
 	ai_validate_read_only_sql.AddFunction(
-	    ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, AiValidateReadOnlySqlFunction));
-	ai_validate_read_only_sql.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BOOLEAN},
-	                                                     LogicalType::VARCHAR, AiValidateReadOnlySqlFunction));
+	    fallible(ScalarFunction({LogicalType::VARCHAR}, LogicalType::VARCHAR, AiValidateReadOnlySqlFunction)));
+	ai_validate_read_only_sql.AddFunction(fallible(ScalarFunction(
+	    {LogicalType::VARCHAR, LogicalType::BOOLEAN}, LogicalType::VARCHAR, AiValidateReadOnlySqlFunction)));
 	RegisterDocumentedFunction(loader, std::move(ai_validate_read_only_sql));
-	RegisterDocumentedFunction(loader, ScalarFunction("ai_provider_base_url", {LogicalType::VARCHAR},
-	                                                  LogicalType::VARCHAR, AiProviderBaseUrl));
-	RegisterDocumentedFunction(loader, ScalarFunction("ai_provider_protocol", {LogicalType::VARCHAR},
-	                                                  LogicalType::VARCHAR, AiProviderProtocol));
+	RegisterDocumentedFunction(loader, fallible(ScalarFunction("ai_provider_base_url", {LogicalType::VARCHAR},
+	                                                           LogicalType::VARCHAR, AiProviderBaseUrl)));
+	RegisterDocumentedFunction(loader, fallible(ScalarFunction("ai_provider_protocol", {LogicalType::VARCHAR},
+	                                                           LogicalType::VARCHAR, AiProviderProtocol)));
 
-	auto ai_count_tokens = ScalarFunction("ai_count_tokens", {LogicalType::ANY}, LogicalType::BIGINT,
-	                                      AiCountTokensFunction, AiCountTokensBind);
-	ai_count_tokens.varargs = LogicalType::ANY;
+	// Counting tokens makes no model call, so unlike the other AI scalars it is neither volatile nor fallible.
+	ScalarFunction ai_count_tokens(
+	    "ai_count_tokens", AiFunctionSignature({LogicalType::ANY}, LogicalType::BIGINT, true), AiCountTokensFunction);
+	ai_count_tokens.SetBindCallback(AiScalarBind<AiCountTokensBind>);
+	ai_count_tokens.SetResolveTypesCallback(ResolveAiTextArguments<1>);
 	ai_count_tokens.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	RegisterDocumentedFunction(loader, std::move(ai_count_tokens));
 
@@ -9961,8 +9823,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDocumentedFunction(loader, TableFunction("ai_models", {}, AiModelsFunction, AiModelsBind, AiModelsInit));
 	auto ai_provision_endpoint = TableFunction("ai_provision_endpoint", {LogicalType::VARCHAR}, ControlPlaneFunction,
 	                                           ProvisionEndpointBind, AiClearUsageInit);
-	ai_provision_endpoint.named_parameters["dry_run"] = LogicalType::BOOLEAN;
-	ai_provision_endpoint.named_parameters["max_hourly_cost_usd"] = LogicalType::DOUBLE;
+	AddNamedParameter(ai_provision_endpoint, "dry_run", LogicalType::BOOLEAN);
+	AddNamedParameter(ai_provision_endpoint, "max_hourly_cost_usd", LogicalType::DOUBLE);
 	RegisterDocumentedFunction(loader, std::move(ai_provision_endpoint));
 	RegisterDocumentedFunction(loader, TableFunction("ai_endpoint_status", {LogicalType::VARCHAR}, ControlPlaneFunction,
 	                                                 EndpointStatusBind, AiClearUsageInit));

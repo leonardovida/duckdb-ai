@@ -421,6 +421,30 @@ SELECT ai_extract_record('hello', '{"type":"object","properties":{"value":{"type
 ----
 Binder Error: ai_extract_record supports at most two positional options after response_schema: model and provider
 
+# Named options are keyword arguments: a misspelled name is an error instead of a positional model.
+statement error
+SELECT ai_completion_request_json('hello', modle := 'gpt-test');
+----
+Unsupported AI option "modle"
+
+# A positional column is a value whatever it is called.
+query I
+SELECT ai_completion_request_json(prompt, temperature, provider := 'openai') LIKE '%"model":"gpt-column"%'
+FROM (VALUES ('hello', 'gpt-column')) t(prompt, temperature);
+----
+true
+
+statement error
+SELECT ai_completion_request_json('hello', model := 'gpt-test', 'openai');
+----
+cannot follow named arguments
+
+# Table functions declare their options.
+statement error
+SELECT * FROM ai_schema_prompt(sampel_rows := 1);
+----
+sampel_rows
+
 query I
 SELECT ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test') LIKE '%"model":"gpt-test"%';
 ----

@@ -16,7 +16,7 @@ extension repository.
   GEN=ninja make test
   python3 test/smoke/mock_provider_smoke.py
   python3 test/smoke/extension_upload_smoke.py
-  PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
+  GEN=ninja make format-check
   ```
 
 - [ ] Check the community docs page won't regress: the duckdb.org extension
@@ -46,31 +46,36 @@ publication through [duckdb/community-extensions](https://github.com/duckdb/comm
 A GitHub release and verified distribution bundles do not establish community
 catalog availability.
 
-### DuckDB 1.5.6 maintenance releases
+### DuckDB 2.0 releases (`repo.ref`)
 
-The catalog now targets DuckDB 2.0 by default. For this repository's DuckDB
-1.5.6 release line, follow the upstream
-[version transition notice](https://github.com/duckdb/community-extensions/issues/3081):
+`main` builds against DuckDB 2.0.0, the catalog's default line since the
+[version transition notice](https://github.com/duckdb/community-extensions/issues/3081).
 
 - Edit `extensions/ai/description.yml`:
-  - `extension.version`: the new maintenance version.
-  - `repo.variegata`: the exact release merge commit SHA.
-  - Keep `repo.ref` unchanged for a release that only supports DuckDB 1.5.6.
-- Start the PR description with an explicit request to build and deploy the
-  DuckDB 1.5.6 / `variegata` line. Link the release, exact-commit CI and immutable
-  artifact verification.
-- Request the maintainer's supported-version build and deployment with matching
-  DuckDB 1.5.6 CI tooling/tag and tests enabled. Legacy publication is not
-  automatic, and requires upstream permissions.
+  - `extension.version`: the new version.
+  - `repo.ref`: the exact release merge commit SHA.
+  - Keep `repo.variegata` pinned to the last DuckDB 1.5.6 release (below).
+- Link the release and the exact-commit CI run in the PR description.
 - Verify the terminal upstream workflow and a fresh isolated
-  `INSTALL ai FROM community; LOAD ai;` with DuckDB 1.5.6 before claiming catalog
+  `INSTALL ai FROM community; LOAD ai;` with DuckDB 2.0.0 before claiming catalog
   publication. Read back `extension_version` from `duckdb_extensions()`.
+
+PR title example: `ai: update to vX.Y.Z for DuckDB 2.0`.
+
+### DuckDB 1.5.6 maintenance releases (`repo.variegata`)
+
+0.8.4 (`17c3633c2ab4a1944358b676e84e0a8b41cd2c8d`) is the last release built
+against DuckDB 1.5.6. A 1.5.6 fix ships from a maintenance branch cut from that
+tag, with the submodules and CI pinned to DuckDB 1.5.6 / `v1.5-variegata`:
+
+- Set `extension.version` to the maintenance version and `repo.variegata` to its
+  exact merge commit SHA; leave `repo.ref` on the 2.0 line.
+- Start the PR description with an explicit request to build and deploy the
+  DuckDB 1.5.6 / `variegata` line, linking the release, exact-commit CI and
+  artifact verification. Legacy publication is not automatic and needs a
+  maintainer's supported-version build with matching tooling and tests enabled.
+- Verify a fresh isolated `INSTALL ai FROM community; LOAD ai;` with DuckDB 1.5.6.
 
 PR title example: `ai: update v1.5.6/variegata to vX.Y.Z`.
 
-### Newer DuckDB release lines
-
-Update `repo.ref` only after the extension has been made compatible with the
-catalog's current default DuckDB version and its corresponding checks pass.
-The current 2.0 C++ API port is separate from a 1.5.6 maintenance release. Do not
-change or bypass required checks to publish an unsupported build.
+Do not change or bypass required checks to publish an unsupported build.
