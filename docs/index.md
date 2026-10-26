@@ -34,6 +34,9 @@ INSTALL ai FROM community;
 LOAD ai;
 ```
 
+Releases from 0.9.0 target DuckDB 2.0. The 0.8.x releases are the DuckDB 1.5.6
+line.
+
 These docs describe the source on `main`. The community package can lag behind
 it, so check what your installed version provides:
 

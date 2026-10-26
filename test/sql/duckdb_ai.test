@@ -396,6 +396,26 @@ SELECT contains(summary, 'Sample row limit per table: 2') AND contains(summary, 
 ----
 true
 
+# Nested schemas: a qualified filter names the whole schema path, so it never picks a same-named nested table.
+statement ok
+CREATE SCHEMA ai_nested_finance; CREATE SCHEMA ai_nested_finance.reports; CREATE SCHEMA reports;
+
+statement ok
+CREATE TABLE ai_nested_finance.reports.ai_nested_q3(secret INTEGER); CREATE TABLE reports.ai_nested_q3(visible INTEGER);
+
+query I
+SELECT regexp_extract_all(summary, '- table: ([^\n]*)', 1) FROM ai_schema_prompt(include_tables := ['reports.ai_nested_q3']);
+----
+['"memory"."reports"."ai_nested_q3"']
+
+query I
+SELECT regexp_extract_all(summary, '- table: ([^\n]*)', 1) FROM ai_schema_prompt(include_tables := ['memory.ai_nested_finance.reports.ai_nested_q3']);
+----
+['"memory"."ai_nested_finance"."reports"."ai_nested_q3"']
+
+statement ok
+DROP SCHEMA ai_nested_finance CASCADE; DROP SCHEMA reports CASCADE;
+
 statement error
 SELECT summary FROM ai_schema_prompt(sample_rows := 101);
 ----
@@ -420,6 +440,30 @@ statement error
 SELECT ai_extract_record('hello', '{"type":"object","properties":{"value":{"type":"string"}}}', 'gpt-test', 'openai', 'extra');
 ----
 Binder Error: ai_extract_record supports at most two positional options after response_schema: model and provider
+
+# Named options are keyword arguments: a misspelled name is an error instead of a positional model.
+statement error
+SELECT ai_completion_request_json('hello', modle := 'gpt-test');
+----
+Unsupported AI option "modle"
+
+# A positional column is a value whatever it is called.
+query I
+SELECT ai_completion_request_json(prompt, temperature, provider := 'openai') LIKE '%"model":"gpt-column"%'
+FROM (VALUES ('hello', 'gpt-column')) t(prompt, temperature);
+----
+true
+
+statement error
+SELECT ai_completion_request_json('hello', model := 'gpt-test', 'openai');
+----
+cannot follow named arguments
+
+# Table functions declare their options.
+statement error
+SELECT * FROM ai_schema_prompt(sampel_rows := 1);
+----
+sampel_rows
 
 query I
 SELECT ai_completion_request_json('hello', provider := 'openai', model := 'gpt-test') LIKE '%"model":"gpt-test"%';

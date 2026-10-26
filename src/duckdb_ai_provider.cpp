@@ -1291,15 +1291,14 @@ std::shared_ptr<PendingHttpResponse> BeginPendingCachedResponse(ProviderRuntimeS
 }
 
 bool ClientInterrupted(ClientContext *context);
+void ThrowIfClientInterrupted(ClientContext *context);
 
 HttpResponse WaitForPendingCachedResponse(ProviderRuntimeState &state, const std::string &cache_key,
                                           const std::shared_ptr<PendingHttpResponse> &pending,
                                           const CompletionOptions &options) {
 	std::unique_lock<std::mutex> lock(state.response_cache_mutex);
 	while (!pending->cv.wait_for(lock, std::chrono::milliseconds(100), [&]() { return pending->done; })) {
-		if (ClientInterrupted(options.client_context)) {
-			throw InterruptException();
-		}
+		ThrowIfClientInterrupted(options.client_context);
 	}
 	if (!pending->error.empty()) {
 		throw IOException("%s", pending->error);
@@ -2667,8 +2666,25 @@ void ValidateHttpHeader(const std::string &header) {
 	}
 }
 
+//! A cancelled query and one past DuckDB's max_execution_time both stop provider work: waits, retries and requests in
+//! flight. The checks read the clock, since a single model call can outlast the deadline on its own.
 bool ClientInterrupted(ClientContext *context) {
-	return context && context->IsInterrupted();
+	if (!context) {
+		return false;
+	}
+	try {
+		context->BlockingInterruptCheck();
+	} catch (InterruptException &) {
+		return true;
+	}
+	return false;
+}
+
+//! Throws the interrupt with DuckDB's own message, which says whether the query was cancelled or timed out.
+void ThrowIfClientInterrupted(ClientContext *context) {
+	if (context) {
+		context->BlockingInterruptCheck();
+	}
 }
 
 struct CurlHeaderCapture {
@@ -2950,9 +2966,7 @@ public:
 
 		std::unique_lock<std::mutex> lock(state.provider_control_mutex);
 		while (true) {
-			if (ClientInterrupted(client_context)) {
-				throw InterruptException();
-			}
+			ThrowIfClientInterrupted(client_context);
 			auto now = std::chrono::steady_clock::now();
 			PruneProviderTokenWindow(state, now);
 			auto concurrency_ready =
@@ -3053,9 +3067,7 @@ void SleepBeforeRetry(long retry_delay_ms, ClientContext *client_context) {
 	}
 	auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(retry_delay_ms);
 	while (std::chrono::steady_clock::now() < deadline) {
-		if (ClientInterrupted(client_context)) {
-			throw InterruptException();
-		}
+		ThrowIfClientInterrupted(client_context);
 		auto remaining =
 		    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
 		std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(remaining, std::chrono::milliseconds(100)));
@@ -3127,13 +3139,13 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		}
 		if (attempt < retry_count && (result != CURLE_OK || IsRetryableHttpStatus(status))) {
 			if (result == CURLE_ABORTED_BY_CALLBACK && ClientInterrupted(client_context)) {
-				throw InterruptException();
+				ThrowIfClientInterrupted(client_context);
 			}
 			SleepBeforeRetry(RetryDelayMs(retry_backoff_ms, attempt, header_capture.retry_after_ms), client_context);
 			continue;
 		}
 		if (result == CURLE_ABORTED_BY_CALLBACK && ClientInterrupted(client_context)) {
-			throw InterruptException();
+			ThrowIfClientInterrupted(client_context);
 		}
 		if (result != CURLE_OK) {
 			throw IOException("AI provider request failed: %s", curl_easy_strerror(result));
@@ -5428,6 +5440,9 @@ void SubmitUsageLog(const CompletionOptions &options, const std::string &log_end
 		job.retry_count = RetryCount(options);
 		job.retry_backoff_ms = RetryBackoffMs(options);
 		EnqueueUsageLog(RuntimeState(options), std::move(job));
+	} catch (InterruptException &) {
+		// A strict log POST runs inside the query, so a cancellation or timeout during it stops the query.
+		throw;
 	} catch (std::exception &ex) {
 		if (log_strict) {
 			throw IOException("%s: %s", error_prefix, ex.what());

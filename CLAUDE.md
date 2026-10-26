@@ -25,12 +25,12 @@ GEN=ninja make test
 python3 test/smoke/mock_provider_smoke.py
 ```
 
-The formatter gate uses DuckDB's formatter. On this machine, the formatter tools
-are available in `/tmp/duckdb_ai_format_venv/bin`:
+The formatter gate uses DuckDB's formatter. Since DuckDB 2.0 it installs its pinned
+tools (clang-format 11, black, cmake-format) into a virtualenv on first use:
 
 ```sh
-PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-check
-PATH=/tmp/duckdb_ai_format_venv/bin:$PATH GEN=ninja make format-fix
+GEN=ninja make format-check
+GEN=ninja make format-fix
 ```
 
 For docs changes, also run from `website/`:

@@ -83,6 +83,9 @@ ORDER BY function_name;
 `LOAD ai;` is needed once per connection. Loading the extension never calls a
 model by itself.
 
+`main` and releases from 0.9.0 target DuckDB 2.0. The 0.8.x releases are the
+DuckDB 1.5.6 line.
+
 ### 2. Start Ollama and pull a model
 
 Install [Ollama](https://ollama.com/download), then in a terminal:
