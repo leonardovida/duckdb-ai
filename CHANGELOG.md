@@ -32,7 +32,9 @@ This release moves the extension to DuckDB 2.0.0. It loads only in DuckDB
   retry backoff and requests in flight stop at the deadline with DuckDB's own
   timeout error, as they already did for cancellation.
 - `ai_sql` and `ai_schema_prompt` qualify tables in nested schemas (new in
-  DuckDB 2.0) with their full schema path.
+  DuckDB 2.0) with their full schema path. A qualified `include_tables` or
+  `exclude_tables` entry must name that whole path, so `reports.q3` does not
+  match `finance.reports.q3`.
 
 ## 0.8.4 - 2026-10-23
 

@@ -396,6 +396,26 @@ SELECT contains(summary, 'Sample row limit per table: 2') AND contains(summary, 
 ----
 true
 
+# Nested schemas: a qualified filter names the whole schema path, so it never picks a same-named nested table.
+statement ok
+CREATE SCHEMA ai_nested_finance; CREATE SCHEMA ai_nested_finance.reports; CREATE SCHEMA reports;
+
+statement ok
+CREATE TABLE ai_nested_finance.reports.ai_nested_q3(secret INTEGER); CREATE TABLE reports.ai_nested_q3(visible INTEGER);
+
+query I
+SELECT regexp_extract_all(summary, '- table: ([^\n]*)', 1) FROM ai_schema_prompt(include_tables := ['reports.ai_nested_q3']);
+----
+['"memory"."reports"."ai_nested_q3"']
+
+query I
+SELECT regexp_extract_all(summary, '- table: ([^\n]*)', 1) FROM ai_schema_prompt(include_tables := ['memory.ai_nested_finance.reports.ai_nested_q3']);
+----
+['"memory"."ai_nested_finance"."reports"."ai_nested_q3"']
+
+statement ok
+DROP SCHEMA ai_nested_finance CASCADE; DROP SCHEMA reports CASCADE;
+
 statement error
 SELECT summary FROM ai_schema_prompt(sample_rows := 101);
 ----

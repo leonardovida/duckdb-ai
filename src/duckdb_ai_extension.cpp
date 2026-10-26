@@ -4471,7 +4471,7 @@ vector<TableSpec> ParseTableSpecs(const vector<std::string> &tables, const std::
 			throw BinderException("ai_schema_prompt %s entries must not be empty", option_name);
 		}
 		auto parts = SplitQualifiedIdentifier(trimmed);
-		if (parts.empty() || parts.size() > 3) {
+		if (parts.empty()) {
 			throw BinderException("ai_schema_prompt %s entries must be table, schema.table, or "
 			                      "catalog.schema.table names",
 			                      option_name);
@@ -4488,17 +4488,33 @@ vector<TableSpec> ParseTableSpecs(const vector<std::string> &tables, const std::
 	return specs;
 }
 
+bool MatchesQualifiedName(const vector<std::string> &spec_parts, const vector<std::string> &name_parts) {
+	if (spec_parts.size() != name_parts.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < spec_parts.size(); i++) {
+		if (spec_parts[i] != LowerAscii(name_parts[i])) {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! A bare name matches the table in any schema. A qualified name must spell out the table's whole schema path, with
+//! or without the catalog: with nested schemas, reports.q3 matches only a top-level schema reports, not
+//! finance.reports.q3.
 bool MatchesTableSpec(const SchemaTableInfo &table, const TableSpec &spec) {
-	auto catalog = LowerAscii(table.catalog);
-	auto schema = LowerAscii(table.schema);
-	auto table_name = LowerAscii(table.table);
 	if (spec.parts.size() == 1) {
-		return table_name == spec.parts[0];
+		return LowerAscii(table.table) == spec.parts[0];
 	}
-	if (spec.parts.size() == 2) {
-		return schema == spec.parts[0] && table_name == spec.parts[1];
+	auto schema_path = table.schema_path.empty() ? vector<std::string> {table.schema} : table.schema_path;
+	vector<std::string> name = schema_path;
+	name.push_back(table.table);
+	if (MatchesQualifiedName(spec.parts, name)) {
+		return true;
 	}
-	return catalog == spec.parts[0] && schema == spec.parts[1] && table_name == spec.parts[2];
+	name.insert(name.begin(), table.catalog);
+	return MatchesQualifiedName(spec.parts, name);
 }
 
 bool MatchesAnyTableSpec(const SchemaTableInfo &table, const vector<TableSpec> &specs) {
