@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TOKEN = "quack-smoke-token"
 OWNER_KEY = "owner-key"
-CREDENTIAL_ERROR = "is not the host the API key from the duckdb_ai secret is configured for"
+CREDENTIAL_ERROR = "is not the origin the API key from the duckdb_ai secret is configured for"
 
 
 class MockProvider:

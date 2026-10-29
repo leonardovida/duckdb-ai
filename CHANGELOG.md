@@ -15,10 +15,10 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Changed
 
-- API keys are only sent to the host they are configured for. A key from a
-  `TYPE duckdb_ai` secret goes to that secret's `BASE_URL`, otherwise to the
-  provider's built-in endpoint or its base URL environment variable, plus any
-  host in `DUCKDB_AI_ALLOWED_HOSTS`. Previously a query-level `base_url`,
+- API keys are only sent to the origin (scheme, host and port) they are
+  configured for. A key from a `TYPE duckdb_ai` secret goes to that secret's
+  `BASE_URL`, otherwise to the provider's built-in endpoint or its base URL
+  environment variable, plus any host in `DUCKDB_AI_ALLOWED_HOSTS`. Previously a query-level `base_url`,
   `duckdb_ai_base_url` or external model `location` could send the key to any
   host, which let remote clients of a shared server send its key elsewhere.
   Setups that pair an environment or secret key with a session `base_url`, for

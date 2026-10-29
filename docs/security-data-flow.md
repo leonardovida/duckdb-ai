@@ -18,9 +18,10 @@ an explicit data egress path from DuckDB to the configured provider or gateway.
   `duckdb_ai_log_endpoint` or `DUCKDB_AI_LOG_ENDPOINT` is configured.
 - Usage logs omit prompt, input, and response text by default.
 - API keys are read from environment variables or `TYPE duckdb_ai` secrets.
-- An API key is only sent to the host it is configured for: the `BASE_URL` of
-  the secret that holds it, otherwise the provider's built-in endpoint or base
-  URL environment variable, plus any host listed in `DUCKDB_AI_ALLOWED_HOSTS`.
+- An API key is only sent to the origin (scheme, host and port) it is
+  configured for: the `BASE_URL` of the secret that holds it, otherwise the
+  provider's built-in endpoint or base URL environment variable, plus any host
+  listed in `DUCKDB_AI_ALLOWED_HOSTS`.
   A query-level `base_url`, `duckdb_ai_base_url` or external model `location`
   cannot redirect it.
 - External model objects contain only safe routing metadata and the name of a

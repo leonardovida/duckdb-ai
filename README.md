@@ -450,7 +450,7 @@ combination supports every feature.
 - **Egress control.** `allowed_hosts` (or `SET duckdb_ai_allowed_hosts`)
   restricts which hosts the extension may contact. The
   `DUCKDB_AI_ALLOWED_HOSTS` environment variable is a ceiling sessions cannot
-  widen, stored API keys only go to the host they are configured for, and
+  widen, stored API keys only go to the origin they are configured for, and
   `enable_external_access = false` is honored.
 - **Shared servers.** To serve AI functions to remote DuckDB clients over
   Quack, see [Run on a Quack server](docs/quack-server.md).

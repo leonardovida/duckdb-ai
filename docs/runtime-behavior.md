@@ -254,8 +254,8 @@ Entries can be hostnames, `host:port`, full URLs, wildcard subdomains such as
 The allowlist check runs before the HTTP request, so disallowed hosts fail
 without sending a provider request. When the `DUCKDB_AI_ALLOWED_HOSTS`
 environment variable is set, a request must match it as well, so session and
-per-call allowlists can only narrow it. Stored API keys are only sent to the host
-they are configured for; see [security and data flow](security-data-flow.md).
+per-call allowlists can only narrow it. Stored API keys are only sent to the
+origin they are configured for; see [security and data flow](security-data-flow.md).
 
 ## JSON parsing
 

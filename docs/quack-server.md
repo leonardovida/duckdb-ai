@@ -95,11 +95,11 @@ which statements they may run.
 Remote clients can run any SQL the server allows, so the extension does not let a
 session decide where the server's keys or requests go:
 
-- **Keys stay with their host.** An API key from a `TYPE duckdb_ai` secret is only
-  sent to the `BASE_URL` stored in that secret. Without one, the key, like a key
-  from an environment variable, is only sent to the provider's endpoint: its
-  built-in URL or the base URL environment variable (for example
-  `OPENAI_BASE_URL`). A client that passes `base_url := ...`, sets
+- **Keys stay with their origin.** An API key from a `TYPE duckdb_ai` secret is
+  only sent to the scheme, host and port of the `BASE_URL` stored in that
+  secret. Without one, the key, like a key from an environment variable, is only
+  sent to the provider's endpoint: its built-in URL or the base URL environment
+  variable (for example `OPENAI_BASE_URL`). A client that passes `base_url := ...`, sets
   `duckdb_ai_base_url`, or creates an external model whose `location` points
   elsewhere gets an error, and no request is sent.
 - **The environment allowlist is a ceiling.** When the server process has

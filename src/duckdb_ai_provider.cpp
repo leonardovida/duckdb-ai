@@ -4750,48 +4750,72 @@ std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config,
 	return results;
 }
 
-std::string ConfiguredHost(const std::string &provider, const std::string &base_url) {
+//! scheme://host:port with the scheme's default port filled in, so origins compare by value.
+std::string UrlOrigin(const std::string &url) {
+	auto host = UrlHost(url);
+	auto scheme_end = url.find("://");
+	auto scheme = LowerAscii(url.substr(0, scheme_end));
+	auto host_start = scheme_end + 3;
+	auto path_start = url.find_first_of("/?#", host_start);
+	auto authority =
+	    url.substr(host_start, path_start == std::string::npos ? std::string::npos : path_start - host_start);
+	auto bracketed = !authority.empty() && authority.front() == '[';
+	auto port_separator = bracketed ? authority.find("]:") : authority.rfind(':');
+	std::string port;
+	if (port_separator != std::string::npos) {
+		port = authority.substr(port_separator + (bracketed ? 2 : 1));
+	}
+	auto first_digit = port.find_first_not_of('0');
+	port = first_digit == std::string::npos ? std::string() : port.substr(first_digit);
+	if (port.empty()) {
+		port = scheme == "https" ? "443" : "80";
+	}
+	return scheme + "://" + (bracketed ? "[" + host + "]" : host) + ":" + port;
+}
+
+std::string ConfiguredOrigin(const std::string &provider, const std::string &base_url) {
 	if (base_url.empty()) {
 		return "";
 	}
 	try {
 		auto normalized = NormalizeBaseUrlForProvider(provider, base_url);
-		return normalized.empty() ? "" : UrlHost(normalized);
+		return normalized.empty() ? "" : UrlOrigin(normalized);
 	} catch (InvalidInputException &) {
-		// A malformed configured URL trusts no host; the request URL check reports the real error.
+		// A malformed configured URL trusts no origin; the request URL check reports the real error.
 		return "";
 	}
 }
 
-//! Stored credentials only go to the host they were configured for. Otherwise any session that can
-//! set base_url, such as a remote client of a Quack server, could send the owner's API key elsewhere.
+//! Stored credentials only go to the origin they were configured for: same scheme, host and port.
+//! Otherwise any session that can set base_url, such as a remote client of a Quack server, could send
+//! the owner's API key elsewhere, including to another listener on the configured host.
 void EnforceCredentialHost(const ProviderConfig &config, const std::string &endpoint,
                            const CompletionOptions &options) {
 	if (config.api_key.empty()) {
 		return;
 	}
-	auto host = UrlHost(endpoint);
+	auto origin = UrlOrigin(endpoint);
 	// Environment base URLs and the provider's built-in endpoint are set by the process owner.
-	auto credential_host = options.api_key.empty() || options.api_key_base_url.empty()
-	                           ? ConfiguredHost(config.provider, ResolveBaseUrl(ProviderDefaults(config.provider)))
-	                           : ConfiguredHost(config.provider, options.api_key_base_url);
-	if (host == credential_host) {
+	auto credential_origin = options.api_key.empty() || options.api_key_base_url.empty()
+	                             ? ConfiguredOrigin(config.provider, ResolveBaseUrl(ProviderDefaults(config.provider)))
+	                             : ConfiguredOrigin(config.provider, options.api_key_base_url);
+	if (origin == credential_origin) {
 		return;
 	}
 	auto operator_hosts = GetEnv("DUCKDB_AI_ALLOWED_HOSTS");
-	if (!operator_hosts.empty() && HostAllowedByList(host, operator_hosts)) {
+	if (!operator_hosts.empty() && HostAllowedByList(UrlHost(endpoint), operator_hosts)) {
 		return;
 	}
 	auto source = options.api_key.empty() ? std::string("the API key from the environment")
 	                                      : std::string("the API key from the duckdb_ai secret");
 	throw InvalidInputException(
-	    "AI provider host \"%s\" is not the host %s is configured for (%s). Store base_url in the duckdb_ai "
-	    "secret, set it through the provider's base URL environment variable, or add the host to the "
+	    "AI provider endpoint \"%s\" is not the origin %s is configured for (%s). Store base_url in the "
+	    "duckdb_ai secret, set it through the provider's base URL environment variable, or add the host to the "
 	    "DUCKDB_AI_ALLOWED_HOSTS environment variable.",
-	    host, source, credential_host.empty() ? std::string("none") : credential_host);
+	    origin, source, credential_origin.empty() ? std::string("none") : credential_origin);
 }
 
-//! Every provider request gets its credential headers here, so the credential host check cannot be skipped.
+//! Every provider request gets its credential headers here, so the credential origin check cannot be skipped.
 std::vector<std::string> RequestHeaders(const ProviderConfig &config, const std::string &endpoint,
                                         const CompletionOptions &options) {
 	EnforceCredentialHost(config, endpoint, options);
