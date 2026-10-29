@@ -27,6 +27,19 @@ SELECT ai_embed('hello', provider := 'openai', model := 'm', base_url := 'http:/
 ----
 is not the host the API key from the duckdb_ai secret is configured for
 
+# Batched embedding requests, used for several rows with the same options, are guarded too.
+statement error
+SELECT ai_embed(x, provider := 'openai', model := 'm', base_url := 'http://127.0.0.1:9/v1', cache := false)
+FROM (VALUES ('first'), ('second'), ('third')) t(x);
+----
+is not the host the API key from the duckdb_ai secret is configured for
+
+statement error
+SELECT ai_similarity(x, 'query', provider := 'openai', model := 'm', base_url := 'http://127.0.0.1:9/v1')
+FROM (VALUES ('first'), ('second'), ('third')) t(x);
+----
+is not the host the API key from the duckdb_ai secret is configured for
+
 # A model profile cannot redirect a credential it names.
 statement ok
 CREATE EXTERNAL MODEL guarded_redirect WITH (
