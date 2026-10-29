@@ -87,6 +87,32 @@ def run(duckdb):
             checks += 1
 
         status = 200
+        # Direct usage reads must reject unsigned overflow and non-integer JSON
+        # values without searching nested fields for a replacement.
+        for token, expected in (
+            ("0", 0),
+            ("9223372036854775807", 9223372036854775807),
+            ("9223372036854775808", None),
+            ("18446744073709551615", None),
+            ("-9223372036854775808", None),
+            ("1.0", None),
+            ("true", None),
+            ('"5"', None),
+            ("null", None),
+        ):
+            body = (
+                '{"choices":[{"message":{"content":"integer lookup"}}],'
+                '"usage":{"prompt_tokens":' + token + ',"nested":{"prompt_tokens":5}}}'
+            )
+            rows = execute(
+                f"""
+                CREATE TEMP TABLE result AS SELECT ai_try_complete('lookup', provider := 'openai', {options}) r;
+                SELECT r.response, r.error, prompt_tokens FROM result CROSS JOIN ai_usage();
+            """
+            )
+            assert rows == [{"response": "integer lookup", "error": None, "prompt_tokens": expected}], (body, rows)
+            checks += 1
+
         scalar_cases = [
             ('{"nested":{"embedding":[1,2]},"embedding":[3,4]}', [1, 2], None, None),
             ('{"embedding":{"other":[3,4],"embedding":[5,6]}}', [3, 4], None, None),
@@ -98,6 +124,19 @@ def run(duckdb):
             ('{"embedding":[1,2],"prompt_tokens":9223372036854775808,"usage":{"prompt_tokens":5}}', [1, 2], None, None),
             ('{"embedding":[1,2],"usage":{"prompt_tokens":9223372036854775808},"prompt_tokens":5}', [1, 2], 5, None),
             ('{"embedding":[1,2],"prompt_tokens":2.5,"usage":{"prompt_tokens":5,"total_tokens":7}}', [1, 2], 5, 7),
+            ('{"embedding":[1,2],"prompt_tokens":0}', [1, 2], 0, None),
+            ('{"embedding":[1,2],"prompt_tokens":9223372036854775807}', [1, 2], 9223372036854775807, None),
+            ('{"embedding":[1,2],"prompt_tokens":18446744073709551615,"prompt_tokens":5}', [1, 2], None, None),
+            ('{"embedding":[1,2],"prompt_tokens":-9223372036854775808,"prompt_tokens":5}', [1, 2], None, None),
+            ('{"embedding":[1,2],"prompt_tokens":true,"usage":{"prompt_tokens":5}}', [1, 2], 5, None),
+            ('{"embedding":[1,2],"prompt_tokens":"5","usage":{"prompt_tokens":7}}', [1, 2], 7, None),
+            ('{"embedding":[1,2],"prompt_tokens":null,"usage":{"prompt_tokens":5}}', [1, 2], 5, None),
+            (
+                '{"embedding":[1,2],"usage":[{"prompt_tokens":18446744073709551615},{"prompt_tokens":5}]}',
+                [1, 2],
+                5,
+                None,
+            ),
             ('{"embedding":[1,2]', None, None, None),
             ('null', None, None, None),
         ]
@@ -117,6 +156,27 @@ def run(duckdb):
             assert rows == [
                 {"embedding": values, "prompt_tokens": prompt_tokens, "total_tokens": total_tokens, "error": error}
             ], (body, rows)
+            checks += 1
+
+        # A representable integer index gets a range diagnostic. An unsigned
+        # overflow or floating-point index gets the earlier type diagnostic.
+        for index, message in (
+            ("-9223372036854775808", "index -9223372036854775808 is outside the expected range [0, 2)"),
+            ("9223372036854775807", "index 9223372036854775807 is outside the expected range [0, 2)"),
+            ("9223372036854775808", "contained a non-integer index"),
+            ("18446744073709551615", "contained a non-integer index"),
+            ("0.0", "contained a non-integer index"),
+        ):
+            body = '{"data":[{"embedding":[1,2],"index":' + index + '},{"embedding":[3,4],"index":1}]}'
+            rows = execute(
+                f"""
+                CREATE TEMP TABLE result AS
+                    SELECT ai_embed('lookup ' || i, provider := 'openai', {options}) embedding FROM range(2) t(i);
+                SELECT (SELECT count(embedding) FROM result) successes, error FROM ai_usage() ORDER BY event_id;
+            """
+            )
+            expected = "AI provider embedding response " + message
+            assert rows == [{"successes": 0, "error": expected}] * 2, (body, rows)
             checks += 1
 
         for provider in ("openai", "ollama"):

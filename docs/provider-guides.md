@@ -39,39 +39,39 @@ LIMIT 1;
 | --- | --- | --- | --- | --- |
 | `ollama` | Ollama chat and embeddings | `llama3.2`; embeddings use `nomic-embed-text` | Optional `OLLAMA_API_KEY` | Defaults to `http://localhost:11434`; `OLLAMA_HOST` overrides it. |
 | `openai` | OpenAI-compatible chat and embeddings | `gpt-5.6-luna`; embeddings use `text-embedding-3-small` | `OPENAI_API_KEY` | Defaults to `https://api.openai.com/v1`. |
-| `azure` | OpenAI-compatible chat and embeddings | `gpt-4o`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
-| `anthropic` / `claude` | Anthropic Messages | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
+| `azure` | OpenAI-compatible chat and embeddings | `gpt-5.6-luna`; embeddings use `text-embedding-3-small` | `AZURE_OPENAI_API_KEY` | Appends `/openai/v1` to `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, or secret `BASE_URL` when needed. |
+| `anthropic` / `claude` | Anthropic Messages | `claude-haiku-5-5` | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Defaults to `https://api.anthropic.com/v1`. |
 | `bedrock` | OpenAI-compatible chat | `openai.gpt-oss-120b` | `AWS_BEDROCK_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `BEDROCK_API_KEY` | Set `AWS_REGION`, `AWS_BEDROCK_REGION`, `AWS_BEDROCK_BASE_URL`, or secret `BASE_URL`. |
 | `cerebras` | OpenAI-compatible chat | `gpt-oss-120b` | `CEREBRAS_API_KEY` | Defaults to `https://api.cerebras.ai/v1`. |
 | `cloudflare` / `workers_ai` | OpenAI-compatible chat and embeddings | `@cf/zai-org/glm-4.7-flash`; embeddings use `@cf/baai/bge-base-en-v1.5` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_API_TOKEN`, or `CLOUDFLARE_AUTH_TOKEN` | Derives the endpoint from `CLOUDFLARE_ACCOUNT_ID`, or accepts `CLOUDFLARE_WORKERS_AI_BASE_URL`, `CLOUDFLARE_AI_BASE_URL`, or secret `BASE_URL`. |
 | `cohere` | OpenAI-compatible chat and embeddings | `command-a-plus-05-2026`; embeddings use `embed-v4.0` | `COHERE_API_KEY` | Defaults to `https://api.cohere.ai/compatibility/v1`. |
 | `dashscope` / `qwen` | OpenAI-compatible chat and embeddings | `qwen-plus`; embeddings use `text-embedding-v4` | `DASHSCOPE_API_KEY`, `ALIBABA_API_KEY`, or `QWEN_API_KEY` | Defaults to `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`; override with a workspace-specific base URL when needed. |
 | `deepinfra` | OpenAI-compatible chat and embeddings | `meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo`; embeddings use `BAAI/bge-large-en-v1.5` | `DEEPINFRA_API_KEY` | Defaults to `https://api.deepinfra.com/v1/openai`. |
-| `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/gpt-oss-20b`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
-| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.7-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
+| `fireworks` | OpenAI-compatible chat and embeddings | `accounts/fireworks/models/gpt-oss-120b`; embeddings use `nomic-ai/nomic-embed-text-v1.5` | `FIREWORKS_API_KEY` | Defaults to `https://api.fireworks.ai/inference/v1`. |
+| `gemini` / `gcp` / `google` | OpenAI-compatible chat and embeddings | `gemini-3.8-flash`; embeddings use `gemini-embedding-2` | `GEMINI_API_KEY` | Defaults to Google's OpenAI-compatible endpoint. |
 | `groq` | OpenAI-compatible chat | `openai/gpt-oss-20b` | `GROQ_API_KEY` | Defaults to `https://api.groq.com/openai/v1`. |
 | `huggingface` / `hf` | OpenAI-compatible chat | `openai/gpt-oss-120b` | `HF_TOKEN`, `HUGGINGFACE_API_KEY`, or `HUGGING_FACE_HUB_TOKEN` | Defaults to `https://router.huggingface.co/v1`. |
 | `hunyuan` / `tencent_hunyuan` | OpenAI-compatible chat through Tencent TokenHub | `hy3` | `HUNYUAN_API_KEY`, `TOKENHUB_API_KEY`, or `TENCENT_TOKENHUB_API_KEY` | Defaults to `https://tokenhub.tencentmaas.com/v1`; `TOKENHUB_BASE_URL` selects another TokenHub region. |
 | `minimax` | OpenAI-compatible chat | `MiniMax-M2.7` | `MINIMAX_API_KEY` or `MINI_MAX_API_KEY` | Defaults to `https://api.minimax.io/v1`. |
-| `mimo` / `xiaomi` | OpenAI-compatible chat | `mimo-v2.5-pro` | `MIMO_API_KEY` (sent in the `api-key` header) | Defaults to `https://api.xiaomimimo.com/v1`. |
+| `mimo` / `xiaomi` | OpenAI-compatible chat | `mimo-v2.6-flash` | `MIMO_API_KEY` (sent in the `api-key` header) | Defaults to `https://api.xiaomimimo.com/v1`. |
 | `mistral` | OpenAI-compatible chat and embeddings | `mistral-small-latest`; embeddings use `mistral-embed` | `MISTRAL_API_KEY` | Defaults to `https://api.mistral.ai/v1`. |
 | `moonshot` / `kimi` | OpenAI-compatible chat | `kimi-k3` | `MOONSHOT_API_KEY` or `KIMI_API_KEY` | Defaults to `https://api.moonshot.ai/v1`. |
-| `nebius` / `nebius_token_factory` | OpenAI-compatible chat | `meta-llama/Meta-Llama-3.1-70B-Instruct` | `NEBIUS_API_KEY` or `TOKEN_FACTORY_API_KEY` | Defaults to `https://api.tokenfactory.nebius.com/v1`. |
+| `nebius` / `nebius_token_factory` | OpenAI-compatible chat | `Qwen/Qwen3-30B-A3B-Instruct-2507` | `NEBIUS_API_KEY` or `TOKEN_FACTORY_API_KEY` | Defaults to `https://api.tokenfactory.nebius.com/v1`. |
 | `nvidia` / `nvidia_nim` | OpenAI-compatible chat | `nvidia/nemotron-3-super-120b-a12b` | `NVIDIA_API_KEY` | Defaults to `https://integrate.api.nvidia.com/v1`. |
 | `zai` / `zhipu` | OpenAI-compatible chat and embeddings | `glm-4.7-flash`; embeddings use `embedding-3` | `ZAI_API_KEY` | Defaults to `https://api.z.ai/api/paas/v4`. |
-| `deepseek` | OpenAI-compatible chat | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
+| `deepseek` | OpenAI-compatible chat | `deepseek-flash` | `DEEPSEEK_API_KEY` | Defaults to `https://api.deepseek.com`. |
 | `openrouter` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `OPENROUTER_API_KEY` | Defaults to `https://openrouter.ai/api/v1`. |
 | `databricks` | OpenAI-compatible chat | `databricks-gpt-oss-120b` | `DATABRICKS_TOKEN` | Derives `/serving-endpoints` from `DATABRICKS_HOST`, or accepts full Model Serving, AI Gateway, or chat-completions URLs. |
 | `snowflake` | OpenAI-compatible chat | `claude-sonnet-4-5` | `SNOWFLAKE_PAT` or `SNOWFLAKE_TOKEN` | Derives `/api/v2/cortex/v1` from Snowflake account URL, host, or account id. |
-| `perplexity` / `pplx` | OpenAI-compatible chat; Decisions API for `ai_decide` | `sonar`; decisions use `pplx-decider-v1-27b` | `PERPLEXITY_API_KEY` | Defaults to `https://api.perplexity.ai`. |
+| `perplexity` / `pplx` | OpenAI-compatible chat; Decisions API for `ai_decide` | `sonar`; decisions use `pplx-decider-v1.1-27b` | `PERPLEXITY_API_KEY` | Defaults to `https://api.perplexity.ai`. |
 | `poe` | OpenAI-compatible chat | `GPT-5.4` | `POE_API_KEY` | Defaults to `https://api.poe.com/v1`. |
-| `qianfan` / `ernie` | OpenAI-compatible chat | `ernie-4.5-turbo-128k` | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY`, or `BAIDU_API_KEY` | Defaults to `https://qianfan.baidubce.com/v2`. |
+| `qianfan` / `ernie` | OpenAI-compatible chat | `ernie-5.1` | `QIANFAN_API_KEY`, `BAIDU_QIANFAN_API_KEY`, or `BAIDU_API_KEY` | Defaults to `https://qianfan.baidubce.com/v2`. |
 | `sambanova` | OpenAI-compatible chat | `Meta-Llama-3.3-70B-Instruct` | `SAMBANOVA_API_KEY` | Defaults to `https://api.sambanova.ai/v1`. |
 | `siliconflow` | OpenAI-compatible chat | `Qwen/Qwen2.5-72B-Instruct` | `SILICONFLOW_API_KEY` | Defaults to `https://api.siliconflow.com/v1`. |
 | `together` | OpenAI-compatible chat and embeddings | `meta-llama/Llama-3.3-70B-Instruct-Turbo`; embeddings use `intfloat/multilingual-e5-large-instruct` | `TOGETHER_API_KEY` | Defaults to `https://api.together.xyz/v1`. |
 | `stepfun` / `step` | OpenAI-compatible chat | `step-3.5-flash` | `STEPFUN_API_KEY` or `STEP_API_KEY` | Defaults to `https://api.stepfun.com/v1`. |
 | `vercel` / `vercel_ai_gateway` | OpenAI-compatible chat and embeddings | `openai/gpt-4o-mini`; embeddings use `openai/text-embedding-3-small` | `AI_GATEWAY_API_KEY`, `VERCEL_AI_GATEWAY_API_KEY`, or `VERCEL_OIDC_TOKEN` | Defaults to `https://ai-gateway.vercel.sh/v1`. |
-| `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-2.5-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
+| `vertex` / `google_vertex` | OpenAI-compatible chat | `google/gemini-3.8-flash` | `VERTEX_AI_ACCESS_TOKEN`, `GOOGLE_CLOUD_ACCESS_TOKEN`, or `VERTEX_API_KEY` | Derives the endpoint from `GOOGLE_CLOUD_PROJECT`, or accepts `VERTEX_AI_BASE_URL`, `GOOGLE_VERTEX_BASE_URL`, or secret `BASE_URL`. |
 | `volcengine` / `doubao` | OpenAI-compatible chat | `doubao-seed-2-1-pro-260628` | `VOLCENGINE_API_KEY`, `ARK_API_KEY`, or `DOUBAO_API_KEY` | Defaults to `https://ark.cn-beijing.volces.com/api/v3`. |
 | `xai` / `grok` | OpenAI-compatible chat | `grok-4.6` | `XAI_API_KEY` | Defaults to `https://api.x.ai/v1`. |
 | `typesafe` / `jev` | TypeSafe System One decisions | `jev-latest` | `TYPESAFE_API_KEY` | Defaults to `https://api.typesafe.ai/v1` and calls `/systemone`. |
@@ -106,7 +106,7 @@ model names. Check each linked catalog for current lifecycle and account terms.
 | Kimi | `kimi` / `moonshot`; explicit Kimi ID | [Chat/Responses/Messages](https://platform.moonshot.ai/docs/introduction); Messages at `https://api.moonshot.ai/anthropic/v1/messages` | `MOONSHOT_API_KEY` / `KIMI_API_KEY` |
 | MiniMax | `minimax`; explicit MiniMax ID | [Messages](https://platform.minimax.io/docs/api-reference/text-chat-anthropic) at `https://api.minimax.io/anthropic/v1/messages` | `MINIMAX_API_KEY` |
 | Tencent | `hunyuan` / `tencent`; `hy3`, `hy4-preview` | [Chat, Responses, Messages](https://www.tencentcloud.com/document/product/1300/80632); append the respective path to the selected regional host | `HUNYUAN_API_KEY` / `TOKENHUB_API_KEY` |
-| MiMo | `mimo`, `xiaomi`, `xiaomi_mimo`; `mimo-v2.5-pro` default, explicit IDs supported | [Chat](https://mimo.mi.com/docs/en-US/api/chat/openai-api) at `https://api.xiaomimimo.com/v1/chat/completions`; [Messages](https://mimo.mi.com/docs/en-US/api/chat/anthropic-api) at `https://api.xiaomimimo.com/anthropic/v1/messages` | `MIMO_API_KEY` via `api-key` header |
+| MiMo | `mimo`, `xiaomi`, `xiaomi_mimo`; `mimo-v2.6-flash` default, explicit IDs supported | [Chat](https://mimo.mi.com/docs/en-US/api/chat/openai-api) at `https://api.xiaomimimo.com/v1/chat/completions`; [Messages](https://mimo.mi.com/docs/en-US/api/chat/anthropic-api) at `https://api.xiaomimimo.com/anthropic/v1/messages` | `MIMO_API_KEY` via `api-key` header |
 
 Tencent's documented regional bases are Singapore
 `https://tokenhub-intl.tencentcloudmaas.com/v1`, Guangzhou
@@ -152,7 +152,7 @@ for question types and result fields.
 | --- | --- | --- |
 | [TypeSafe Jev](#typesafe-jev) | `jev-latest` | `TYPESAFE_API_KEY` |
 | Cloudflare Clef | `clef` (also `clef-flash`) | `CLOUDFLARE_API_KEY` and `CLOUDFLARE_ACCOUNT_ID`, as for [Workers AI](#cloudflare-workers-ai) |
-| Perplexity | `pplx-decider-v1-27b` | `PERPLEXITY_API_KEY` |
+| Perplexity | `pplx-decider-v1.1-27b` (also `pplx-decider-v1-27b`) | `PERPLEXITY_API_KEY` |
 | Ollama | `nimble` (also `tev1`, `tev1:0.8b`) | Ollama 0.35 or later, no key |
 | Any `/v1/systemone` endpoint (`systemone`) | none, `model` is required | `base_url := ...` or `SYSTEMONE_BASE_URL`; `model := ...` or `SYSTEMONE_MODEL`; optional `SYSTEMONE_API_KEY` |
 
@@ -409,7 +409,7 @@ CREATE OR REPLACE SECRET azure_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'azure',
     BASE_URL 'https://my-resource.openai.azure.com',
-    MODEL 'gpt-4o'
+    MODEL 'gpt-5.6-luna'
 );
 
 SELECT ai_complete(
@@ -426,6 +426,8 @@ SELECT ai_embed(
 
 If your Azure deployment names differ from the model names above, use the
 deployment name in `MODEL` or `model := ...`.
+The default deployment name is `gpt-5.6-luna`, because Azure no longer offers
+`gpt-4o` to new deployments.
 
 ## Claude / Anthropic
 
@@ -440,7 +442,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET claude_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'anthropic',
-    MODEL 'claude-haiku-4-5'
+    MODEL 'claude-haiku-5-5'
 );
 
 SELECT ai_complete(
@@ -471,11 +473,12 @@ For `response_schema := ...`, the extension sends Anthropic's
 `output_config.format` JSON Schema request shape. Claude is configured for
 completion calls; embeddings are not configured for this provider.
 
-For current text models, set `model := 'claude-fable-5-1'`,
-`claude-opus-5-5`, or `claude-sonnet-5-5`. The existing default remains
-`claude-haiku-4-5`. These newer models reject non-default sampling parameters,
-so the extension omits `temperature` for them. Fable 5.1 and Opus 5.5 always
-use adaptive thinking. Increase `max_tokens` when the requested answer needs
+The default model is `claude-haiku-5-5`. Set `model := 'claude-fable-5-1'`,
+`claude-opus-5-5`, or `claude-sonnet-5-5` for larger models, or
+`claude-haiku-4-5` to keep the previous default. The 5.x models reject
+non-default sampling parameters, so the extension omits `temperature` for them.
+Haiku 5.5, Fable 5.1 and Opus 5.5 use adaptive thinking by default, and Haiku
+5.5's tokenizer counts about 30% more tokens than Haiku 4.5 for the same text. Increase `max_tokens` when the requested answer needs
 room for both thinking and visible text. Built-in estimates use standard text
 rates and model-specific cache-read prices; long-context and other service
 charges require separate accounting.
@@ -495,7 +498,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET gemini_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'gemini',
-    MODEL 'gemini-3.7-flash'
+    MODEL 'gemini-3.8-flash'
 );
 
 SELECT ai_complete(
@@ -511,10 +514,10 @@ SELECT ai_embed(
 ```
 
 Provider aliases `gcp`, `google`, and `google_gemini` also resolve to Gemini.
-Gemini 3.7 Flash and 3.6 Flash deprecate sampling parameters, so `duckdb_ai`
-omits `temperature` for these models even when the generic SQL option is
-provided. Built-in cost estimates use Google's introductory 3.7/3.6 Flash
-pricing through December 31, 2026 and roll over to the published standard rate
+The default model is `gemini-3.8-flash`. Gemini 3.8, 3.7 and 3.6 Flash and
+3.5 Flash-Lite deprecate sampling parameters, so `duckdb_ai` omits
+`temperature` for these models even when the generic SQL option is provided.
+Built-in cost estimates use Google's introductory 3.8/3.7/3.6 Flash pricing through December 31, 2026 and roll over to the published standard rate
 on January 1, 2027.
 
 ## Mistral
@@ -588,7 +591,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET deepseek_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'deepseek',
-    MODEL 'deepseek-v4-flash'
+    MODEL 'deepseek-flash'
 );
 
 SELECT ai_complete(
@@ -604,8 +607,12 @@ SELECT ai_classify(
 ```
 
 DeepSeek is configured for completion calls. Embeddings are not configured for
-this provider. Built-in cost estimates use the published peak-hour cache-miss
-rates; DeepSeek charges 50% less during its documented off-peak windows.
+this provider. The default model is `deepseek-flash` (DeepSeek-V4.1-Flash).
+DeepSeek retired `deepseek-v4-flash` on 2026-09-10 and currently routes it to
+`deepseek-flash`. Thinking is on by default; for short row-by-row answers, pass
+`request_options := '{"thinking":{"type":"disabled"}}'`. Built-in cost
+estimates use the published peak-hour cache-miss rates; DeepSeek charges 50%
+less during its documented off-peak windows.
 
 ## OpenRouter
 
@@ -694,6 +701,11 @@ SELECT ai_embed(
 )[1] AS first_embedding_value;
 ```
 
+Together removed its serverless embedding models in September 2026, so the
+default embedding model `intfloat/multilingual-e5-large-instruct` only works
+with a dedicated endpoint that serves it. Pass `model := ...` with the model
+your dedicated endpoint runs, or use another embedding provider.
+
 ## Fireworks AI
 
 ```sh
@@ -707,7 +719,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET fireworks_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'fireworks',
-    MODEL 'accounts/fireworks/models/gpt-oss-20b'
+    MODEL 'accounts/fireworks/models/gpt-oss-120b'
 );
 
 SELECT ai_complete(
@@ -723,7 +735,7 @@ SELECT ai_embed(
 ```
 
 Fireworks model IDs are passed through unchanged. This supports serverless base
-models such as `accounts/fireworks/models/gpt-oss-20b`, fast routers such as
+models such as `accounts/fireworks/models/gpt-oss-120b`, fast routers such as
 `accounts/fireworks/routers/kimi-k2p6-turbo`, account deployments, and embedding
 models such as `fireworks/qwen3-embedding-8b`. Use a model ID available to the
 configured Fireworks account.
@@ -893,7 +905,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET nebius_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'nebius_token_factory',
-    MODEL 'meta-llama/Meta-Llama-3.1-70B-Instruct'
+    MODEL 'Qwen/Qwen3-30B-A3B-Instruct-2507'
 );
 
 SELECT ai_complete(
@@ -1027,7 +1039,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET qianfan_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'ernie',
-    MODEL 'ernie-4.5-turbo-128k'
+    MODEL 'ernie-5.1'
 );
 
 SELECT ai_complete(
@@ -1320,7 +1332,7 @@ LOAD ai;
 CREATE OR REPLACE SECRET vertex_ai (
     TYPE duckdb_ai,
     AI_PROVIDER 'vertex',
-    MODEL 'google/gemini-2.5-flash'
+    MODEL 'google/gemini-3.8-flash'
 );
 
 SELECT ai_complete(
@@ -1330,7 +1342,10 @@ SELECT ai_complete(
 ```
 
 Aliases `vertex`, `google_vertex`, `vertex_ai`, and `gcp_vertex` resolve to the
-same provider. Embeddings are not configured for this provider.
+same provider. Embeddings are not configured for this provider. The default
+model is `google/gemini-3.8-flash`, because Vertex retires Gemini 2.5 Flash in
+October 2026. As on the Gemini API, the extension omits `temperature` for
+Gemini 3.8, 3.7 and 3.6 Flash and 3.5 Flash-Lite.
 
 ## Databricks
 

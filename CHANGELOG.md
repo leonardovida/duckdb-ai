@@ -5,6 +5,150 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## 0.9.0 - 2026-10-26
+
+This release moves the extension to DuckDB 2.0.0. It loads only in DuckDB
+2.0; 0.8.4 remains the DuckDB 1.5.6 release.
+
+### Changed
+
+- Build, test and distribute against DuckDB 2.0.0 and extension CI tooling
+  `v2.0-cyanoptera`, including the sanitizer host and platform builds.
+- Named options are real keyword arguments. Scalar and aggregate functions take
+  their inputs by position, positional model/provider values after them, and
+  `name := value` options last, so DuckDB itself matches them:
+  - A misspelled option name is an error. Previously a misspelled option with a
+    text value, such as `modle := 'gpt-x'`, was silently used as the positional
+    model.
+  - An argument passed by position stays positional whatever its column is
+    called; a column named `temperature` is no longer read as that option.
+  - A positional argument after a named option is rejected.
+- `ai_agg`, `ai_summarize_agg` and `ai_build_classifier` are single overloads
+  with positional and named options instead of fixed-arity overload lists.
+
+### Added
+
+- AI calls honor DuckDB 2.0's `max_execution_time`. Waits on cached responses,
+  retry backoff and requests in flight stop at the deadline with DuckDB's own
+  timeout error.
+
+### Fixed
+
+- A cancelled or timed-out query now fails in every `on_error` mode. Previously
+  `on_error := 'null'`, `ai_try_complete` and the capturing classifiers turned
+  the interruption into NULL or error rows and returned a result.
+- `ai_sql` and `ai_schema_prompt` qualify tables in nested schemas (new in
+  DuckDB 2.0) with their full schema path. A qualified `include_tables` or
+  `exclude_tables` entry must name that whole path, so `reports.q3` does not
+  match `finance.reports.q3`.
+
+## 0.8.4 - 2026-10-23
+
+### Fixed
+
+- Preserve existing record projection types for schema references whose paths
+  traverse arrays while enforcing their constraints locally. The 0.8.3 build
+  candidate unintentionally changed these projections from `VARCHAR` to the
+  referenced type. It was held before GitHub release publication; its tag is
+  retained unchanged.
+- Includes the schema-reference validation, retry-attribution and maintenance
+  changes listed below.
+
+## 0.8.3 - 2026-10-23 (unpublished build candidate)
+
+### Fixed
+
+- JSON responses now enforce constraints behind local `$ref` definitions in
+  `ai_complete_json`, `ai_complete_record`, and `ai_extract_record`. Previously,
+  record binding followed those references but local response validation
+  silently skipped them, accepting values that violated referenced types,
+  bounds, or required fields. Reference siblings also apply. Encountered
+  unresolved, unsupported, cyclic, or excessively nested references fail
+  validation instead of being accepted.
+- Failed provider transports retain their actual retry count in `ai_usage()`,
+  including packed embeddings and redaction. Cache waiters still report zero
+  retries and token/cost accounting is unchanged.
+
+### Maintenance
+
+- Share checked JSON integer conversion across provider response readers while
+  preserving overflow rejection and lookup precedence.
+
+## 0.8.2 - 2026-10-16
+
+### Fixed
+
+- TypeSafe decision replies with an explicit JSON `null` confidence now retain
+  their answers in `ai_jev` and `ai_decide`, with SQL NULL confidence fields.
+  Previously, the provider validator rejected an otherwise valid response,
+  failing every row in the affected batch. Invalid non-null confidence values
+  still fail validation.
+
+## 0.8.1 - 2026-10-09
+
+### Fixed
+
+- Very large positive `max_tokens` values no longer overflow the estimated
+  input-plus-output token count. Declared context windows reject oversized
+  requests before HTTP, and token pacing reserves the configured window instead
+  of treating an overflowed estimate as zero. Without a declared context window,
+  large positive output limits remain valid and are sent unchanged.
+
+## 0.8.0 - 2026-10-08
+
+This release refreshes default models and built-in prices for current provider
+catalogs. SQL functions, options and result shapes are unchanged. Calls that
+rely on a provider's default model now use a different model; pass
+`model := ...` or set `MODEL` in a secret to keep the previous one.
+
+### Added
+
+- Built-in pricing and request compatibility for Claude Haiku 5.5
+  (`claude-haiku-5-5`), Gemini 3.8 Flash (`gemini-3.8-flash`, with Google's
+  introductory rate through 2026-12-31), DeepSeek V4.1 Flash (`deepseek-flash`),
+  Grok 4.7, Cloudflare Clef-flash, Perplexity `pplx-decider-v1.1-27b` and
+  OpenRouter `anthropic/claude-haiku-5.5`.
+
+### Changed
+
+- New default models:
+  - `anthropic`: `claude-haiku-5-5` (was `claude-haiku-4-5`). It costs a tenth
+    as much, uses adaptive thinking by default and counts about 30% more tokens
+    for the same text.
+  - `gemini`: `gemini-3.8-flash` (was `gemini-3.7-flash`), at the same price.
+  - `vertex`: `google/gemini-3.8-flash` (was `google/gemini-2.5-flash`, which
+    Vertex retires in October 2026).
+  - `deepseek`: `deepseek-flash` (was `deepseek-v4-flash`, retired by DeepSeek
+    and temporarily routed to `deepseek-flash`).
+  - `azure`: `gpt-5.6-luna` (was `gpt-4o`, which Azure no longer offers to new
+    deployments).
+  - `fireworks`: `accounts/fireworks/models/gpt-oss-120b` (was `gpt-oss-20b`,
+    removed from Fireworks serverless).
+  - `nebius`: `Qwen/Qwen3-30B-A3B-Instruct-2507` (was
+    `meta-llama/Meta-Llama-3.1-70B-Instruct`, no longer served).
+  - `mimo`: `mimo-v2.6-flash` (was `mimo-v2.5-pro`, which retires on 2026-10-21).
+  - `qianfan`: `ernie-5.1` (was `ernie-4.5-turbo-128k`, which retires on
+    2026-10-29).
+  - `ai_decide` with `perplexity`: `pplx-decider-v1.1-27b` (was
+    `pplx-decider-v1-27b`).
+
+### Fixed
+
+- Built-in cost estimates use current rates: DeepSeek Flash at $0.30/$1.20 per
+  million tokens (was $0.44/$1.32), Perplexity decision models at $0.02 per
+  million input tokens (was $0.04), and Claude Sonnet 5.5 cache reads at 5% of
+  the input rate (was 10%).
+- `temperature` is omitted for models that reject non-default sampling
+  parameters: Claude Haiku 5.5, Gemini 3.8 Flash, Gemini 3.x models on Vertex,
+  and Claude 5.5-generation and Fable 5.1 endpoints on Databricks. Previously
+  these requests could fail when `temperature` was set.
+
+### Documentation
+
+- Provider guides list the new defaults and note that Together no longer serves
+  embeddings serverlessly, so its default embedding model needs a dedicated
+  endpoint.
+
 ## 0.7.0 - 2026-10-06
 
 ### Added

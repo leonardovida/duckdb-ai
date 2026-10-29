@@ -52,7 +52,10 @@ done
 $DUCKDB post.db -c "CREATE MACRO jekyll_format_function(f) AS f.regexp_replace('({{|}})','{% raw %}\\1{% endraw %}', 'g');"
 $DUCKDB post.db -c "ATTACH 'pre.db'; CREATE OR REPLACE TABLE fun_no_overload AS SELECT function_name, function_type, split_part(description, chr(10), 1) as description, comment, CASE WHEN examples = [] THEN '' ELSE '[' || examples.list_transform(lambda x: x.jekyll_format_function()).list_reduce(lambda x, y : x || ', ' || y) || ']' END AS examples FROM (FROM (SELECT function_name, function_type, description, comment, examples FROM functions ORDER BY function_name, function_type) EXCEPT (SELECT function_name, function_type, description, comment, examples FROM pre.functions ORDER BY function_name, function_type)) GROUP BY ALL ORDER BY function_name, function_type;"
 $DUCKDB post.db -markdown -c "FROM fun_no_overload;" > functions.md
+# DuckDB 2.0 adds typed_value, which also differs for settings this preview changes itself: -unsigned and the
+# per-database temp_directory. Upstream does not change them, so leave them out here.
 $DUCKDB post.db -c "ATTACH 'pre.db'; CREATE OR REPLACE TABLE new_settings AS FROM ( SELECT * EXCLUDE (value) FROM settings ORDER BY name) EXCEPT (SELECT * EXCLUDE (value) FROM pre.settings ORDER BY name) ORDER BY name;"
+$DUCKDB post.db -c "DELETE FROM new_settings WHERE name IN ('allow_unsigned_extensions', 'temp_directory');"
 $DUCKDB post.db -markdown -c "FROM new_settings;" > settings.md
 rm -f pre.db post.db
 

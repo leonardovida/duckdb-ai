@@ -1,5 +1,6 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb_ai_provider.hpp"
+#include "duckdb_ai_json.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -851,44 +852,7 @@ std::string CurrentTimestamp() {
 }
 
 std::string JsonEscape(const std::string &input) {
-	std::string out;
-	out.reserve(input.size());
-	const char *hex = "0123456789abcdef";
-	for (auto c : input) {
-		switch (c) {
-		case '\\':
-			out += "\\\\";
-			break;
-		case '"':
-			out += "\\\"";
-			break;
-		case '\b':
-			out += "\\b";
-			break;
-		case '\f':
-			out += "\\f";
-			break;
-		case '\n':
-			out += "\\n";
-			break;
-		case '\r':
-			out += "\\r";
-			break;
-		case '\t':
-			out += "\\t";
-			break;
-		default:
-			if (static_cast<unsigned char>(c) < 0x20) {
-				auto value = static_cast<unsigned char>(c);
-				out += "\\u00";
-				out.push_back(hex[(value >> 4) & 0xf]);
-				out.push_back(hex[value & 0xf]);
-			} else {
-				out.push_back(c);
-			}
-		}
-	}
-	return out;
+	return detail::EscapeJsonString(input, true);
 }
 
 std::string JsonDouble(double input) {
@@ -929,8 +893,13 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "Jev input tokens only", "2026-09-18"},
 	    {"cloudflare", "clef", "completion", 0.24, 0.00, "https://developers.cloudflare.com/workers-ai/models/clef/",
 	     "Clef decision model input tokens only", "2026-10-06"},
-	    {"perplexity", "pplx-decider-v1-27b", "completion", 0.04, 0.00,
-	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-06"},
+	    {"cloudflare", "clef-flash", "completion", 0.09, 0.00,
+	     "https://developers.cloudflare.com/workers-ai/models/clef-flash/", "Clef decision model input tokens only",
+	     "2026-10-08"},
+	    {"perplexity", "pplx-decider-v1.1-27b", "completion", 0.02, 0.00,
+	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-08"},
+	    {"perplexity", "pplx-decider-v1-27b", "completion", 0.02, 0.00,
+	     "https://docs.perplexity.ai/docs/decisions/quickstart", "Decisions API input tokens only", "2026-10-08"},
 	    {"openai", "gpt-6-astra", "completion", 10.00, 50.00,
 	     "https://developers.openai.com/api/docs/models/gpt-6-astra", "standard text pricing up to 272K input tokens",
 	     "2026-09-30"},
@@ -966,6 +935,9 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "https://platform.claude.com/docs/en/models/opus-5-5/overview", "standard text token pricing", "2026-09-30"},
 	    {"anthropic", "claude-sonnet-5-5", "completion", 2.00, 10.00,
 	     "https://platform.claude.com/docs/en/models/sonnet-5-5/overview", "standard text token pricing", "2026-09-30"},
+	    {"anthropic", "claude-haiku-5-5", "completion", 0.10, 0.50,
+	     "https://platform.claude.com/docs/en/about-claude/pricing",
+	     "standard text token pricing for prompts up to 100K tokens", "2026-10-08"},
 	    {"anthropic", "claude-haiku-4-5", "completion", 1.00, 5.00,
 	     "https://platform.claude.com/docs/en/about-claude/pricing", "standard text token pricing", "2026-08-21"},
 	    {"anthropic", "claude-sonnet-5", "completion", 2.00, 10.00,
@@ -978,14 +950,18 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
 	    {"gemini", "gemini-3.7-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text token pricing starting 2027-01-01", "2026-08-21"},
+	    {"gemini", "gemini-3.8-flash", "completion", 1.50, 7.50, "https://ai.google.dev/gemini-api/docs/pricing",
+	     "standard text token pricing starting 2027-01-01", "2026-10-08"},
 	    {"gemini", "gemini-embedding-2", "embedding", 0.20, -1, "https://ai.google.dev/gemini-api/docs/pricing",
 	     "standard text embedding input tokens only", "2026-07-17"},
 	    {"mistral", "mistral-small-latest", "completion", 0.15, 0.60, "https://mistral.ai/pricing/api/",
 	     "standard text token pricing", "2026-07-08"},
 	    {"mistral", "mistral-embed", "embedding", 0.10, -1, "https://mistral.ai/pricing/",
 	     "embedding input tokens only", "2026-06-30"},
-	    {"deepseek", "deepseek-v4-flash", "completion", 0.44, 1.32, "https://api-docs.deepseek.com/quick_start/pricing",
-	     "peak-hour cache-miss pricing; off-peak rates are 50% lower", "2026-09-04"},
+	    {"deepseek", "deepseek-flash", "completion", 0.30, 1.20, "https://api-docs.deepseek.com/quick_start/pricing",
+	     "peak-hour cache-miss pricing; off-peak rates are 50% lower", "2026-10-08"},
+	    {"deepseek", "deepseek-v4-flash", "completion", 0.30, 1.20, "https://api-docs.deepseek.com/updates",
+	     "retired ID routed to deepseek-flash; peak-hour cache-miss pricing", "2026-10-08"},
 	    {"zai", "glm-4.7-flash", "completion", 0.00, 0.00, "https://docs.z.ai/guides/overview/pricing",
 	     "standard text token pricing", "2026-06-30"},
 	    {"zai", "glm-4.7-flashx", "completion", 0.07, 0.40, "https://docs.z.ai/guides/overview/pricing",
@@ -996,18 +972,23 @@ const std::vector<ModelPrice> &BuiltinModelPrices() {
 	     "live model feed pricing", "2026-06-30"},
 	    {"openrouter", "anthropic/claude-haiku-4.5", "completion", 1.00, 5.00, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
+	    {"openrouter", "anthropic/claude-haiku-5.5", "completion", 0.10, 0.50, "https://openrouter.ai/api/v1/models",
+	     "live model feed pricing", "2026-10-08"},
 	    {"openrouter", "z-ai/glm-4.7-flash", "completion", 0.06, 0.40, "https://openrouter.ai/api/v1/models",
 	     "live model feed pricing", "2026-06-30"},
 	    {"xai", "grok-4.5", "completion", 2.00, 6.00, "https://docs.x.ai/developers/models/grok-4.5",
 	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
 	    {"xai", "grok-4.6", "completion", 2.00, 6.00, "https://docs.x.ai/developers/grok-4-6",
 	     "standard text token pricing for prompts below 200K tokens", "2026-08-28"},
+	    {"xai", "grok-4.7", "completion", 2.00, 6.00, "https://docs.x.ai/docs/models",
+	     "standard text token pricing for prompts below 200K tokens", "2026-10-08"},
 	};
 	return prices;
 }
 
 void ApplyCurrentModelPrice(ModelPrice &price) {
-	if (price.provider == "gemini" && (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash") &&
+	if (price.provider == "gemini" &&
+	    (price.model == "gemini-3.6-flash" || price.model == "gemini-3.7-flash" || price.model == "gemini-3.8-flash") &&
 	    price.operation == "completion" && CurrentTimestamp().compare(0, 10, "2027-01-01") < 0) {
 		price.input_token_price_per_million = 0.75;
 		price.output_token_price_per_million = 3.75;
@@ -1311,15 +1292,14 @@ std::shared_ptr<PendingHttpResponse> BeginPendingCachedResponse(ProviderRuntimeS
 }
 
 bool ClientInterrupted(ClientContext *context);
+void ThrowIfClientInterrupted(ClientContext *context);
 
 HttpResponse WaitForPendingCachedResponse(ProviderRuntimeState &state, const std::string &cache_key,
                                           const std::shared_ptr<PendingHttpResponse> &pending,
                                           const CompletionOptions &options) {
 	std::unique_lock<std::mutex> lock(state.response_cache_mutex);
 	while (!pending->cv.wait_for(lock, std::chrono::milliseconds(100), [&]() { return pending->done; })) {
-		if (ClientInterrupted(options.client_context)) {
-			throw InterruptException();
-		}
+		ThrowIfClientInterrupted(options.client_context);
 	}
 	if (!pending->error.empty()) {
 		throw IOException("%s", pending->error);
@@ -1573,8 +1553,8 @@ bool YyjsonDirectString(duckdb_yyjson::yyjson_val *object, const char *key, std:
 	return true;
 }
 
-bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int64_t &result) {
-	auto value = YyjsonObjectGet(object, key);
+//! Read only JSON integers representable as int64_t, leaving result unchanged on failure.
+bool YyjsonInteger(duckdb_yyjson::yyjson_val *value, int64_t &result) {
 	if (!value || !duckdb_yyjson::yyjson_is_int(value)) {
 		return false;
 	}
@@ -1588,6 +1568,10 @@ bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int
 		result = duckdb_yyjson::yyjson_get_sint(value);
 	}
 	return true;
+}
+
+bool YyjsonDirectInteger(duckdb_yyjson::yyjson_val *object, const char *key, int64_t &result) {
+	return YyjsonInteger(YyjsonObjectGet(object, key), result);
 }
 
 bool YyjsonDirectDouble(duckdb_yyjson::yyjson_val *object, const char *key, double &result) {
@@ -1731,16 +1715,8 @@ bool FindYyjsonIntegerField(duckdb_yyjson::yyjson_val *value, const std::string 
 		size_t max;
 		yyjson_obj_foreach(value, index, max, key, child) {
 			if (YyjsonString(key) == field && duckdb_yyjson::yyjson_is_int(child)) {
-				if (duckdb_yyjson::yyjson_is_uint(child)) {
-					auto unsigned_value = duckdb_yyjson::yyjson_get_uint(child);
-					if (unsigned_value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-						return false;
-					}
-					result = static_cast<int64_t>(unsigned_value);
-				} else {
-					result = duckdb_yyjson::yyjson_get_sint(child);
-				}
-				return true;
+				// A matching unsigned overflow stops this object's search, just like a match.
+				return YyjsonInteger(child, result);
 			}
 			if (FindYyjsonIntegerField(child, field, result)) {
 				return true;
@@ -2115,6 +2091,52 @@ std::string SchemaTypeName(const JsonValue &schema) {
 	return "json";
 }
 
+// Resolve the local JSON Pointer subset shared by record binding and response validation.
+const JsonValue *ResolveLocalSchemaReference(const JsonValue &root, const std::string &reference,
+                                             bool allow_array_elements) {
+	if (reference.empty() || reference[0] != '#') {
+		return nullptr;
+	}
+	auto pointer = reference.substr(1);
+	const JsonValue *node = &root;
+	size_t position = 0;
+	while (node && position < pointer.size()) {
+		if (pointer[position] != '/') {
+			return nullptr;
+		}
+		auto next = pointer.find('/', position + 1);
+		auto token = pointer.substr(position + 1, next == std::string::npos ? std::string::npos : next - position - 1);
+		std::string unescaped;
+		for (size_t i = 0; i < token.size(); i++) {
+			if (token[i] == '~') {
+				if (i + 1 >= token.size() || (token[i + 1] != '0' && token[i + 1] != '1')) {
+					return nullptr;
+				}
+				unescaped += token[++i] == '0' ? '~' : '/';
+			} else {
+				unescaped += token[i];
+			}
+		}
+		if (node->type == JsonValueType::ARRAY && allow_array_elements) {
+			if (unescaped.empty() || (unescaped.size() > 1 && unescaped[0] == '0')) {
+				return nullptr;
+			}
+			idx_t index = 0;
+			for (auto digit : unescaped) {
+				if (digit < '0' || digit > '9' || index >= node->array_value.size()) {
+					return nullptr;
+				}
+				index = index * 10 + static_cast<idx_t>(digit - '0');
+			}
+			node = index < node->array_value.size() ? &node->array_value[index] : nullptr;
+		} else {
+			node = ObjectField(*node, unescaped);
+		}
+		position = next == std::string::npos ? pointer.size() : next;
+	}
+	return node;
+}
+
 //! Follows a local "$ref" (for example "#/$defs/Address") and unwraps an anyOf or oneOf with one non-null branch,
 //! so {"anyOf": [{"type": "string"}, {"type": "null"}]} maps like {"type": "string"}.
 const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schema, idx_t depth = 0) {
@@ -2123,29 +2145,8 @@ const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schem
 	}
 	auto ref = ObjectField(*schema, "$ref");
 	if (ref && ref->type == JsonValueType::STRING && !ref->string_value.empty() && ref->string_value[0] == '#') {
-		auto pointer = ref->string_value.substr(1);
-		const JsonValue *node = &root;
-		size_t position = 0;
-		while (node && position < pointer.size()) {
-			if (pointer[position] != '/') {
-				node = nullptr;
-				break;
-			}
-			auto next = pointer.find('/', position + 1);
-			auto token =
-			    pointer.substr(position + 1, next == std::string::npos ? std::string::npos : next - position - 1);
-			std::string unescaped;
-			for (size_t i = 0; i < token.size(); i++) {
-				if (token[i] == '~' && i + 1 < token.size() && (token[i + 1] == '0' || token[i + 1] == '1')) {
-					unescaped += token[i + 1] == '0' ? '~' : '/';
-					i++;
-				} else {
-					unescaped += token[i];
-				}
-			}
-			node = ObjectField(*node, unescaped);
-			position = next == std::string::npos ? pointer.size() : next;
-		}
+		// Preserve the existing object-only reference lookup used to choose SQL column types.
+		auto node = ResolveLocalSchemaReference(root, ref->string_value, false);
 		return node ? ResolveSchemaNode(root, node, depth + 1) : schema;
 	}
 	if (ObjectField(*schema, "type") || ObjectField(*schema, "properties")) {
@@ -2244,8 +2245,14 @@ bool RegexMatches(const std::string &value, const std::string &pattern, const st
 	}
 }
 
+struct SchemaValidationContext {
+	const JsonValue &root;
+	std::vector<std::pair<const JsonValue *, const JsonValue *>> references;
+	std::string schema_error;
+};
+
 bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &schema, const std::string &path,
-                                    std::string &error) {
+                                    std::string &error, SchemaValidationContext &context) {
 	if (schema.type == JsonValueType::BOOLEAN) {
 		if (!schema.boolean_value) {
 			error = path + " is not allowed by false schema";
@@ -2255,11 +2262,36 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	if (schema.type != JsonValueType::OBJECT) {
 		return true;
 	}
+	auto ref = ObjectField(schema, "$ref");
+	if (ref) {
+		auto target = ref->type == JsonValueType::STRING
+		                  ? ResolveLocalSchemaReference(context.root, ref->string_value, true)
+		                  : nullptr;
+		if (!target || (target->type != JsonValueType::OBJECT && target->type != JsonValueType::BOOLEAN)) {
+			context.schema_error = path + " has an unresolved or unsupported schema $ref";
+			error = context.schema_error;
+			return false;
+		}
+		auto edge = std::make_pair(&value, &schema);
+		if (context.references.size() >= 128 ||
+		    std::find(context.references.begin(), context.references.end(), edge) != context.references.end()) {
+			context.schema_error = path + " has a cyclic or excessively nested schema $ref";
+			error = context.schema_error;
+			return false;
+		}
+		context.references.push_back(edge);
+		auto valid = ValidateJsonValueAgainstSchema(value, *target, path, error, context);
+		context.references.pop_back();
+		if (!valid) {
+			return false;
+		}
+		// A reference and its sibling constraints must both hold.
+	}
 	auto all_of_schema = ObjectField(schema, "allOf");
 	if (all_of_schema && all_of_schema->type == JsonValueType::ARRAY) {
 		for (idx_t i = 0; i < all_of_schema->array_value.size(); i++) {
 			std::string child_error;
-			if (!ValidateJsonValueAgainstSchema(value, all_of_schema->array_value[i], path, child_error)) {
+			if (!ValidateJsonValueAgainstSchema(value, all_of_schema->array_value[i], path, child_error, context)) {
 				error = path + " failed allOf schema " + std::to_string(i) + ": " + child_error;
 				return false;
 			}
@@ -2270,7 +2302,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		auto matched = false;
 		for (auto &candidate : any_of_schema->array_value) {
 			std::string child_error;
-			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error)) {
+			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error, context)) {
 				matched = true;
 				break;
 			}
@@ -2285,7 +2317,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		idx_t matches = 0;
 		for (auto &candidate : one_of_schema->array_value) {
 			std::string child_error;
-			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error)) {
+			if (ValidateJsonValueAgainstSchema(value, candidate, path, child_error, context)) {
 				matches++;
 			}
 		}
@@ -2297,7 +2329,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 	auto not_schema = ObjectField(schema, "not");
 	if (not_schema) {
 		std::string child_error;
-		if (ValidateJsonValueAgainstSchema(value, *not_schema, path, child_error)) {
+		if (ValidateJsonValueAgainstSchema(value, *not_schema, path, child_error, context)) {
 			error = path + " matched schema in not";
 			return false;
 		}
@@ -2439,7 +2471,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 				property_name.type = JsonValueType::STRING;
 				property_name.string_value = property.first;
 				if (!ValidateJsonValueAgainstSchema(property_name, *property_names_schema,
-				                                    JsonPathChild(path, property.first), error)) {
+				                                    JsonPathChild(path, property.first), error, context)) {
 					return false;
 				}
 			}
@@ -2449,7 +2481,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 				auto property = value.object_value.find(property_schema.first);
 				if (property != value.object_value.end() &&
 				    !ValidateJsonValueAgainstSchema(property->second, property_schema.second,
-				                                    JsonPathChild(path, property_schema.first), error)) {
+				                                    JsonPathChild(path, property_schema.first), error, context)) {
 					return false;
 				}
 			}
@@ -2470,7 +2502,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 						matched_pattern_properties.insert(property.first);
 					}
 					if (!ValidateJsonValueAgainstSchema(property.second, pattern_schema.second,
-					                                    JsonPathChild(path, property.first), error)) {
+					                                    JsonPathChild(path, property.first), error, context)) {
 						return false;
 					}
 				}
@@ -2507,7 +2539,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 					return false;
 				}
 				if (!ValidateJsonValueAgainstSchema(property.second, *additional_schema,
-				                                    JsonPathChild(path, property.first), error)) {
+				                                    JsonPathChild(path, property.first), error, context)) {
 					return false;
 				}
 			}
@@ -2544,8 +2576,8 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 		auto items_schema = ObjectField(schema, "items");
 		if (items_schema && items_schema->type != JsonValueType::ARRAY) {
 			for (idx_t i = 0; i < value.array_value.size(); i++) {
-				if (!ValidateJsonValueAgainstSchema(value.array_value[i], *items_schema, JsonPathIndex(path, i),
-				                                    error)) {
+				if (!ValidateJsonValueAgainstSchema(value.array_value[i], *items_schema, JsonPathIndex(path, i), error,
+				                                    context)) {
 					return false;
 				}
 			}
@@ -2555,7 +2587,7 @@ bool ValidateJsonValueAgainstSchema(const JsonValue &value, const JsonValue &sch
 			idx_t matches = 0;
 			for (auto &item : value.array_value) {
 				std::string child_error;
-				if (ValidateJsonValueAgainstSchema(item, *contains_schema, path, child_error)) {
+				if (ValidateJsonValueAgainstSchema(item, *contains_schema, path, child_error, context)) {
 					matches++;
 				}
 			}
@@ -2635,8 +2667,25 @@ void ValidateHttpHeader(const std::string &header) {
 	}
 }
 
+//! A cancelled query and one past DuckDB's max_execution_time both stop provider work: waits, retries and requests in
+//! flight. The checks read the clock, since a single model call can outlast the deadline on its own.
 bool ClientInterrupted(ClientContext *context) {
-	return context && context->IsInterrupted();
+	if (!context) {
+		return false;
+	}
+	try {
+		context->BlockingInterruptCheck();
+	} catch (InterruptException &) {
+		return true;
+	}
+	return false;
+}
+
+//! Throws the interrupt with DuckDB's own message, which says whether the query was cancelled or timed out.
+void ThrowIfClientInterrupted(ClientContext *context) {
+	if (context) {
+		context->BlockingInterruptCheck();
+	}
 }
 
 struct CurlHeaderCapture {
@@ -2888,8 +2937,14 @@ int64_t EstimatedCompletionInputTokens(const std::string &prompt, const Completi
 
 int64_t EstimatedCompletionTokens(const std::string &prompt, const CompletionOptions &options) {
 	auto output_estimate = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
-	return EstimatedCompletionInputTokens(prompt, options, GetProviderCapabilities(options).token_estimate_multiplier) +
-	       output_estimate;
+	auto input_estimate =
+	    EstimatedCompletionInputTokens(prompt, options, GetProviderCapabilities(options).token_estimate_multiplier);
+	// Pacing caps reservations at the configured window. Keep a large positive
+	// output limit positive even when the combined estimate cannot fit in BIGINT.
+	if (output_estimate > std::numeric_limits<int64_t>::max() - input_estimate) {
+		return std::numeric_limits<int64_t>::max();
+	}
+	return input_estimate + output_estimate;
 }
 
 int64_t TokenReservation(int64_t estimated_tokens, int64_t token_limit_per_minute) {
@@ -2912,9 +2967,7 @@ public:
 
 		std::unique_lock<std::mutex> lock(state.provider_control_mutex);
 		while (true) {
-			if (ClientInterrupted(client_context)) {
-				throw InterruptException();
-			}
+			ThrowIfClientInterrupted(client_context);
 			auto now = std::chrono::steady_clock::now();
 			PruneProviderTokenWindow(state, now);
 			auto concurrency_ready =
@@ -3015,9 +3068,7 @@ void SleepBeforeRetry(long retry_delay_ms, ClientContext *client_context) {
 	}
 	auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(retry_delay_ms);
 	while (std::chrono::steady_clock::now() < deadline) {
-		if (ClientInterrupted(client_context)) {
-			throw InterruptException();
-		}
+		ThrowIfClientInterrupted(client_context);
 		auto remaining =
 		    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
 		std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(remaining, std::chrono::milliseconds(100)));
@@ -3089,13 +3140,13 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		}
 		if (attempt < retry_count && (result != CURLE_OK || IsRetryableHttpStatus(status))) {
 			if (result == CURLE_ABORTED_BY_CALLBACK && ClientInterrupted(client_context)) {
-				throw InterruptException();
+				ThrowIfClientInterrupted(client_context);
 			}
 			SleepBeforeRetry(RetryDelayMs(retry_backoff_ms, attempt, header_capture.retry_after_ms), client_context);
 			continue;
 		}
 		if (result == CURLE_ABORTED_BY_CALLBACK && ClientInterrupted(client_context)) {
-			throw InterruptException();
+			ThrowIfClientInterrupted(client_context);
 		}
 		if (result != CURLE_OK) {
 			throw IOException("AI provider request failed: %s", curl_easy_strerror(result));
@@ -3174,7 +3225,7 @@ ProviderRuntimeState::~ProviderRuntimeState() {
 
 HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload,
                               const std::vector<std::string> &headers, const CompletionOptions &options,
-                              int64_t estimated_tokens) {
+                              int64_t estimated_tokens, int64_t &retries_out) {
 	auto retry_count = RetryCount(options);
 	auto retry_backoff_ms = RetryBackoffMs(options);
 	auto timeout_seconds = TimeoutSeconds(options);
@@ -3190,6 +3241,9 @@ HttpResponse ProviderHttpPost(const std::string &url, const std::string &payload
 					std::lock_guard<std::mutex> lock(runtime.usage_mutex);
 					runtime.usage_totals.request_attempts++;
 				}
+				// Preserve the owner's attempted retries even when HttpPost throws instead of
+				// returning a response. Cache waiters do not make these attempts.
+				retries_out = attempt;
 				response = HttpPost(url, payload, headers, timeout_seconds, false, 0, retry_backoff_ms,
 				                    options.client_context, connect_timeout_seconds);
 			}
@@ -3296,8 +3350,8 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"ollama", "ollama_chat", "llama3.2", "nomic-embed-text", "http://localhost:11434", "OLLAMA_API_KEY", false},
 	    {"openai", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "https://api.openai.com/v1",
 	     "OPENAI_API_KEY", true},
-	    {"azure", "openai_chat", "gpt-4o", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
-	    {"anthropic", "anthropic_messages", "claude-haiku-4-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
+	    {"azure", "openai_chat", "gpt-5.6-luna", "text-embedding-3-small", "", "AZURE_OPENAI_API_KEY", true},
+	    {"anthropic", "anthropic_messages", "claude-haiku-5-5", "", "https://api.anthropic.com/v1", "ANTHROPIC_API_KEY",
 	     true},
 	    {"bedrock", "openai_chat", "openai.gpt-oss-120b", "", "", "AWS_BEDROCK_API_KEY", true},
 	    {"cerebras", "openai_chat", "gpt-oss-120b", "", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", true},
@@ -3310,22 +3364,22 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	    {"databricks", "openai_chat", "databricks-gpt-oss-120b", "", "", "DATABRICKS_TOKEN", true},
 	    {"deepinfra", "openai_chat", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "BAAI/bge-large-en-v1.5",
 	     "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY", true},
-	    {"deepseek", "openai_chat", "deepseek-v4-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
-	    {"fireworks", "openai_chat", "accounts/fireworks/models/gpt-oss-20b", "nomic-ai/nomic-embed-text-v1.5",
+	    {"deepseek", "openai_chat", "deepseek-flash", "", "https://api.deepseek.com", "DEEPSEEK_API_KEY", true},
+	    {"fireworks", "openai_chat", "accounts/fireworks/models/gpt-oss-120b", "nomic-ai/nomic-embed-text-v1.5",
 	     "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", true},
-	    {"gemini", "openai_chat", "gemini-3.7-flash", "gemini-embedding-2",
+	    {"gemini", "openai_chat", "gemini-3.8-flash", "gemini-embedding-2",
 	     "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", true},
 	    {"groq", "openai_chat", "openai/gpt-oss-20b", "", "https://api.groq.com/openai/v1", "GROQ_API_KEY", true},
 	    {"huggingface", "openai_chat", "openai/gpt-oss-120b", "", "https://router.huggingface.co/v1", "HF_TOKEN", true},
 	    {"hunyuan", "openai_chat", "hy3", "", "https://tokenhub.tencentmaas.com/v1", "HUNYUAN_API_KEY", true},
 	    {"llamacpp", "openai_chat", "default", "default", "http://localhost:8080/v1", "LLAMACPP_API_KEY", false},
 	    {"minimax", "openai_chat", "MiniMax-M2.7", "", "https://api.minimax.io/v1", "MINIMAX_API_KEY", true},
-	    {"mimo", "openai_chat", "mimo-v2.5-pro", "", "https://api.xiaomimimo.com/v1", "MIMO_API_KEY", true},
+	    {"mimo", "openai_chat", "mimo-v2.6-flash", "", "https://api.xiaomimimo.com/v1", "MIMO_API_KEY", true},
 	    {"mistral", "openai_chat", "mistral-small-latest", "mistral-embed", "https://api.mistral.ai/v1",
 	     "MISTRAL_API_KEY", true},
 	    {"moonshot", "openai_chat", "kimi-k3", "", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", true},
-	    {"nebius", "openai_chat", "meta-llama/Meta-Llama-3.1-70B-Instruct", "",
-	     "https://api.tokenfactory.nebius.com/v1", "NEBIUS_API_KEY", true},
+	    {"nebius", "openai_chat", "Qwen/Qwen3-30B-A3B-Instruct-2507", "", "https://api.tokenfactory.nebius.com/v1",
+	     "NEBIUS_API_KEY", true},
 	    {"nvidia", "openai_chat", "nvidia/nemotron-3-super-120b-a12b", "", "https://integrate.api.nvidia.com/v1",
 	     "NVIDIA_API_KEY", true},
 	    {"openai_privacy_filter", "privacy_filter", "openai/privacy-filter", "", "http://localhost:8080",
@@ -3336,8 +3390,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", true},
 	    {"perplexity", "openai_chat", "sonar", "", "https://api.perplexity.ai", "PERPLEXITY_API_KEY", true},
 	    {"poe", "openai_chat", "GPT-5.4", "", "https://api.poe.com/v1", "POE_API_KEY", true},
-	    {"qianfan", "openai_chat", "ernie-4.5-turbo-128k", "", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY",
-	     true},
+	    {"qianfan", "openai_chat", "ernie-5.1", "", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY", true},
 	    {"sambanova", "openai_chat", "Meta-Llama-3.3-70B-Instruct", "", "https://api.sambanova.ai/v1",
 	     "SAMBANOVA_API_KEY", true},
 	    {"siliconflow", "openai_chat", "Qwen/Qwen2.5-72B-Instruct", "", "https://api.siliconflow.com/v1",
@@ -3348,7 +3401,7 @@ const std::vector<ProviderSpec> &ProviderCatalog() {
 	     "intfloat/multilingual-e5-large-instruct", "https://api.together.xyz/v1", "TOGETHER_API_KEY", true},
 	    {"vercel", "openai_chat", "openai/gpt-4o-mini", "openai/text-embedding-3-small",
 	     "https://ai-gateway.vercel.sh/v1", "AI_GATEWAY_API_KEY", true},
-	    {"vertex", "openai_chat", "google/gemini-2.5-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
+	    {"vertex", "openai_chat", "google/gemini-3.8-flash", "", "", "VERTEX_AI_ACCESS_TOKEN", true},
 	    {"volcengine", "openai_chat", "doubao-seed-2-1-pro-260628", "", "https://ark.cn-beijing.volces.com/api/v3",
 	     "VOLCENGINE_API_KEY", true},
 	    {"xai", "openai_chat", "grok-4.6", "", "https://api.x.ai/v1", "XAI_API_KEY", true},
@@ -4004,7 +4057,7 @@ void ApplyDecisionProtocol(ProviderConfig &config, const CompletionOptions &opti
 	}
 	if (config.provider == "perplexity") {
 		config.protocol = "perplexity_decisions";
-		config.model = DecisionModel(config, options, "pplx-decider-v1-27b");
+		config.model = DecisionModel(config, options, "pplx-decider-v1.1-27b");
 		return;
 	}
 	if (config.provider == "cloudflare") {
@@ -4200,8 +4253,16 @@ std::string LlamaCppResponseFormatJson(const CompletionOptions &options) {
 }
 
 bool GeminiOmitsSamplingParameters(const ProviderConfig &config) {
-	return config.provider == "gemini" && (config.model == "gemini-3.7-flash" || config.model == "gemini-3.6-flash" ||
-	                                       config.model == "gemini-3.5-flash-lite");
+	std::string model;
+	if (config.provider == "gemini") {
+		model = config.model;
+	} else if (config.provider == "vertex" && StartsWith(config.model, "google/")) {
+		model = config.model.substr(7);
+	} else {
+		return false;
+	}
+	return model == "gemini-3.8-flash" || model == "gemini-3.7-flash" || model == "gemini-3.6-flash" ||
+	       model == "gemini-3.5-flash-lite";
 }
 
 bool OpenAIOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
@@ -4224,7 +4285,8 @@ bool OpenAIOmitsSamplingParameters(const ProviderConfig &config, const Completio
 bool AnthropicOmitsSamplingParameters(const ProviderConfig &config) {
 	return config.protocol == "anthropic_messages" &&
 	       (config.model == "claude-fable-5-1" || config.model == "claude-opus-5-5" ||
-	        config.model == "claude-sonnet-5-5" || config.model == "claude-sonnet-5");
+	        config.model == "claude-sonnet-5-5" || config.model == "claude-haiku-5-5" ||
+	        config.model == "claude-sonnet-5");
 }
 
 bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
@@ -4232,7 +4294,9 @@ bool DatabricksOmitsSamplingParameters(const ProviderConfig &config) {
 		return false;
 	}
 	auto model = LowerAscii(config.model);
-	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5");
+	return EndsWith(model, "claude-sonnet-5") || EndsWith(model, "claude-opus-5") ||
+	       EndsWith(model, "claude-sonnet-5-5") || EndsWith(model, "claude-opus-5-5") ||
+	       EndsWith(model, "claude-haiku-5-5") || EndsWith(model, "claude-fable-5-1");
 }
 
 bool ProviderOmitsSamplingParameters(const ProviderConfig &config, const CompletionOptions &options) {
@@ -4933,7 +4997,8 @@ bool ValidateJevResponse(duckdb_yyjson::yyjson_val *root) {
 				return false;
 			}
 			double confidence;
-			if (YyjsonObjectGet(answer, "confidence") &&
+			auto confidence_value = YyjsonObjectGet(answer, "confidence");
+			if (confidence_value && !duckdb_yyjson::yyjson_is_null(confidence_value) &&
 			    (!YyjsonDirectDouble(answer, "confidence", confidence) || !std::isfinite(confidence) ||
 			     confidence < 0 || confidence > 1)) {
 				return false;
@@ -5127,7 +5192,7 @@ double EstimateCompletionCostUsd(const ProviderConfig &config, const CompletionO
 	auto cached_input_multiplier = config.protocol == "anthropic_messages" ? 0.1 : 0.5;
 	if (config.provider == "anthropic" && model == "claude-fable-5-1") {
 		cached_input_multiplier = 0.025;
-	} else if (config.provider == "anthropic" && model == "claude-opus-5-5") {
+	} else if (config.provider == "anthropic" && (model == "claude-opus-5-5" || model == "claude-sonnet-5-5")) {
 		cached_input_multiplier = 0.05;
 	} else if (config.provider == "openai" && model == "gpt-6.1-sol") {
 		cached_input_multiplier = 0.05;
@@ -5376,6 +5441,9 @@ void SubmitUsageLog(const CompletionOptions &options, const std::string &log_end
 		job.retry_count = RetryCount(options);
 		job.retry_backoff_ms = RetryBackoffMs(options);
 		EnqueueUsageLog(RuntimeState(options), std::move(job));
+	} catch (InterruptException &) {
+		// A strict log POST runs inside the query, so a cancellation or timeout during it stops the query.
+		throw;
 	} catch (std::exception &ex) {
 		if (log_strict) {
 			throw IOException("%s: %s", error_prefix, ex.what());
@@ -5657,7 +5725,8 @@ void ValidateCompletionRequestLimits(const std::string &prompt, const std::strin
 	}
 	if (capabilities.context_window_tokens > 0) {
 		auto output_tokens = options.has_max_tokens ? options.max_tokens : DEFAULT_COMPLETION_OUTPUT_TOKEN_ESTIMATE;
-		if (input_tokens + output_tokens > capabilities.context_window_tokens) {
+		if (output_tokens > capabilities.context_window_tokens ||
+		    input_tokens > capabilities.context_window_tokens - output_tokens) {
 			throw InvalidInputException(
 			    "AI completion estimated input plus output exceeds external model context window");
 		}
@@ -5678,9 +5747,10 @@ void ValidateCompletionRequestLimits(const std::string &prompt, const std::strin
 HttpResponse FetchProviderResponse(const std::string &operation, const ProviderConfig &config,
                                    const std::string &endpoint, const std::string &payload,
                                    const CompletionOptions &options, int64_t estimated_tokens,
-                                   std::string &cache_key_out) {
+                                   std::string &cache_key_out, int64_t &retries_out) {
 	if (!ResponseCacheEnabled(options)) {
-		return ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens);
+		return ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens,
+		                        retries_out);
 	}
 	auto &runtime_state = RuntimeState(options);
 	auto cache_key = ResponseCacheKey(operation, config, endpoint, payload);
@@ -5695,8 +5765,8 @@ HttpResponse FetchProviderResponse(const std::string &operation, const ProviderC
 		return WaitForPendingCachedResponse(runtime_state, cache_key, pending, options);
 	}
 	try {
-		auto fresh_response =
-		    ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens);
+		auto fresh_response = ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options,
+		                                       estimated_tokens, retries_out);
 		if (fresh_response.status >= 200 && fresh_response.status < 300) {
 			StoreCachedResponse(runtime_state, cache_key, fresh_response, options);
 		}
@@ -5738,13 +5808,14 @@ std::vector<EmbeddingResult> EmbedBatchRequest(const ProviderConfig &config, con
 		total_tokens += ProfileTokenEstimate(input, capabilities.token_estimate_multiplier);
 	}
 	HttpResponse response;
+	int64_t retries = 0;
 	try {
-		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, total_tokens);
+		response = ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, total_tokens, retries);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
 		for (auto &input : inputs) {
-			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), 0);
+			RecordFailedEmbeddingUsageEvent(config, input, options, 0, UsageErrorMessage(ex), retries);
 		}
 		throw;
 	}
@@ -6020,14 +6091,15 @@ CompletionResult Complete(const std::string &prompt, const CompletionOptions &op
 	}
 	HttpResponse response;
 	std::string cache_key;
+	int64_t retries = 0;
 	try {
 		response = FetchProviderResponse("completion", config, endpoint, payload, request_options,
-		                                 EstimatedCompletionTokens(prompt, request_options), cache_key);
+		                                 EstimatedCompletionTokens(prompt, request_options), cache_key, retries);
 	} catch (InterruptException &) {
 		// Query cancellation is not a provider failure; keep it out of usage error events.
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), 0);
+		RecordFailedUsageEvent(config, prompt, request_options, 0, UsageErrorMessage(ex), retries);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -6086,13 +6158,14 @@ CompletionResult Redact(const std::string &text, const CompletionOptions &option
 	}
 	HttpResponse response;
 	std::string cache_key;
+	int64_t retries = 0;
 	try {
 		response = FetchProviderResponse("redaction", config, endpoint, payload, request_options,
-		                                 EstimateTokenCount(text), cache_key);
+		                                 EstimateTokenCount(text), cache_key, retries);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), 0);
+		RecordFailedUsageEvent(config, text, request_options, 0, UsageErrorMessage(ex), retries);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -6162,14 +6235,15 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	EnforceAllowedHost(endpoint, request_options);
 	HttpResponse response;
 	std::string cache_key;
+	int64_t retries = 0;
 	try {
-		response =
-		    FetchProviderResponse("embedding", config, endpoint, payload, request_options,
-		                          ProfileTokenEstimate(input, capabilities.token_estimate_multiplier), cache_key);
+		response = FetchProviderResponse("embedding", config, endpoint, payload, request_options,
+		                                 ProfileTokenEstimate(input, capabilities.token_estimate_multiplier), cache_key,
+		                                 retries);
 	} catch (InterruptException &) {
 		throw;
 	} catch (std::exception &ex) {
-		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), 0);
+		RecordFailedEmbeddingUsageEvent(config, input, request_options, 0, UsageErrorMessage(ex), retries);
 		throw;
 	}
 	if (response.status < 200 || response.status >= 300) {
@@ -6627,7 +6701,13 @@ bool ValidateJsonAgainstSchema(const std::string &input, const std::string &sche
 		error = "schema must be a JSON object";
 		return false;
 	}
-	return ValidateJsonValueAgainstSchema(value, schema_value, "$", error);
+	SchemaValidationContext context {schema_value, {}, {}};
+	auto valid = ValidateJsonValueAgainstSchema(value, schema_value, "$", error, context);
+	if (!context.schema_error.empty()) {
+		error = context.schema_error;
+		return false;
+	}
+	return valid;
 }
 
 } // namespace duckdb_ai
