@@ -110,6 +110,8 @@ def check_quack(duckdb):
     quack_port = free_port()
     # Only the server knows the key.
     server_script = f"""
+        INSTALL httpfs;
+        LOAD httpfs;
         INSTALL quack;
         LOAD quack;
         CREATE SECRET owner (TYPE duckdb_ai, AI_PROVIDER 'openai', API_KEY '{OWNER_KEY}',
@@ -130,7 +132,8 @@ def check_quack(duckdb):
         wait_for_port(quack_port, server)
 
         def client(statement):
-            connect = f"ATTACH 'quack:localhost:{quack_port}' AS srv (TOKEN '{TOKEN}'); CONNECT srv;"
+            # The server step installed httpfs; Quack's HTTP client and crypto come from it.
+            connect = f"LOAD httpfs; ATTACH 'quack:localhost:{quack_port}' AS srv (TOKEN '{TOKEN}'); CONNECT srv;"
             return run_sql(duckdb, connect + statement, client_env)
 
         # The call runs on the server with the server's secret; the client holds no key.
