@@ -80,6 +80,7 @@ def run(duckdb_path):
     base_url = f"http://127.0.0.1:{server.server_port}"
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "regression-key"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     setup = f"""
         SET threads = 1;
         SET duckdb_ai_provider = 'openai';

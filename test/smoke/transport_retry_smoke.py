@@ -157,6 +157,7 @@ def _query(server, duckdb, kind, actions, cache=False, retry_count=2, second_cal
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "transport-retry-dummy"
     env["OPENAI_PRIVACY_FILTER_API_KEY"] = "transport-retry-privacy-dummy"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     call = _call_sql(kind, server.base_url, cache, retry_count)
     projection = _result_projection(kind)
     sql = "SELECT * FROM ai_clear_usage();"
@@ -201,6 +202,7 @@ def _coalesced_query(server, duckdb):
     )
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "transport-retry-dummy"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     options = _sql_options(server.base_url, "openai", "retry-model", True, 2)
     sql = (
         "SET threads=4; SELECT * FROM ai_clear_usage(); "

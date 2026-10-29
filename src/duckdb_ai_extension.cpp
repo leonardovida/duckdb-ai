@@ -78,7 +78,7 @@ std::atomic<uint64_t> NEXT_QUERY_ID {1}; // NOLINT(cppcoreguidelines-avoid-non-c
 // ABI-specific (std::string layout differs per standard library), so only enforce it on the
 // toolchains where the expected values are known instead of breaking every other build.
 #if defined(__APPLE__)
-static_assert(sizeof(duckdb_ai::CompletionOptions) == 736 || sizeof(duckdb_ai::CompletionOptions) == 856,
+static_assert(sizeof(duckdb_ai::CompletionOptions) == 760 || sizeof(duckdb_ai::CompletionOptions) == 880,
               "Update CompletionOptionsEqual when CompletionOptions fields change");
 #endif
 
@@ -89,11 +89,12 @@ bool CompletionOptionsEqual(const duckdb_ai::CompletionOptions &left, const duck
 	       left.explicit_model == right.explicit_model && left.explicit_provider == right.explicit_provider &&
 	       left.explicit_base_url == right.explicit_base_url && left.system_prompt == right.system_prompt &&
 	       left.base_url == right.base_url && left.api_key == right.api_key &&
-	       left.has_temperature == right.has_temperature && left.temperature == right.temperature &&
-	       left.has_max_tokens == right.has_max_tokens && left.max_tokens == right.max_tokens &&
-	       left.has_timeout_seconds == right.has_timeout_seconds && left.timeout_seconds == right.timeout_seconds &&
-	       left.has_retry_count == right.has_retry_count && left.retry_count == right.retry_count &&
-	       left.has_retry_backoff_ms == right.has_retry_backoff_ms && left.retry_backoff_ms == right.retry_backoff_ms &&
+	       left.api_key_base_url == right.api_key_base_url && left.has_temperature == right.has_temperature &&
+	       left.temperature == right.temperature && left.has_max_tokens == right.has_max_tokens &&
+	       left.max_tokens == right.max_tokens && left.has_timeout_seconds == right.has_timeout_seconds &&
+	       left.timeout_seconds == right.timeout_seconds && left.has_retry_count == right.has_retry_count &&
+	       left.retry_count == right.retry_count && left.has_retry_backoff_ms == right.has_retry_backoff_ms &&
+	       left.retry_backoff_ms == right.retry_backoff_ms &&
 	       left.has_max_concurrent_requests == right.has_max_concurrent_requests &&
 	       left.max_concurrent_requests == right.max_concurrent_requests &&
 	       left.has_min_request_interval_ms == right.has_min_request_interval_ms &&
@@ -1686,8 +1687,9 @@ void ApplyAiProviderSecret(ClientContext &context, duckdb_ai::CompletionOptions 
 	if (options.base_url.empty()) {
 		TryReadSecretString(secret, "base_url", options.base_url);
 	}
-	if (options.api_key.empty()) {
-		TryReadSecretString(secret, "api_key", options.api_key);
+	if (options.api_key.empty() && TryReadSecretString(secret, "api_key", options.api_key)) {
+		options.api_key_base_url.clear();
+		TryReadSecretString(secret, "base_url", options.api_key_base_url);
 	}
 }
 

@@ -33,6 +33,7 @@ def run(duckdb):
     thread.start()
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "volatile-offset-dummy"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     projection = f"""
         SELECT i, ai_complete(i::VARCHAR,
             provider := 'openai', model := 'volatile-offset-mock',

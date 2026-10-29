@@ -33,6 +33,8 @@ def run(duckdb, library=None):
     endpoint = f"http://127.0.0.1:{server.server_port}"
     env = {k: v for k, v in os.environ.items() if not k.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "reliability-dummy"
+    # Environment API keys only go to their provider's host or to operator-allowed hosts.
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     setup = f"SET threads=4; SET duckdb_ai_provider='openai'; SET duckdb_ai_model='reliability'; SET duckdb_ai_task_model='reliability'; SET duckdb_ai_embedding_model='reliability'; SET duckdb_ai_base_url='{endpoint}';"
     checks = 0
 

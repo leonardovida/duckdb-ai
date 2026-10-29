@@ -50,6 +50,8 @@ struct CompletionOptions {
 	std::string system_prompt;
 	std::string base_url;
 	std::string api_key;
+	//! base_url stored in the secret that supplied api_key; the key is only sent to that host.
+	std::string api_key_base_url;
 	bool has_temperature = false;
 	double temperature = 0;
 	bool has_max_tokens = false;

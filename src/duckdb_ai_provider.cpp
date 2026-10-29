@@ -5,6 +5,8 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "re2/re2.h"
 #include "yyjson.hpp"
@@ -530,18 +532,45 @@ std::string AllowedHosts(const CompletionOptions &options) {
 	return GetEnv("DUCKDB_AI_ALLOWED_HOSTS");
 }
 
-void EnforceAllowedHost(const std::string &url, const CompletionOptions &options) {
-	auto host = UrlHost(url);
-	auto allowed_hosts = SplitCommaList(AllowedHosts(options));
-	if (allowed_hosts.empty()) {
-		return;
+//! An empty list allows every host.
+bool HostAllowedByList(const std::string &host, const std::string &allowed_hosts) {
+	auto patterns = SplitCommaList(allowed_hosts);
+	if (patterns.empty()) {
+		return true;
 	}
-	for (auto &allowed_host : allowed_hosts) {
-		if (HostMatchesAllowedPattern(host, allowed_host)) {
-			return;
+	for (auto &pattern : patterns) {
+		if (HostMatchesAllowedPattern(host, pattern)) {
+			return true;
 		}
 	}
-	throw InvalidInputException("AI provider host \"%s\" is not allowed by duckdb_ai_allowed_hosts", host);
+	return false;
+}
+
+void EnforceExternalAccess(const std::string &url, const CompletionOptions &options) {
+	if (!options.client_context) {
+		return;
+	}
+	auto &config = DBConfig::GetConfig(*options.client_context);
+	if (Settings::Get<EnableExternalAccessSetting>(config) || config.CanAccessFile(url, FileType::FILE_TYPE_REGULAR)) {
+		return;
+	}
+	throw PermissionException("AI provider request to \"%s\" is not allowed because enable_external_access is "
+	                          "false. Add the endpoint to allowed_directories or allowed_paths to permit it.",
+	                          url);
+}
+
+void EnforceAllowedHost(const std::string &url, const CompletionOptions &options) {
+	auto host = UrlHost(url);
+	if (!HostAllowedByList(host, AllowedHosts(options))) {
+		throw InvalidInputException("AI provider host \"%s\" is not allowed by duckdb_ai_allowed_hosts", host);
+	}
+	// The environment allowlist belongs to whoever started the process. A session can narrow it with
+	// duckdb_ai_allowed_hosts but never widen it, so it holds for remote clients of a shared server.
+	if (!HostAllowedByList(host, GetEnv("DUCKDB_AI_ALLOWED_HOSTS"))) {
+		throw InvalidInputException(
+		    "AI provider host \"%s\" is not allowed by the DUCKDB_AI_ALLOWED_HOSTS environment variable", host);
+	}
+	EnforceExternalAccess(url, options);
 }
 
 void EnsureCurlGlobalInit() {
@@ -5736,6 +5765,47 @@ void ValidateCompletionRequestLimits(const std::string &prompt, const std::strin
 	}
 }
 
+std::string ConfiguredHost(const std::string &provider, const std::string &base_url) {
+	if (base_url.empty()) {
+		return "";
+	}
+	try {
+		auto normalized = NormalizeBaseUrlForProvider(provider, base_url);
+		return normalized.empty() ? "" : UrlHost(normalized);
+	} catch (InvalidInputException &) {
+		// A malformed configured URL trusts no host; the request URL check reports the real error.
+		return "";
+	}
+}
+
+//! Stored credentials only go to the host they were configured for. Otherwise any session that can
+//! set base_url, such as a remote client of a Quack server, could send the owner's API key elsewhere.
+void EnforceCredentialHost(const ProviderConfig &config, const std::string &endpoint,
+                           const CompletionOptions &options) {
+	if (config.api_key.empty()) {
+		return;
+	}
+	auto host = UrlHost(endpoint);
+	// Environment base URLs and the provider's built-in endpoint are set by the process owner.
+	auto credential_host = options.api_key.empty() || options.api_key_base_url.empty()
+	                           ? ConfiguredHost(config.provider, ResolveBaseUrl(ProviderDefaults(config.provider)))
+	                           : ConfiguredHost(config.provider, options.api_key_base_url);
+	if (host == credential_host) {
+		return;
+	}
+	auto operator_hosts = GetEnv("DUCKDB_AI_ALLOWED_HOSTS");
+	if (!operator_hosts.empty() && HostAllowedByList(host, operator_hosts)) {
+		return;
+	}
+	auto source = options.api_key.empty() ? std::string("the API key from the environment")
+	                                      : std::string("the API key from the duckdb_ai secret");
+	throw InvalidInputException(
+	    "AI provider host \"%s\" is not the host %s is configured for (%s). Store base_url in the duckdb_ai "
+	    "secret, set it through the provider's base URL environment variable, or add the host to the "
+	    "DUCKDB_AI_ALLOWED_HOSTS environment variable.",
+	    host, source, credential_host.empty() ? std::string("none") : credential_host);
+}
+
 //! Fetch a provider response, going through the response cache and in-flight request coalescing
 //! when caching is enabled. Sets cache_key_out whenever the response cache is consulted so
 //! callers can evict entries that later fail response parsing.
@@ -5743,6 +5813,7 @@ HttpResponse FetchProviderResponse(const std::string &operation, const ProviderC
                                    const std::string &endpoint, const std::string &payload,
                                    const CompletionOptions &options, int64_t estimated_tokens,
                                    std::string &cache_key_out, int64_t &retries_out) {
+	EnforceCredentialHost(config, endpoint, options);
 	if (!ResponseCacheEnabled(options)) {
 		return ProviderHttpPost(endpoint, payload, RequestHeaders(config, options), options, estimated_tokens,
 		                        retries_out);

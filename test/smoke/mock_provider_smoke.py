@@ -10,6 +10,10 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
+# Environment API keys are only sent to their provider's host or to operator-allowed hosts,
+# so the mock servers on loopback have to be allowed explicitly.
+os.environ["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1,localhost"
+
 
 def message_text(message):
     content = message["content"]
@@ -2427,6 +2431,7 @@ def run_duckdb_embedding_validation(duckdb_path: Path):
     requests = []
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "test-key"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1,localhost"
 
     class Handler(MockProviderHandler):
         def do_POST(self):

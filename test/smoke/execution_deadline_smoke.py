@@ -65,6 +65,8 @@ def run_until_deadline(duckdb, server, mode, options, function="ai_complete", se
         if not key.startswith("DUCKDB_AI_") and key not in ("AI_AGENT", "CLAUDECODE")
     }
     env["OPENAI_API_KEY"] = "deadline-dummy"
+    # Environment API keys only go to their provider's host or to operator-allowed hosts.
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     sql = (
         f"SET max_execution_time = 1000; {setup}"
         f"SELECT {function}('deadline input ' || i, provider := 'openai', model := 'deadline-model', "
