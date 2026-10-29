@@ -1890,10 +1890,6 @@ struct ProviderEmbeddingJob : public ProviderJobBase {
 struct ProviderDoubleJob : public ProviderJobBase {
 	std::string left;
 	std::string right;
-	bool has_left_embedding = false;
-	bool has_right_embedding = false;
-	std::vector<double> left_embedding;
-	std::vector<double> right_embedding;
 	double output = 0;
 };
 
@@ -1981,7 +1977,7 @@ bool SimilarityCacheOptionsEqual(const SimilarityOptionCache &cached, const duck
 
 struct SimilarityQueryCache {
 	std::mutex mutex;
-	std::vector<SimilarityOptionCache> option_groups;
+	std::list<SimilarityOptionCache> option_groups;
 	size_t estimated_bytes = 0;
 };
 
@@ -2161,6 +2157,82 @@ void RunProviderJobs(std::vector<JOB> &jobs, CALLBACK callback) {
 	if (interrupt) {
 		std::rethrow_exception(interrupt);
 	}
+}
+
+//! Runs task(0..task_count) on the provider executor, whose long-lived threads keep their curl handles. The calling
+//! thread also takes tasks and only waits for tasks that are running, so a nested call never waits on queued workers.
+void RunProviderTasks(const duckdb_ai::CompletionOptions &options, idx_t task_count,
+                      const std::function<void(idx_t)> &task) {
+	auto configured_workers = duckdb_ai::EffectiveMaxConcurrentRequests(options);
+	idx_t worker_count;
+	if (configured_workers > 0) {
+		worker_count = static_cast<idx_t>(std::min<int64_t>(configured_workers, MAX_PROVIDER_CHUNK_WORKERS));
+	} else {
+		auto hardware_workers = std::thread::hardware_concurrency();
+		worker_count = std::min<idx_t>(hardware_workers == 0 ? 4 : static_cast<idx_t>(hardware_workers), 8);
+	}
+	worker_count = std::min<idx_t>(worker_count, task_count);
+	if (worker_count <= 1) {
+		for (idx_t i = 0; i < task_count; i++) {
+			task(i);
+		}
+		return;
+	}
+
+	struct TaskState {
+		std::mutex mutex;
+		std::condition_variable cv;
+		idx_t next_task = 0;
+		idx_t running = 0;
+		std::exception_ptr error;
+	};
+	auto state = std::make_shared<TaskState>();
+	// Queued workers can start after this function returns; they then find no task left and never touch task.
+	auto task_ptr = &task;
+	auto take_tasks = [state, task_count, task_ptr]() {
+		while (true) {
+			idx_t task_index;
+			{
+				std::lock_guard<std::mutex> lock(state->mutex);
+				if (state->error || state->next_task >= task_count) {
+					return;
+				}
+				task_index = state->next_task++;
+				state->running++;
+			}
+			std::exception_ptr error;
+			try {
+				(*task_ptr)(task_index);
+			} catch (...) {
+				error = std::current_exception();
+			}
+			{
+				std::lock_guard<std::mutex> lock(state->mutex);
+				state->running--;
+				if (error && !state->error) {
+					state->error = error;
+				}
+			}
+			state->cv.notify_all();
+		}
+	};
+	auto &executor = ProviderExecutor(options);
+	executor.EnsureWorkers(worker_count - 1);
+	for (idx_t worker = 1; worker < worker_count; worker++) {
+		executor.Submit(take_tasks);
+	}
+	take_tasks();
+	std::unique_lock<std::mutex> lock(state->mutex);
+	state->cv.wait(lock, [&]() { return state->running == 0; });
+	if (state->error) {
+		std::rethrow_exception(state->error);
+	}
+}
+
+duckdb_ai::TaskRunner ProviderTaskRunner(const duckdb_ai::CompletionOptions &options) {
+	return [options](idx_t task_count, const std::function<void(idx_t)> &task) {
+		RunProviderTasks(options, task_count, task);
+	};
 }
 
 bool ReadRuntimeOptions(ClientContext &context, const duckdb_ai::CompletionOptions &base_options, bool has_model_arg,
@@ -3180,17 +3252,19 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 }
 
-void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<ProviderDoubleJob> &jobs) {
+//! Embeds every distinct input once per option set and scores each job. The query cache lock covers only lookups and
+//! inserts, so threads scanning other chunks keep sending their embedding requests while this one waits.
+void ComputeSimilarityScores(ClientContext &context, std::vector<ProviderDoubleJob> &jobs) {
 	auto query_cache = SimilarityCache(context);
 	std::vector<bool> grouped(jobs.size(), false);
 	for (idx_t group_start = 0; group_start < jobs.size(); group_start++) {
 		if (grouped[group_start] || jobs[group_start].exception) {
 			continue;
 		}
+		auto &group_options = jobs[group_start].options;
 		std::vector<idx_t> group_rows;
 		for (idx_t row = group_start; row < jobs.size(); row++) {
-			if (!grouped[row] && !jobs[row].exception &&
-			    CompletionOptionsEqual(jobs[group_start].options, jobs[row].options)) {
+			if (!grouped[row] && !jobs[row].exception && CompletionOptionsEqual(group_options, jobs[row].options)) {
 				grouped[row] = true;
 				group_rows.push_back(row);
 			}
@@ -3198,73 +3272,96 @@ void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<Provider
 
 		std::vector<std::string> unique_inputs;
 		std::unordered_map<std::string, idx_t> input_indexes;
-		for (auto row : group_rows) {
-			for (auto *input : {&jobs[row].left, &jobs[row].right}) {
-				if (input_indexes.find(*input) == input_indexes.end()) {
-					input_indexes[*input] = unique_inputs.size();
-					unique_inputs.push_back(*input);
-				}
+		std::vector<std::pair<idx_t, idx_t>> row_inputs;
+		row_inputs.reserve(group_rows.size());
+		auto input_index = [&](const std::string &input) {
+			auto inserted = input_indexes.emplace(input, unique_inputs.size());
+			if (inserted.second) {
+				unique_inputs.push_back(input);
 			}
+			return inserted.first->second;
+		};
+		for (auto row : group_rows) {
+			auto left = input_index(jobs[row].left);
+			row_inputs.emplace_back(left, input_index(jobs[row].right));
 		}
 
 		try {
-			std::unique_lock<std::mutex> cache_lock(query_cache->mutex);
-			SimilarityOptionCache *option_cache = nullptr;
-			for (auto &candidate : query_cache->option_groups) {
-				if (SimilarityCacheOptionsEqual(candidate, jobs[group_start].options)) {
-					option_cache = &candidate;
-					break;
-				}
-			}
-			if (!option_cache) {
-				SimilarityOptionCache candidate;
-				candidate.options = jobs[group_start].options;
-				candidate.credential_fingerprint = std::hash<std::string> {}(candidate.options.api_key);
-				candidate.options.api_key.clear();
-				query_cache->option_groups.push_back(std::move(candidate));
-				option_cache = &query_cache->option_groups.back();
-			}
-
+			// Cached embeddings never move: option groups live in a list and map nodes keep their address.
 			std::vector<const std::vector<double> *> resolved_embeddings(unique_inputs.size(), nullptr);
 			std::vector<std::string> missing_inputs;
 			std::vector<idx_t> missing_indexes;
-			for (idx_t input_index = 0; input_index < unique_inputs.size(); input_index++) {
-				auto cached = option_cache->embeddings.find(unique_inputs[input_index]);
-				if (cached != option_cache->embeddings.end()) {
-					resolved_embeddings[input_index] = &cached->second;
-					duckdb_ai::RecordEmbeddingCacheHit(unique_inputs[input_index],
-					                                   NumericCast<int64_t>(cached->second.size()),
-					                                   jobs[group_start].options);
-				} else {
-					missing_indexes.push_back(input_index);
-					missing_inputs.push_back(unique_inputs[input_index]);
+			SimilarityOptionCache *option_cache = nullptr;
+			{
+				std::lock_guard<std::mutex> cache_lock(query_cache->mutex);
+				for (auto &candidate : query_cache->option_groups) {
+					if (SimilarityCacheOptionsEqual(candidate, group_options)) {
+						option_cache = &candidate;
+						break;
+					}
+				}
+				if (!option_cache) {
+					SimilarityOptionCache candidate;
+					candidate.options = group_options;
+					candidate.credential_fingerprint = std::hash<std::string> {}(candidate.options.api_key);
+					candidate.options.api_key.clear();
+					query_cache->option_groups.push_back(std::move(candidate));
+					option_cache = &query_cache->option_groups.back();
+				}
+				for (idx_t i = 0; i < unique_inputs.size(); i++) {
+					auto cached = option_cache->embeddings.find(unique_inputs[i]);
+					if (cached != option_cache->embeddings.end()) {
+						resolved_embeddings[i] = &cached->second;
+					} else {
+						missing_indexes.push_back(i);
+						missing_inputs.push_back(unique_inputs[i]);
+					}
+				}
+			}
+			for (idx_t i = 0; i < unique_inputs.size(); i++) {
+				if (resolved_embeddings[i]) {
+					duckdb_ai::RecordEmbeddingCacheHit(
+					    unique_inputs[i], NumericCast<int64_t>(resolved_embeddings[i]->size()), group_options);
 				}
 			}
 
-			auto embeddings = duckdb_ai::EmbedMany(missing_inputs, jobs[group_start].options);
+			auto embeddings = duckdb_ai::EmbedMany(missing_inputs, group_options, ProviderTaskRunner(group_options));
 			if (embeddings.size() != missing_inputs.size()) {
 				throw InvalidInputException("AI embedding provider returned %llu embeddings for %llu inputs",
 				                            static_cast<unsigned long long>(embeddings.size()),
 				                            static_cast<unsigned long long>(missing_inputs.size()));
 			}
-			for (idx_t missing_index = 0; missing_index < missing_inputs.size(); missing_index++) {
-				auto input_index = missing_indexes[missing_index];
-				auto estimated_bytes = missing_inputs[missing_index].size() +
-				                       embeddings[missing_index].values.size() * sizeof(double) + 64;
-				if (query_cache->estimated_bytes + estimated_bytes <= MAX_SIMILARITY_QUERY_CACHE_BYTES) {
-					auto inserted = option_cache->embeddings.emplace(missing_inputs[missing_index],
-					                                                 std::move(embeddings[missing_index].values));
-					resolved_embeddings[input_index] = &inserted.first->second;
-					query_cache->estimated_bytes += estimated_bytes;
-				} else {
-					resolved_embeddings[input_index] = &embeddings[missing_index].values;
+			{
+				std::lock_guard<std::mutex> cache_lock(query_cache->mutex);
+				for (idx_t missing_index = 0; missing_index < missing_inputs.size(); missing_index++) {
+					auto &embedding = embeddings[missing_index].values;
+					auto estimated_bytes =
+					    missing_inputs[missing_index].size() + embedding.size() * sizeof(double) + 64;
+					auto &resolved = resolved_embeddings[missing_indexes[missing_index]];
+					auto cached = option_cache->embeddings.find(missing_inputs[missing_index]);
+					if (cached != option_cache->embeddings.end()) {
+						// Another thread embedded the same input meanwhile.
+						resolved = &cached->second;
+					} else if (query_cache->estimated_bytes + estimated_bytes <= MAX_SIMILARITY_QUERY_CACHE_BYTES) {
+						auto inserted =
+						    option_cache->embeddings.emplace(missing_inputs[missing_index], std::move(embedding));
+						resolved = &inserted.first->second;
+						query_cache->estimated_bytes += estimated_bytes;
+					} else {
+						resolved = &embedding;
+					}
 				}
 			}
-			for (auto row : group_rows) {
-				jobs[row].left_embedding = *resolved_embeddings[input_indexes[jobs[row].left]];
-				jobs[row].right_embedding = *resolved_embeddings[input_indexes[jobs[row].right]];
-				jobs[row].has_left_embedding = true;
-				jobs[row].has_right_embedding = true;
+			for (idx_t i = 0; i < group_rows.size(); i++) {
+				auto &job = jobs[group_rows[i]];
+				try {
+					job.output = CosineSimilarity(*resolved_embeddings[row_inputs[i].first],
+					                              *resolved_embeddings[row_inputs[i].second]);
+					job.completed = true;
+				} catch (std::exception &ex) {
+					job.exception = std::current_exception();
+					job.error_message = ex.what();
+				}
 			}
 		} catch (InterruptException &) {
 			throw;
@@ -3273,7 +3370,7 @@ void PrecomputeSimilarityEmbeddings(ClientContext &context, std::vector<Provider
 				jobs[row].exception = std::current_exception();
 				jobs[row].error_message = ex.what();
 			}
-			if (jobs[group_start].fail_on_error) {
+			if (group_options.fail_on_error) {
 				throw;
 			}
 		}
@@ -3329,14 +3426,7 @@ void AiSimilarityFunction(DataChunk &args, ExpressionState &state, Vector &resul
 		}
 	}
 
-	PrecomputeSimilarityEmbeddings(state.GetContext(), jobs);
-
-	RunProviderJobs(jobs, [&](ProviderDoubleJob &job) {
-		if (job.exception) {
-			return;
-		}
-		job.output = CosineSimilarity(job.left_embedding, job.right_embedding);
-	});
+	ComputeSimilarityScores(state.GetContext(), jobs);
 
 	for (auto &job : jobs) {
 		if (!ProviderJobResultAvailable(job, result_validity)) {
@@ -3387,7 +3477,7 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 			for (auto &job : jobs) {
 				inputs.push_back(job.input);
 			}
-			auto outputs = duckdb_ai::EmbedMany(inputs, jobs[0].options);
+			auto outputs = duckdb_ai::EmbedMany(inputs, jobs[0].options, ProviderTaskRunner(jobs[0].options));
 			if (outputs.size() != jobs.size()) {
 				throw InvalidInputException("AI embedding provider returned %llu embeddings for %llu inputs",
 				                            static_cast<unsigned long long>(outputs.size()),
@@ -3410,16 +3500,20 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		    jobs, [&](ProviderEmbeddingJob &job) { job.output = duckdb_ai::Embed(job.input, job.options).values; });
 	}
 
+	// Copy each embedding straight into the child vector; boxing every element in a Value is slow at 1000+ dimensions.
+	auto list_size = ListVector::GetListSize(result);
 	for (auto &job : jobs) {
 		if (!ProviderJobResultAvailable(job, result_validity)) {
 			continue;
 		}
-		result_data[job.row].offset = ListVector::GetListSize(result);
+		result_data[job.row].offset = list_size;
 		result_data[job.row].length = job.output.size();
-		for (auto value : job.output) {
-			ListVector::PushBack(result, Value::DOUBLE(value));
-		}
+		ListVector::Reserve(result, list_size + job.output.size());
+		auto child_data = FlatVector::GetDataMutable<double>(ListVector::GetChildMutable(result));
+		std::copy(job.output.begin(), job.output.end(), child_data + list_size);
+		list_size += job.output.size();
 	}
+	ListVector::SetListSize(result, list_size);
 }
 
 unique_ptr<FunctionData> AiTaskBindInternal(ClientContext &context, BoundScalarFunction &bound_function,
@@ -5368,7 +5462,8 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 	if (labelled_samples.empty()) {
 		throw InvalidInputException("ai_build_classifier could not label any sampled rows");
 	}
-	auto embeddings = duckdb_ai::EmbedMany(labelled_samples, bind_data.embedding_options);
+	auto embeddings = duckdb_ai::EmbedMany(labelled_samples, bind_data.embedding_options,
+	                                       ProviderTaskRunner(bind_data.embedding_options));
 	auto dimensions = embeddings.empty() ? 0 : embeddings[0].values.size();
 	std::vector<idx_t> class_totals(bind_data.labels.size(), 0);
 	for (auto label : labelled_classes) {
@@ -5662,13 +5757,14 @@ void AiCountTokensFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, bind_data.prompt_index);
 
+	// The estimate needs only the byte length, so read it without copying the text.
 	for (idx_t row = 0; row < args.size(); row++) {
-		std::string input;
-		if (!input_reader.Read(row, input)) {
+		auto mapped_row = input_reader.data.sel->get_index(row);
+		if (!input_reader.data.validity.RowIsValid(mapped_row)) {
 			result_validity.SetInvalid(row);
 			continue;
 		}
-		result_data[row] = duckdb_ai::EstimateTokenCount(input);
+		result_data[row] = duckdb_ai::EstimateTokenCount(NumericCast<idx_t>(input_reader.values[mapped_row].GetSize()));
 	}
 }
 
@@ -8079,7 +8175,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 			}
 		}
 		try {
-			auto embeddings = duckdb_ai::EmbedMany(unique_inputs, rows[group_start].artifact.embedding_options);
+			auto embeddings = duckdb_ai::EmbedMany(unique_inputs, rows[group_start].artifact.embedding_options,
+			                                       ProviderTaskRunner(rows[group_start].artifact.embedding_options));
 			if (embeddings.size() != unique_inputs.size()) {
 				throw InvalidInputException("embedding provider returned the wrong number of classifier embeddings");
 			}
@@ -8544,25 +8641,41 @@ OperatorResultType AiChunkFunction(ExecutionContext &context, TableFunctionInput
 			continue;
 		}
 		auto &chunk = data.chunks[data.offset++];
+		// Write straight into the flat output vectors; a Value per cell dominates the cost on large documents.
 		idx_t col = 0;
-		output.data[col++].SetValue(count, Value(chunk.source_id));
-		output.data[col++].SetValue(count, Value(chunk.chunk_id));
-		output.data[col++].SetValue(count, Value::UBIGINT(chunk.chunk_index));
+		auto set_string = [&](const std::string &value) {
+			auto &vector = output.data[col++];
+			FlatVector::GetDataMutable<string_t>(vector)[count] = StringVector::AddString(vector, value);
+			FlatVector::SetNull(vector, count, false);
+		};
+		auto set_optional_string = [&](const std::string &value) {
+			if (value.empty()) {
+				FlatVector::SetNull(output.data[col++], count, true);
+			} else {
+				set_string(value);
+			}
+		};
+		auto set_ubigint = [&](uint64_t value) {
+			FlatVector::GetDataMutable<uint64_t>(output.data[col++])[count] = value;
+		};
+		set_string(chunk.source_id);
+		set_string(chunk.chunk_id);
+		set_ubigint(chunk.chunk_index);
 		if (bind_data.prep_search) {
-			output.data[col++].SetValue(count, Value(chunk.text));
-			output.data[col++].SetValue(count, Value(ChunkEmbeddingText(bind_data, data, chunk)));
-			output.data[col++].SetValue(count, chunk.heading.empty() ? Value() : Value(chunk.heading));
-			output.data[col++].SetValue(count, Value::UBIGINT(chunk.page));
-			output.data[col++].SetValue(count, Value::UBIGINT(chunk.start_offset));
-			output.data[col++].SetValue(count, Value::UBIGINT(chunk.end_offset));
-			output.data[col++].SetValue(count, bind_data.metadata.empty() ? Value() : Value(bind_data.metadata));
-			output.data[col++].SetValue(count, data.enrichment_error.empty() ? Value() : Value(data.enrichment_error));
+			set_string(chunk.text);
+			set_string(ChunkEmbeddingText(bind_data, data, chunk));
+			set_optional_string(chunk.heading);
+			set_ubigint(chunk.page);
+			set_ubigint(chunk.start_offset);
+			set_ubigint(chunk.end_offset);
+			set_optional_string(bind_data.metadata);
+			set_optional_string(data.enrichment_error);
 		} else {
-			output.data[col++].SetValue(count, Value::UBIGINT(chunk.start_offset));
-			output.data[col++].SetValue(count, Value::UBIGINT(chunk.end_offset));
-			output.data[col++].SetValue(count, Value::UBIGINT(chunk.end_offset - chunk.start_offset));
-			output.data[col++].SetValue(count, Value::BIGINT(duckdb_ai::EstimateTokenCount(chunk.text)));
-			output.data[col++].SetValue(count, Value(chunk.text));
+			set_ubigint(chunk.start_offset);
+			set_ubigint(chunk.end_offset);
+			set_ubigint(chunk.end_offset - chunk.start_offset);
+			FlatVector::GetDataMutable<int64_t>(output.data[col++])[count] = duckdb_ai::EstimateTokenCount(chunk.text);
+			set_string(chunk.text);
 		}
 		count++;
 	}

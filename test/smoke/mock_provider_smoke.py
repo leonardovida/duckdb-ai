@@ -2409,7 +2409,7 @@ def assert_adaptive_batches(output: str):
     if split_sizes != [8, 4, 2, 2, 4, 2, 2]:
         raise AssertionError(f"unexpected recursive split request sizes: {split_sizes}")
     capped_sizes = [len(request["input"]) for request in MockProviderHandler.embedding_requests[7:10]]
-    if capped_sizes != [3, 3, 2]:
+    if sorted(capped_sizes) != [2, 3, 3]:
         raise AssertionError(f"external model batch capabilities were not applied: {capped_sizes}")
     cached_dimension_inputs = MockProviderHandler.embedding_requests[10]["input"]
     if cached_dimension_inputs != ["cached dimension 0", "cached dimension 1"]:
