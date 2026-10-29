@@ -32,6 +32,7 @@ def run(duckdb):
     thread.start()
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "token-budget-mock"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     setup = (
         "SET threads=1; SET duckdb_ai_provider='openai'; SET duckdb_ai_model='budget-mock';"
         f"SET duckdb_ai_base_url='http://127.0.0.1:{server.server_port}';"

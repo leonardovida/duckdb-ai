@@ -6,5 +6,5 @@ duckdb_unittest_tempdir/
 local-docs/
 .DS_Store
 testext
-test/python/__pycache__/
+__pycache__/
 .Rhistory

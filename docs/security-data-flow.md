@@ -18,6 +18,12 @@ an explicit data egress path from DuckDB to the configured provider or gateway.
   `duckdb_ai_log_endpoint` or `DUCKDB_AI_LOG_ENDPOINT` is configured.
 - Usage logs omit prompt, input, and response text by default.
 - API keys are read from environment variables or `TYPE duckdb_ai` secrets.
+- An API key is only sent to the origin (scheme, host and port) it is
+  configured for: the `BASE_URL` of the secret that holds it, otherwise the
+  provider's built-in endpoint or base URL environment variable, plus any host
+  listed in `DUCKDB_AI_ALLOWED_HOSTS`.
+  A query-level `base_url`, `duckdb_ai_base_url` or external model `location`
+  cannot redirect it.
 - External model objects contain only safe routing metadata and the name of a
   `TYPE duckdb_ai` credential secret; they never contain credential material.
 - `TYPE duckdb_ai` secrets redact `API_KEY` values when listed.
@@ -44,6 +50,19 @@ URLs, `*.example.com`, or `*`.
 
 The allowlist check runs before the HTTP request, including for usage-log
 endpoints.
+
+The `DUCKDB_AI_ALLOWED_HOSTS` environment variable is a ceiling set by whoever
+starts the process. Every request must match it as well as any session
+allowlist, so `duckdb_ai_allowed_hosts` and `allowed_hosts := ...` can narrow it
+but not widen it.
+
+With `enable_external_access = false`, the extension only sends requests to
+endpoints listed in DuckDB's `allowed_directories` or `allowed_paths`, for
+example `SET allowed_directories = ['https://api.openai.com/']` before external
+access is disabled.
+
+For a shared server, such as one serving remote clients over Quack, see
+[Run on a Quack server](quack-server.md).
 
 The URL validation still runs when no host allowlist is configured. An
 allowlist controls which HTTP(S) hosts are reachable; it does not enable other

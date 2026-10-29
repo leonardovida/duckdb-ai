@@ -33,6 +33,7 @@ def run(duckdb):
     thread.start()
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "response-lookup-dummy"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     options = f"""
         model := 'lookup-mock', base_url := 'http://127.0.0.1:{server.server_port}',
         cache := false, retry_count := 0, fail_on_error := false

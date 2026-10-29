@@ -1,0 +1,94 @@
+# name: test/sql/server_guards.test
+# description: Guards that keep a shared server's credentials and network access under the owner's control
+# group: [sql]
+
+require ai
+
+# Every check below fails before a request is sent, so no test here touches the network.
+
+statement ok
+CREATE SECRET guarded_openai (TYPE duckdb_ai, AI_PROVIDER 'openai', API_KEY 'owner-key');
+
+# A session cannot point a stored key at another host.
+statement error
+SELECT ai_complete('hello', provider := 'openai', model := 'm', base_url := 'http://127.0.0.1:9/v1', cache := false);
+----
+AI provider endpoint "http://127.0.0.1:9" is not the origin the API key from the duckdb_ai secret is configured for (https://api.openai.com:443)
+
+# Widening the session allowlist does not change which host the key belongs to.
+statement error
+SELECT ai_complete('hello', provider := 'openai', model := 'm', base_url := 'http://127.0.0.1:9/v1',
+    allowed_hosts := '*', cache := false);
+----
+is not the origin the API key from the duckdb_ai secret is configured for
+
+statement error
+SELECT ai_embed('hello', provider := 'openai', model := 'm', base_url := 'http://127.0.0.1:9/v1', cache := false);
+----
+is not the origin the API key from the duckdb_ai secret is configured for
+
+# Batched embedding requests, used for several rows with the same options, are guarded too.
+statement error
+SELECT ai_embed(x, provider := 'openai', model := 'm', base_url := 'http://127.0.0.1:9/v1', cache := false)
+FROM (VALUES ('first'), ('second'), ('third')) t(x);
+----
+is not the origin the API key from the duckdb_ai secret is configured for
+
+statement error
+SELECT ai_similarity(x, 'query', provider := 'openai', model := 'm', base_url := 'http://127.0.0.1:9/v1')
+FROM (VALUES ('first'), ('second'), ('third')) t(x);
+----
+is not the origin the API key from the duckdb_ai secret is configured for
+
+# A model profile cannot redirect a credential it names.
+statement ok
+CREATE EXTERNAL MODEL guarded_redirect WITH (
+  provider = 'openai', model = 'm', location = 'http://127.0.0.1:9/v1', credential = 'guarded_openai'
+);
+
+statement error
+SELECT ai_complete('hello', secret := 'guarded_redirect', cache := false);
+----
+is not the origin the API key from the duckdb_ai secret is configured for (https://api.openai.com:443)
+
+# A secret that stores base_url binds its key to that host instead.
+statement ok
+CREATE SECRET guarded_gateway (TYPE duckdb_ai, AI_PROVIDER 'openai', API_KEY 'gateway-key',
+    BASE_URL 'https://gateway.example/v1');
+
+statement error
+SELECT ai_complete('hello', secret := 'guarded_gateway', model := 'm', base_url := 'https://api.openai.com/v1',
+    cache := false);
+----
+AI provider endpoint "https://api.openai.com:443" is not the origin the API key from the duckdb_ai secret is configured for (https://gateway.example:443)
+
+# Same host on another scheme or port is another origin.
+statement error
+SELECT ai_complete('hello', secret := 'guarded_gateway', model := 'm', base_url := 'http://gateway.example:8080/v1',
+    cache := false);
+----
+AI provider endpoint "http://gateway.example:8080" is not the origin the API key from the duckdb_ai secret is configured for (https://gateway.example:443)
+
+# Request previews never send the key, so they still accept any base_url.
+query I
+SELECT contains(ai_completion_request_json('hello', provider := 'openai', model := 'm',
+    base_url := 'http://127.0.0.1:9/v1'), '"model":"m"');
+----
+true
+
+# With external access disabled, providers are only reachable through allowed_directories or allowed_paths.
+statement ok
+SET allowed_directories = ['http://127.0.0.1:8/'];
+
+statement ok
+SET enable_external_access = false;
+
+statement error
+SELECT ai_complete('hello', provider := 'ollama', model := 'm', base_url := 'http://127.0.0.1:9', cache := false);
+----
+Permission Error: AI provider request to "http://127.0.0.1:9/api/chat" is not allowed because enable_external_access is false
+
+statement error
+SELECT ai_embed('hello', provider := 'ollama', model := 'm', base_url := 'http://127.0.0.1:9', cache := false);
+----
+is not allowed because enable_external_access is false

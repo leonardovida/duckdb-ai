@@ -5,6 +5,36 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## Unreleased
+
+### Added
+
+- A guide for serving AI functions to remote DuckDB clients over Quack, DuckDB
+  2.0's client-server protocol: loading the extension on the server, keeping
+  provider credentials there, and what clients share.
+
+### Changed
+
+- API keys are only sent to the origin (scheme, host and port) they are
+  configured for. A key from a `TYPE duckdb_ai` secret goes to that secret's
+  `BASE_URL`, otherwise to the provider's built-in endpoint or its base URL
+  environment variable, plus any host in `DUCKDB_AI_ALLOWED_HOSTS`. Previously a query-level `base_url`,
+  `duckdb_ai_base_url` or external model `location` could send the key to any
+  host, which let remote clients of a shared server send its key elsewhere.
+  Setups that pair an environment or secret key with a session `base_url`, for
+  example a gateway, now fail with an error that names the fix: store
+  `BASE_URL` in the secret, set the provider's base URL environment variable, or
+  list the host in `DUCKDB_AI_ALLOWED_HOSTS`.
+- The `DUCKDB_AI_ALLOWED_HOSTS` environment variable now applies to every
+  request. Previously it was only the default for `duckdb_ai_allowed_hosts`, so
+  a session could replace it with a wider list. Sessions can still narrow it.
+
+### Fixed
+
+- Provider and usage-log requests honor `enable_external_access = false`. They
+  are only sent to endpoints listed in `allowed_directories` or `allowed_paths`.
+  Previously the extension ignored the setting.
+
 ## 0.9.0 - 2026-10-26
 
 This release moves the extension to DuckDB 2.0.0. It loads only in DuckDB

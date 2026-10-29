@@ -1586,7 +1586,7 @@ extension default applies. To list the settings in your installed version, run
 | `duckdb_ai_sql_assistant_model` | `VARCHAR` | Default model for SQL assistant functions. |
 | `duckdb_ai_embedding_model` | `VARCHAR` | Default model for embedding functions. |
 | `duckdb_ai_base_url` | `VARCHAR` | Provider base URL override. |
-| `duckdb_ai_allowed_hosts` | `VARCHAR` | Comma-separated provider and logging host allowlist. Empty allows all hosts. |
+| `duckdb_ai_allowed_hosts` | `VARCHAR` | Comma-separated provider and logging host allowlist. Empty allows all hosts that the `DUCKDB_AI_ALLOWED_HOSTS` environment variable allows; it can narrow that variable but not widen it. |
 | `duckdb_ai_timeout_seconds` | `BIGINT` | HTTP timeout in seconds. `0` uses the extension default. |
 | `duckdb_ai_connect_timeout_seconds` | `BIGINT` | Connection timeout from 1 to 31536000 seconds. |
 | `duckdb_ai_retry_count` | `BIGINT` | Retries from 0 to 10 for transport failures and retryable HTTP statuses. |

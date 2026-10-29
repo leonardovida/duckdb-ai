@@ -209,6 +209,7 @@ jobs:
           python3 test/smoke/jev_batch_evaluation_smoke.py
           python3 test/smoke/accuracy_gate_smoke.py
           python3 test/smoke/execution_deadline_smoke.py
+          python3 test/smoke/quack_server_smoke.py
           python3 test/smoke/reliability_smoke.py --library build/release/src/libduckdb.so
 
       - name: Run owned-code ASan and UBSan checks

@@ -82,6 +82,7 @@ follow the [provider guides](provider-guides.md).
 | Run AI enrichment in production | [Best practices](best-practices.md) |
 | Understand retries, caching and concurrency | [Runtime behavior](runtime-behavior.md) |
 | Know what data leaves your machine | [Security and data flow](security-data-flow.md) |
+| Serve AI functions to remote DuckDB clients | [Run on a Quack server](quack-server.md) |
 
 Agents and LLM tools can read the whole documentation set as plain text from
 [`llms.txt`](https://leonardovida.github.io/duckdb-ai/llms.txt) and

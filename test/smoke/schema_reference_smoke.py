@@ -226,6 +226,7 @@ def run(duckdb_path):
     thread.start()
     env = {key: value for key, value in os.environ.items() if not key.startswith("DUCKDB_AI_")}
     env["OPENAI_API_KEY"] = "schema-reference-dummy-key"
+    env["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1"
     setup = f"""
         SET duckdb_ai_provider = 'openai';
         SET duckdb_ai_model = 'schema-reference-mock';
