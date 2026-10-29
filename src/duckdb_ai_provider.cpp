@@ -5,6 +5,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "fmt/format.h"
 #include "re2/re2.h"
 #include "yyjson.hpp"
 
@@ -5567,12 +5568,16 @@ void MaybePostEmbeddingLog(const ProviderConfig &config, const std::string &inpu
 //! stored in the response cache and replayed later through ParseEmbeddingResult.
 std::string SerializeEmbeddingCacheBody(const ProviderConfig &config, const EmbeddingResult &result) {
 	std::string body = config.protocol == "ollama_embed" ? "{\"embeddings\":[[" : "{\"data\":[{\"embedding\":[";
+	// Shortest round-trip formatting parses back to the same doubles and is far cheaper than an ostringstream per
+	// value.
+	duckdb_fmt::memory_buffer values;
 	for (idx_t i = 0; i < result.values.size(); i++) {
 		if (i > 0) {
-			body += ",";
+			values.push_back(',');
 		}
-		body += JsonDoubleExact(result.values[i]);
+		duckdb_fmt::format_to(values, "{}", result.values[i]);
 	}
+	body.append(values.data(), values.size());
 	body += config.protocol == "ollama_embed" ? "]]" : "]}]";
 	if (result.prompt_tokens >= 0) {
 		body += ",\"prompt_tokens\":" + std::to_string(result.prompt_tokens);
@@ -5950,10 +5955,11 @@ void ApplyModelProfileOptions(CompletionOptions &options) {
 }
 
 int64_t EstimateTokenCount(const std::string &input) {
-	if (input.empty()) {
-		return 0;
-	}
-	return static_cast<int64_t>((input.size() + 3) / 4);
+	return EstimateTokenCount(NumericCast<idx_t>(input.size()));
+}
+
+int64_t EstimateTokenCount(idx_t input_bytes) {
+	return static_cast<int64_t>((input_bytes + 3) / 4);
 }
 
 std::string BuildRequestJson(const std::string &prompt, const std::string &model, const std::string &provider) {
@@ -6177,7 +6183,8 @@ EmbeddingResult Embed(const std::string &input, const CompletionOptions &options
 	return result;
 }
 
-std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, const CompletionOptions &options) {
+std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, const CompletionOptions &options,
+                                       const TaskRunner &run_tasks) {
 	if (inputs.empty()) {
 		return {};
 	}
@@ -6277,17 +6284,19 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 		}
 	};
 
-	for (auto &batch : batches) {
-		batch_start = batch.first;
-		auto batch_end = batch.second;
+	// Batches are independent requests, so the caller may send them concurrently instead of one round trip after
+	// another.
+	auto run_batch = [&](idx_t batch_index) {
+		auto first_miss = batches[batch_index].first;
+		auto end_miss = batches[batch_index].second;
 		std::vector<std::string> batch_inputs;
-		batch_inputs.reserve(batch_end - batch_start);
-		for (idx_t i = batch_start; i < batch_end; i++) {
+		batch_inputs.reserve(end_miss - first_miss);
+		for (idx_t i = first_miss; i < end_miss; i++) {
 			batch_inputs.push_back(inputs[miss_rows[i]]);
 		}
 		auto batch_results = execute_batch(batch_inputs);
 		for (idx_t i = 0; i < batch_results.size(); i++) {
-			auto input_row = miss_rows[batch_start + i];
+			auto input_row = miss_rows[first_miss + i];
 			if (cache_enabled && batch_inputs.size() > 1) {
 				auto cache_key =
 				    ResponseCacheKey("embedding", config, endpoint, EmbeddingPayload(config, inputs[input_row]));
@@ -6296,6 +6305,13 @@ std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, c
 				StoreCachedResponse(runtime_state, cache_key, cache_entry, options);
 			}
 			results[input_row] = std::move(batch_results[i]);
+		}
+	};
+	if (run_tasks && batches.size() > 1) {
+		run_tasks(batches.size(), run_batch);
+	} else {
+		for (idx_t batch_index = 0; batch_index < batches.size(); batch_index++) {
+			run_batch(batch_index);
 		}
 	}
 	return results;
