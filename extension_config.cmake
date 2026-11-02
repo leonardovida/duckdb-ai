@@ -3,7 +3,7 @@
 # Extension from this repo
 duckdb_extension_load(ai
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
-    EXTENSION_VERSION 0.9.1
+    EXTENSION_VERSION 0.9.2
 )
 
 # Since DuckDB 2.0 an extension is only built into the shell and unittest binaries
