@@ -5,7 +5,24 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
-## Unreleased
+## 0.9.1 - 2026-11-02
+
+This release preserves the 0.9.0 SQL API. It makes embedding and similarity
+workloads faster and enforces `enable_external_access` for provider requests.
+It targets DuckDB 2.0.0.
+
+### Performance
+
+- Independent embedding batches for `ai_embed`, `ai_similarity` and the
+  classifiers are sent concurrently on the provider executor instead of one
+  after another, within the `max_concurrent_requests` limit. Batches can
+  therefore reach the provider in any order, and when one batch fails, batches
+  already in flight complete before the error is raised.
+- `ai_similarity` no longer serializes threads behind the query cache lock while
+  an embedding request is in flight, and scores rows without copying vectors.
+- Embedding response cache entries, `ai_embed` result lists,
+  `ai_count_tokens`, `ai_generate_chunks` and `ai_prep_search` use less CPU.
+  Results are unchanged.
 
 ### Changed
 
