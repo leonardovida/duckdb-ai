@@ -22,7 +22,7 @@ tidy-check-ai: tidy-check
 # Deterministic smoke suites against local mock providers; CI runs this target after `make release`.
 # mock_provider_smoke.py also runs the provider, Jev, schema and transport smokes it imports.
 SMOKE_TESTS = mock_provider docs_coverage decision_providers chaining native_types output_parsing extension_upload \
-	resumable_enrichment jev_batch_evaluation accuracy_gate execution_deadline
+	resumable_enrichment jev_batch_evaluation accuracy_gate execution_deadline quack_server
 SHARED_LIBRARY_SUFFIX := $(if $(filter Darwin,$(shell uname -s)),dylib,so)
 
 .PHONY: smoke

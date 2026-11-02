@@ -448,8 +448,13 @@ combination supports every feature.
 - **Credentials** come only from environment variables or DuckDB secrets.
   `ai_secrets()` lists configured secrets with credentials redacted.
 - **Egress control.** `allowed_hosts` (or `SET duckdb_ai_allowed_hosts`)
-  restricts which hosts the extension may contact, and
-  `SET enable_external_access = false` blocks provider requests entirely.
+  restricts which hosts the extension may contact. The
+  `DUCKDB_AI_ALLOWED_HOSTS` environment variable is a ceiling sessions cannot
+  widen, and stored API keys only go to the origin they are configured for.
+  `SET enable_external_access = false` blocks provider requests except to
+  endpoints in `allowed_directories` or `allowed_paths`.
+- **Shared servers.** To serve AI functions to remote DuckDB clients over
+  Quack, see [Run on a Quack server](docs/quack-server.md).
 - **Usage logs** stay in memory unless you configure an external collector, and
   they omit prompt and response text by default. Cost figures are estimates,
   not provider billing.
@@ -500,6 +505,8 @@ keys. Contributors and coding agents working on the source should read
   cancellation, token limits and context sizes.
 - [Security and data flow](docs/security-data-flow.md): what each function
   sends to a provider and how to restrict it.
+- [Run on a Quack server](docs/quack-server.md): serve AI functions to remote
+  DuckDB clients with credentials kept on the server.
 - [Changelog](CHANGELOG.md) and [releases](https://github.com/leonardovida/duckdb-ai/releases).
 
 Licensed under the [MIT license](LICENSE).

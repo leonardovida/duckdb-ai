@@ -24,13 +24,33 @@ It targets DuckDB 2.0.0.
   `ai_count_tokens`, `ai_generate_chunks` and `ai_prep_search` use less CPU.
   Results are unchanged.
 
+### Added
+
+- A guide for serving AI functions to remote DuckDB clients over Quack, DuckDB
+  2.0's client-server protocol: loading the extension on the server, keeping
+  provider credentials there, and what clients share.
+
 ### Changed
 
 - Provider and usage-log requests honor `SET enable_external_access = false`
   and fail with a `Permission Error`, including requests to a local model
-  server. Previously the extension's own HTTP client ignored the setting.
+  server, unless DuckDB's `allowed_directories` or `allowed_paths` permit the
+  endpoint. Previously the extension's own HTTP client ignored the setting.
   Functions that only build requests, such as `ai_completion_request_json`,
   keep working.
+- API keys are only sent to the origin (scheme, host and port) they are
+  configured for. A key from a `TYPE duckdb_ai` secret goes to that secret's
+  `BASE_URL`, otherwise to the provider's built-in endpoint or its base URL
+  environment variable, plus any host in `DUCKDB_AI_ALLOWED_HOSTS`. Previously
+  a query-level `base_url`, `duckdb_ai_base_url` or external model `location`
+  could send the key to any host, which let remote clients of a shared server
+  send its key elsewhere. Setups that pair an environment or secret key with a
+  session `base_url`, for example a gateway, now fail with an error that names
+  the fix: store `BASE_URL` in the secret, set the provider's base URL
+  environment variable, or list the host in `DUCKDB_AI_ALLOWED_HOSTS`.
+- The `DUCKDB_AI_ALLOWED_HOSTS` environment variable now applies to every
+  request. Previously it was only the default for `duckdb_ai_allowed_hosts`, so
+  a session could replace it with a wider list. Sessions can still narrow it.
 - Retry waits requested by a provider `Retry-After` header are capped at 60
   seconds, like computed backoff. Previously a header could pause a query for
   up to an hour before each retry.
@@ -60,6 +80,8 @@ It targets DuckDB 2.0.0.
   coding agent runs them. DuckDB 2.0's CLI otherwise switches to Markdown
   output under agents.
 - New `test/sql/external_access.test` covers the external-access behavior.
+  `test/sql/server_guards.test` and `test/smoke/quack_server_smoke.py` cover
+  credential binding, the environment allowlist and a real Quack server.
 - Removed committed `__pycache__` files and ignored them everywhere.
 - Moved the 0.6.x sweep reports next to their benchmark evidence in
   `test/benchmarks/`, removed the completed provider rollout plan, and made
