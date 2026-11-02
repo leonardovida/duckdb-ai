@@ -448,7 +448,8 @@ combination supports every feature.
 - **Credentials** come only from environment variables or DuckDB secrets.
   `ai_secrets()` lists configured secrets with credentials redacted.
 - **Egress control.** `allowed_hosts` (or `SET duckdb_ai_allowed_hosts`)
-  restricts which hosts the extension may contact.
+  restricts which hosts the extension may contact, and
+  `SET enable_external_access = false` blocks provider requests entirely.
 - **Usage logs** stay in memory unless you configure an external collector, and
   they omit prompt and response text by default. Cost figures are estimates,
   not provider billing.
@@ -473,7 +474,7 @@ git clone --recurse-submodules https://github.com/leonardovida/duckdb-ai.git
 cd duckdb-ai
 GEN=ninja make release
 GEN=ninja make test
-python3 test/smoke/mock_provider_smoke.py
+GEN=ninja make smoke
 ./build/release/duckdb
 ```
 

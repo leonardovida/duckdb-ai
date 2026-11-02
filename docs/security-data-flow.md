@@ -49,6 +49,15 @@ The URL validation still runs when no host allowlist is configured. An
 allowlist controls which HTTP(S) hosts are reachable; it does not enable other
 libcurl protocols.
 
+`SET enable_external_access = false` blocks every provider and usage-log
+request, including requests to a local model server, with a `Permission Error`.
+Functions that only build or inspect requests, such as
+`ai_completion_request_json`, keep working. Under `on_error := 'null'` a
+blocked row returns `NULL` and `ai_usage()` records the reason. DuckDB also
+stops reading the persistent secret directory once external access is off, so
+set `allow_persistent_secrets = false` first or use environment variables and
+temporary secrets.
+
 ## Data sent by function family
 
 | Function family | Data sent |

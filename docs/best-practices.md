@@ -332,7 +332,7 @@ SELECT ai_complete(
 ```
 
 Retry sleeps are interruptible and provider `Retry-After` headers take
-precedence over the configured backoff. Provider redirects are not followed.
+precedence over the configured backoff, up to 60 seconds per wait. Provider redirects are not followed.
 
 Use `on_error := 'null'` for exploratory enrichment where a missing output
 is acceptable:

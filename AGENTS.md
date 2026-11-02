@@ -6,8 +6,8 @@ source-backed, and validated against the local DuckDB extension tooling.
 ## Project Layout
 
 - `src/` contains the C++ extension implementation and public headers.
-- `test/sql/duckdb_ai.test` contains deterministic SQLLogic coverage.
-- `test/smoke/mock_provider_smoke.py` covers mock HTTP provider behavior without
+- `test/sql/` contains deterministic SQLLogic coverage.
+- `test/smoke/` covers mock HTTP provider behavior without
   external network calls.
 - `docs/` is the Docusaurus docs source.
 - `website/` contains the Docusaurus site configuration and frontend.
@@ -22,7 +22,7 @@ Use the repo Makefile from the root:
 ```sh
 GEN=ninja make release
 GEN=ninja make test
-python3 test/smoke/mock_provider_smoke.py
+GEN=ninja make smoke
 ```
 
 The formatter gate uses DuckDB's formatter. Since DuckDB 2.0 it installs its pinned

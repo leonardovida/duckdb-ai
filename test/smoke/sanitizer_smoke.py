@@ -17,6 +17,9 @@ from transport_retry_smoke import run as transport_retries
 from json_escaping_smoke import run as json_escaping
 from schema_reference_smoke import run as schema_references
 
+# Keep the DuckDB CLI on its default box output when a coding agent runs these tests.
+os.environ["DUCKDB_AGENT_MODE"] = "0"
+
 
 def main():
     parser = argparse.ArgumentParser()

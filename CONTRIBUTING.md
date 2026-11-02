@@ -19,9 +19,10 @@ deterministic in the default test suite.
 
 - `src/` contains the C++ extension, SQL function registration, and provider
   request handling.
-- `test/sql/duckdb_ai.test` contains SQLLogicTest coverage for deterministic
-  function behavior.
-- `test/smoke/mock_provider_smoke.py` runs the Python mock-provider smoke test.
+- `test/sql/` contains SQLLogicTest coverage for deterministic function
+  behavior.
+- `test/smoke/` contains Python smoke tests against local mock providers.
+  `make smoke` runs the same set as CI.
 - `docs/` contains source documentation for the extension.
 - `website/` contains the Docusaurus documentation site.
 - `duckdb/` and `extension-ci-tools/` are vendored extension build
@@ -36,9 +37,7 @@ GEN=ninja make format-check
 GEN=ninja make tidy-check-ai
 GEN=ninja make release
 GEN=ninja make test
-python3 test/smoke/mock_provider_smoke.py
-python3 test/smoke/accuracy_gate_smoke.py
-python3 test/smoke/reliability_smoke.py --library build/release/src/libduckdb.so
+GEN=ninja make smoke
 ```
 
 Run documentation site checks from `website/`:
