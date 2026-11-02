@@ -11,6 +11,7 @@
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/operator/double_cast_operator.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/aggregate_function.hpp"
@@ -52,6 +53,7 @@
 #include <initializer_list>
 #include <limits>
 #include <list>
+#include <locale>
 #include <mutex>
 #include <numeric>
 #include <set>
@@ -3097,8 +3099,8 @@ bool ParseRerankScore(const std::string &input, double &score) {
 	                          text[end] == '/' || text[end] == '%')) {
 		return false;
 	}
-	auto value = std::strtod(text.substr(0, end).c_str(), nullptr);
-	if (!std::isfinite(value) || value < 0 || value > 1) {
+	double value = 0;
+	if (!TryDoubleCast<double>(text.c_str(), end, value, false) || !std::isfinite(value) || value < 0 || value > 1) {
 		return false;
 	}
 	score = value;
@@ -4743,6 +4745,7 @@ std::string BuildPromptSchemaContext(ClientContext &context, const PromptSchemaO
 	});
 
 	std::ostringstream out;
+	out.imbue(std::locale::classic());
 	out << "DuckDB schema context\n";
 	out << "Current database: " << QuoteSqlIdentifier(current_database) << "\n";
 	if (!options.include_tables.empty()) {
@@ -5439,6 +5442,7 @@ std::string BuildClassifierArtifact(const ClassifierBuildBindData &bind_data, co
 	auto usable = evaluated > 0 && all_classes_present && accuracy >= bind_data.quality_threshold;
 	auto embedding_config = duckdb_ai::ResolveProvider(bind_data.embedding_options);
 	std::ostringstream artifact;
+	artifact.imbue(std::locale::classic());
 	artifact << std::setprecision(17);
 	artifact << "{\"version\":1,\"optimization\":\"minimize_cost\",\"usable\":" << (usable ? "true" : "false")
 	         << ",\"accuracy\":" << accuracy << ",\"quality_threshold\":" << bind_data.quality_threshold
@@ -5879,7 +5883,8 @@ idx_t ExtractLineNumber(const std::string &error_message) {
 		while (pos < lower.size() && std::isdigit(static_cast<unsigned char>(lower[pos]))) {
 			pos++;
 		}
-		if (pos > start) {
+		// More digits than any real line count would overflow std::stoull; treat them like a missing number.
+		if (pos > start && pos - start <= 18) {
 			return static_cast<idx_t>(std::stoull(lower.substr(start, pos - start)));
 		}
 		pos = lower.find("line ", pos);
@@ -6040,6 +6045,7 @@ void AppendPromptQueryCacheKeyPart(std::string &key, int64_t value) {
 
 void AppendPromptQueryCacheKeyPart(std::string &key, double value) {
 	std::ostringstream out;
+	out.imbue(std::locale::classic());
 	out.precision(17);
 	out << value;
 	AppendPromptQueryCacheKeyPart(key, out.str());
@@ -8001,6 +8007,7 @@ std::string OptimizedClassifierMetadata(const OptimizedClassifierRow &row, const
                                         const std::string &reason, const std::string &provider = "",
                                         const std::string &model = "") {
 	std::ostringstream output;
+	output.imbue(std::locale::classic());
 	output << std::setprecision(17) << "{\"path\":\"" << JsonEscapeSqlText(path)
 	       << "\",\"artifact_accuracy\":" << row.artifact.accuracy;
 	if (!reason.empty()) {
@@ -8397,7 +8404,8 @@ unique_ptr<FunctionData> AiChunkBindInternal(ClientContext &context, TableFuncti
 			bind_data->row_options.emplace_back(i, name);
 		}
 	}
-	if (bind_data->enrich || lateral) {
+	// Only ai_prep_search can call a provider; a lateral call may turn enrich on per row.
+	if (prep_search && (bind_data->enrich || lateral)) {
 		ApplyAiProviderSecret(context, bind_data->options);
 	}
 	if (prep_search) {

@@ -15,6 +15,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+# Keep the DuckDB CLI on its default box output when a coding agent runs these tests.
+os.environ["DUCKDB_AGENT_MODE"] = "0"
+
 
 def run(duckdb_override=None):
     root = Path(__file__).resolve().parents[2]

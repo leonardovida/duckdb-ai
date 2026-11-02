@@ -1,0 +1,40 @@
+# name: test/sql/external_access.test
+# description: provider requests honor enable_external_access
+# group: [sql]
+
+require ai
+
+# Disabling external access cannot be undone, so this runs in its own database. DuckDB itself then refuses to read
+# the persistent secret directory, so a locked-down database also turns persistent secrets off.
+statement ok
+SET allow_persistent_secrets = false;
+
+statement ok
+SET enable_external_access = false;
+
+# Building a request stays local and keeps working.
+query I
+SELECT contains(ai_completion_request_json('hello', 'llama3', 'ollama'), '"model":"llama3"');
+----
+true
+
+statement error
+SELECT ai_complete('hello', 'llama3', 'ollama', base_url := 'http://127.0.0.1:9');
+----
+Permission Error: AI provider request to "127.0.0.1" is disabled because enable_external_access is false
+
+statement error
+SELECT ai_embed('hello', 'nomic-embed-text', 'ollama', base_url := 'http://127.0.0.1:9');
+----
+enable_external_access is false
+
+# Like any other per-row failure, on_error := 'null' returns NULL and ai_usage() keeps the reason.
+query I
+SELECT ai_complete('hello', 'llama3', 'ollama', base_url := 'http://127.0.0.1:9', on_error := 'null') IS NULL;
+----
+true
+
+query I
+SELECT count(*) > 0 FROM ai_usage() WHERE status = 'error' AND contains(error, 'enable_external_access is false');
+----
+true

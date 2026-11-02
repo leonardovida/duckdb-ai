@@ -146,7 +146,8 @@ also interruptible.
 Retries are disabled by default. When enabled with `retry_count` or
 `duckdb_ai_retry_count`, retryable HTTP failures use exponential backoff with
 jitter. HTTP `Retry-After` headers on provider responses take precedence over
-the configured backoff.
+the configured backoff. Every retry wait, including one requested by
+`Retry-After`, is capped at 60 seconds.
 
 Usage events keep one `operation_id` for all input events produced by a packed
 request. Hierarchical aggregate children additionally carry a
