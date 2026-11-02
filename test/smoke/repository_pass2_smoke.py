@@ -18,6 +18,9 @@ from decimal import Decimal
 
 from repository_regression_smoke import literal
 
+# Keep the DuckDB CLI on its default box output when a coding agent runs these tests.
+os.environ["DUCKDB_AGENT_MODE"] = "0"
+
 
 class Provider(BaseHTTPRequestHandler):
     labels = ["alpha", "beta"]

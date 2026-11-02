@@ -83,9 +83,9 @@ run and no provider calls during the timed cache-hit phase.
 These are local cached-binding measurements, not remote-provider throughput or
 a promised production speedup. Host noise affects small differences. Raw rounds,
 request counts, platform, and binary hashes are in
-[test/benchmarks/repository-pass2-benchmarks.json](test/benchmarks/repository-pass2-benchmarks.json).
+[test/benchmarks/repository-pass2-benchmarks.json](repository-pass2-benchmarks.json).
 The reproduction runner is
-[test/benchmarks/prompt_sql_cache_benchmark.py](test/benchmarks/prompt_sql_cache_benchmark.py).
+[test/benchmarks/prompt_sql_cache_benchmark.py](prompt_sql_cache_benchmark.py).
 
 ## Validation
 

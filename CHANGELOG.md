@@ -5,6 +5,49 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## Unreleased
+
+### Changed
+
+- Provider and usage-log requests honor `SET enable_external_access = false`
+  and fail with a `Permission Error`, including requests to a local model
+  server. Previously the extension's own HTTP client ignored the setting.
+  Functions that only build requests, such as `ai_completion_request_json`,
+  keep working.
+- Retry waits requested by a provider `Retry-After` header are capped at 60
+  seconds, like computed backoff. Previously a header could pause a query for
+  up to an hour before each retry.
+
+### Fixed
+
+- JSON numbers in provider responses, `ai_rerank` and `ai_score` replies, and
+  `DUCKDB_AI_LOG_SAMPLE_RATE` are parsed independently of the process locale.
+  Previously a host process that set a comma-decimal `LC_NUMERIC` locale read
+  `0.85` as `0`. Classifier artifacts, classifier metadata, schema context and
+  SQL cache keys are also written with the classic locale.
+- `DUCKDB_AI_TIMEOUT_SECONDS`, `DUCKDB_AI_CONNECT_TIMEOUT_SECONDS`,
+  `DUCKDB_AI_RETRY_COUNT` and `DUCKDB_AI_RETRY_BACKOFF_MS` are validated the
+  same way on every request path. Previously some paths accepted trailing text
+  such as `30s` and silently replaced a zero or negative timeout with 120.
+- `ai_fix_sql(mode := 'line')` no longer fails with an internal conversion
+  error when an error message contains an implausibly long line number.
+- `ai_generate_chunks` called laterally no longer resolves AI provider secrets
+  it never uses, so a misconfigured profile cannot break plain text chunking.
+
+### Maintenance
+
+- `make smoke` runs the deterministic smoke suites that CI runs, and CI,
+  `CONTRIBUTING.md`, `AGENTS.md` and the agent guide use it. The reliability
+  smoke picks the shared-library suffix for macOS or Linux.
+- Smoke tests and benchmarks set `DUCKDB_AGENT_MODE=0`, so they pass when a
+  coding agent runs them. DuckDB 2.0's CLI otherwise switches to Markdown
+  output under agents.
+- New `test/sql/external_access.test` covers the external-access behavior.
+- Removed committed `__pycache__` files and ignored them everywhere.
+- Moved the 0.6.x sweep reports next to their benchmark evidence in
+  `test/benchmarks/`, removed the completed provider rollout plan, and made
+  `CLAUDE.md` import `AGENTS.md` instead of duplicating it.
+
 ## 0.9.0 - 2026-10-26
 
 This release moves the extension to DuckDB 2.0.0. It loads only in DuckDB

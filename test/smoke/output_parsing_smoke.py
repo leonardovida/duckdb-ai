@@ -8,6 +8,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# Keep the DuckDB CLI on its default box output when a coding agent runs these tests.
+os.environ["DUCKDB_AGENT_MODE"] = "0"
+
 ROOT = Path(__file__).resolve().parents[2]
 
 

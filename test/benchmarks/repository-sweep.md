@@ -56,7 +56,7 @@ delimiter search also avoids repeatedly searching the suffix for a missing page
 break. Existing batching and similarity deduplication request counts are retained.
 
 Raw timings, request counts, retained/dropped usage events, and sampled process
-metrics are in [repository-sweep-benchmarks.json](test/benchmarks/repository-sweep-benchmarks.json).
+metrics are in [repository-sweep-benchmarks.json](repository-sweep-benchmarks.json).
 These results measure local overhead, not remote-provider latency or production
 throughput. No material similarity speedup was measured.
 

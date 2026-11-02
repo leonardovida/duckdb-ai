@@ -4,6 +4,7 @@
 import argparse
 import ctypes
 import json
+import locale
 import os
 import random
 import subprocess
@@ -13,6 +14,9 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from repository_regression_smoke import RegressionProvider, literal
+
+# Keep the DuckDB CLI on its default box output when a coding agent runs these tests.
+os.environ["DUCKDB_AGENT_MODE"] = "0"
 
 
 def json_stream(value):
@@ -24,6 +28,36 @@ def json_stream(value):
         results.append(result)
         value = value[end:]
     return results
+
+
+COMMA_DECIMAL_LOCALES = ("de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8")
+
+
+def check_comma_decimal_locale(api, connection):
+    """A host that sets a comma-decimal LC_NUMERIC must not change how replies and JSON numbers parse."""
+    previous = locale.setlocale(locale.LC_NUMERIC)
+    for name in COMMA_DECIMAL_LOCALES:
+        try:
+            locale.setlocale(locale.LC_NUMERIC, name)
+            break
+        except locale.Error:
+            continue
+    else:
+        print("skipping comma-decimal locale check: no de_DE or fr_FR locale installed")
+        return 0
+    try:
+        queries = (
+            "SELECT CASE WHEN ai_rerank('return JSON:0.85', 'x', profile := 'shared_ai') = 0.85 THEN 1 "
+            "ELSE error('locale changed the rerank score') END;",
+            "SELECT CASE WHEN ai_complete_json('return JSON:{\"score\":0.85}', profile := 'shared_ai', "
+            'response_schema := \'{"type":"object","properties":{"score":{"type":"number","minimum":0.5}}}\') '
+            "IS NOT NULL THEN 1 ELSE error('locale changed a JSON number') END;",
+        )
+        for query in queries:
+            assert api.duckdb_query(connection, query.encode(), None) == 0, query
+    finally:
+        locale.setlocale(locale.LC_NUMERIC, previous)
+    return 1
 
 
 def run(duckdb, library=None):
@@ -196,6 +230,7 @@ def run(duckdb, library=None):
                     )
                 assert statuses == [0] * 4 and len(RegressionProvider.requests) - before == 1
                 checks += 1
+                checks += check_comma_decimal_locale(api, connections[0])
             finally:
                 for connection in connections:
                     api.duckdb_disconnect(ctypes.byref(connection))
