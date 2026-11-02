@@ -86,9 +86,9 @@ SET enable_external_access = false;
 statement error
 SELECT ai_complete('hello', provider := 'ollama', model := 'm', base_url := 'http://127.0.0.1:9', cache := false);
 ----
-Permission Error: AI provider request to "http://127.0.0.1:9/api/chat" is not allowed because enable_external_access is false
+Permission Error: AI provider request to "127.0.0.1" is disabled because enable_external_access is false. Add the endpoint to allowed_directories
 
 statement error
 SELECT ai_embed('hello', provider := 'ollama', model := 'm', base_url := 'http://127.0.0.1:9', cache := false);
 ----
-is not allowed because enable_external_access is false
+is disabled because enable_external_access is false

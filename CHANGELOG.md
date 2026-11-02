@@ -15,25 +15,60 @@ include SQL API changes and patch versions should preserve the SQL API.
 
 ### Changed
 
+- Provider and usage-log requests honor `SET enable_external_access = false`
+  and fail with a `Permission Error`, including requests to a local model
+  server, unless DuckDB's `allowed_directories` or `allowed_paths` permit the
+  endpoint. Previously the extension's own HTTP client ignored the setting.
+  Functions that only build requests, such as `ai_completion_request_json`,
+  keep working.
 - API keys are only sent to the origin (scheme, host and port) they are
   configured for. A key from a `TYPE duckdb_ai` secret goes to that secret's
   `BASE_URL`, otherwise to the provider's built-in endpoint or its base URL
-  environment variable, plus any host in `DUCKDB_AI_ALLOWED_HOSTS`. Previously a query-level `base_url`,
-  `duckdb_ai_base_url` or external model `location` could send the key to any
-  host, which let remote clients of a shared server send its key elsewhere.
-  Setups that pair an environment or secret key with a session `base_url`, for
-  example a gateway, now fail with an error that names the fix: store
-  `BASE_URL` in the secret, set the provider's base URL environment variable, or
-  list the host in `DUCKDB_AI_ALLOWED_HOSTS`.
+  environment variable, plus any host in `DUCKDB_AI_ALLOWED_HOSTS`. Previously
+  a query-level `base_url`, `duckdb_ai_base_url` or external model `location`
+  could send the key to any host, which let remote clients of a shared server
+  send its key elsewhere. Setups that pair an environment or secret key with a
+  session `base_url`, for example a gateway, now fail with an error that names
+  the fix: store `BASE_URL` in the secret, set the provider's base URL
+  environment variable, or list the host in `DUCKDB_AI_ALLOWED_HOSTS`.
 - The `DUCKDB_AI_ALLOWED_HOSTS` environment variable now applies to every
   request. Previously it was only the default for `duckdb_ai_allowed_hosts`, so
   a session could replace it with a wider list. Sessions can still narrow it.
+- Retry waits requested by a provider `Retry-After` header are capped at 60
+  seconds, like computed backoff. Previously a header could pause a query for
+  up to an hour before each retry.
 
 ### Fixed
 
-- Provider and usage-log requests honor `enable_external_access = false`. They
-  are only sent to endpoints listed in `allowed_directories` or `allowed_paths`.
-  Previously the extension ignored the setting.
+- JSON numbers in provider responses, `ai_rerank` and `ai_score` replies, and
+  `DUCKDB_AI_LOG_SAMPLE_RATE` are parsed independently of the process locale.
+  Previously a host process that set a comma-decimal `LC_NUMERIC` locale read
+  `0.85` as `0`. Classifier artifacts, classifier metadata, schema context and
+  SQL cache keys are also written with the classic locale.
+- `DUCKDB_AI_TIMEOUT_SECONDS`, `DUCKDB_AI_CONNECT_TIMEOUT_SECONDS`,
+  `DUCKDB_AI_RETRY_COUNT` and `DUCKDB_AI_RETRY_BACKOFF_MS` are validated the
+  same way on every request path. Previously some paths accepted trailing text
+  such as `30s` and silently replaced a zero or negative timeout with 120.
+- `ai_fix_sql(mode := 'line')` no longer fails with an internal conversion
+  error when an error message contains an implausibly long line number.
+- `ai_generate_chunks` called laterally no longer resolves AI provider secrets
+  it never uses, so a misconfigured profile cannot break plain text chunking.
+
+### Maintenance
+
+- `make smoke` runs the deterministic smoke suites that CI runs, and CI,
+  `CONTRIBUTING.md`, `AGENTS.md` and the agent guide use it. The reliability
+  smoke picks the shared-library suffix for macOS or Linux.
+- Smoke tests and benchmarks set `DUCKDB_AGENT_MODE=0`, so they pass when a
+  coding agent runs them. DuckDB 2.0's CLI otherwise switches to Markdown
+  output under agents.
+- New `test/sql/external_access.test` covers the external-access behavior.
+  `test/sql/server_guards.test` and `test/smoke/quack_server_smoke.py` cover
+  credential binding, the environment allowlist and a real Quack server.
+- Removed committed `__pycache__` files and ignored them everywhere.
+- Moved the 0.6.x sweep reports next to their benchmark evidence in
+  `test/benchmarks/`, removed the completed provider rollout plan, and made
+  `CLAUDE.md` import `AGENTS.md` instead of duplicating it.
 
 ## 0.9.0 - 2026-10-26
 

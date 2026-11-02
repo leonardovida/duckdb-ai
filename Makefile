@@ -18,3 +18,14 @@ TESTS_BASE_DIRECTORY = "test/sql/"
 .PHONY: tidy-check-ai
 tidy-check-ai: tidy-check
 	cd build/tidy && python3 ../../duckdb/scripts/run-clang-tidy.py '$(PROJ_DIR)src/' -header-filter '$(PROJ_DIR)src/' -quiet -checks=-google-runtime-int ${TIDY_THREAD_PARAMETER} ${TIDY_BINARY_PARAMETER} ${TIDY_PERFORM_CHECKS}
+
+# Deterministic smoke suites against local mock providers; CI runs this target after `make release`.
+# mock_provider_smoke.py also runs the provider, Jev, schema and transport smokes it imports.
+SMOKE_TESTS = mock_provider docs_coverage decision_providers chaining native_types output_parsing extension_upload \
+	resumable_enrichment jev_batch_evaluation accuracy_gate execution_deadline quack_server
+SHARED_LIBRARY_SUFFIX := $(if $(filter Darwin,$(shell uname -s)),dylib,so)
+
+.PHONY: smoke
+smoke:
+	@set -e; for test in $(SMOKE_TESTS); do echo "== $${test}_smoke.py"; python3 test/smoke/$${test}_smoke.py; done
+	python3 test/smoke/reliability_smoke.py --library build/release/src/libduckdb.$(SHARED_LIBRARY_SUFFIX)

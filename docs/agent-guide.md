@@ -171,10 +171,10 @@ Read the repository's [AGENTS.md](https://github.com/leonardovida/duckdb-ai/blob
 ```sh
 GEN=ninja make release
 GEN=ninja make test
-python3 test/smoke/mock_provider_smoke.py
+GEN=ninja make smoke
 ```
 
-`test/smoke/mock_provider_smoke.py` checks request and response shapes against
+`make smoke` checks request and response shapes against
 local HTTP mocks. It does not prove that a live provider accepts the request or
 returns every possible response.
 

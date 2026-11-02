@@ -183,7 +183,9 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update -y -qq
-          sudo apt-get install -y -qq ninja-build libcurl4-openssl-dev ccache openssl
+          sudo apt-get install -y -qq ninja-build libcurl4-openssl-dev ccache openssl locales
+          # reliability_smoke.py checks number parsing under a comma-decimal locale.
+          sudo locale-gen de_DE.UTF-8
 
       - name: Build release extension
         shell: bash
@@ -195,22 +197,9 @@ jobs:
         shell: bash
         run: make test
 
-      - name: Run mock-provider smoke test
+      - name: Run mock-provider smoke tests
         shell: bash
-        run: |
-          python3 test/smoke/mock_provider_smoke.py
-          python3 test/smoke/docs_coverage_smoke.py
-          python3 test/smoke/decision_providers_smoke.py
-          python3 test/smoke/chaining_smoke.py
-          python3 test/smoke/native_types_smoke.py
-          python3 test/smoke/output_parsing_smoke.py
-          python3 test/smoke/extension_upload_smoke.py
-          python3 test/smoke/resumable_enrichment_smoke.py
-          python3 test/smoke/jev_batch_evaluation_smoke.py
-          python3 test/smoke/accuracy_gate_smoke.py
-          python3 test/smoke/execution_deadline_smoke.py
-          python3 test/smoke/quack_server_smoke.py
-          python3 test/smoke/reliability_smoke.py --library build/release/src/libduckdb.so
+        run: make smoke
 
       - name: Run owned-code ASan and UBSan checks
         shell: bash

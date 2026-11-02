@@ -3,6 +3,8 @@
 #include "duckdb_ai_json.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/operator/double_cast_operator.hpp"
+#include "duckdb/common/thread_annotation/thread_annotation.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
@@ -385,10 +387,9 @@ bool TryReadEnvDouble(const std::string &name, double &target, double min_value,
 		return false;
 	}
 	try {
-		size_t parsed = 0;
-		auto value = std::stod(configured, &parsed);
-		if (parsed != configured.size()) {
-			throw std::invalid_argument("trailing characters");
+		double value = 0;
+		if (!TryDoubleCast<double>(configured.c_str(), configured.size(), value, false)) {
+			throw std::invalid_argument("not a number");
 		}
 		if (!std::isfinite(value) || value < min_value || value > max_value) {
 			throw InvalidInputException("%s must be between %.0f and %.0f", name, min_value, max_value);
@@ -546,7 +547,9 @@ bool HostAllowedByList(const std::string &host, const std::string &allowed_hosts
 	return false;
 }
 
-void EnforceExternalAccess(const std::string &url, const CompletionOptions &options) {
+//! Honor the same switch that blocks httpfs, COPY and file readers, including its allowed_directories and
+//! allowed_paths exceptions.
+void EnforceExternalAccess(const std::string &url, const std::string &host, const CompletionOptions &options) {
 	if (!options.client_context) {
 		return;
 	}
@@ -554,13 +557,15 @@ void EnforceExternalAccess(const std::string &url, const CompletionOptions &opti
 	if (Settings::Get<EnableExternalAccessSetting>(config) || config.CanAccessFile(url, FileType::FILE_TYPE_REGULAR)) {
 		return;
 	}
-	throw PermissionException("AI provider request to \"%s\" is not allowed because enable_external_access is "
-	                          "false. Add the endpoint to allowed_directories or allowed_paths to permit it.",
-	                          url);
+	throw PermissionException("AI provider request to \"%s\" is disabled because enable_external_access is false. "
+	                          "Add the endpoint to allowed_directories or allowed_paths to permit it.",
+	                          host);
 }
 
 void EnforceAllowedHost(const std::string &url, const CompletionOptions &options) {
 	auto host = UrlHost(url);
+	// Every outbound request passes through here.
+	EnforceExternalAccess(url, host, options);
 	if (!HostAllowedByList(host, AllowedHosts(options))) {
 		throw InvalidInputException("AI provider host \"%s\" is not allowed by duckdb_ai_allowed_hosts", host);
 	}
@@ -570,7 +575,6 @@ void EnforceAllowedHost(const std::string &url, const CompletionOptions &options
 		throw InvalidInputException(
 		    "AI provider host \"%s\" is not allowed by the DUCKDB_AI_ALLOWED_HOSTS environment variable", host);
 	}
-	EnforceExternalAccess(url, options);
 }
 
 void EnsureCurlGlobalInit() {
@@ -591,11 +595,12 @@ struct CurlShareLocks {
 	}
 };
 
-void CurlShareLock(CURL *, curl_lock_data data, curl_lock_access, void *userptr) {
+// libcurl pairs these callbacks itself, so the lock deliberately outlives CurlShareLock.
+void CurlShareLock(CURL *, curl_lock_data data, curl_lock_access, void *userptr) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 	reinterpret_cast<CurlShareLocks *>(userptr)->MutexFor(data).lock();
 }
 
-void CurlShareUnlock(CURL *, curl_lock_data data, void *userptr) {
+void CurlShareUnlock(CURL *, curl_lock_data data, void *userptr) DUCKDB_NO_THREAD_SAFETY_ANALYSIS {
 	reinterpret_cast<CurlShareLocks *>(userptr)->MutexFor(data).unlock();
 }
 
@@ -1154,50 +1159,18 @@ size_t MaxResponseCacheEntries(const CompletionOptions &options) {
 	if (options.has_response_cache_max_entries) {
 		return static_cast<size_t>(options.response_cache_max_entries);
 	}
-	auto configured = GetEnv("DUCKDB_AI_CACHE_MAX_ENTRIES");
-	if (configured.empty()) {
-		return DEFAULT_MAX_RESPONSE_CACHE_ENTRIES;
-	}
-	try {
-		size_t parsed = 0;
-		auto value = std::stoll(configured, &parsed);
-		if (parsed != configured.size()) {
-			throw std::invalid_argument("trailing characters");
-		}
-		if (value < 0 || value > 1000000) {
-			throw InvalidInputException("DUCKDB_AI_CACHE_MAX_ENTRIES must be between 0 and 1000000");
-		}
-		return static_cast<size_t>(value);
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_CACHE_MAX_ENTRIES must be an integer between 0 and 1000000");
-	}
+	int64_t max_entries = NumericCast<int64_t>(DEFAULT_MAX_RESPONSE_CACHE_ENTRIES);
+	TryReadEnvInt64("DUCKDB_AI_CACHE_MAX_ENTRIES", max_entries, 0, 1000000);
+	return static_cast<size_t>(max_entries);
 }
 
 int64_t ResponseCacheTtlSeconds(const CompletionOptions &options) {
 	if (options.has_cache_ttl_seconds) {
 		return options.cache_ttl_seconds;
 	}
-	auto configured = GetEnv("DUCKDB_AI_CACHE_TTL_SECONDS");
-	if (configured.empty()) {
-		return 0;
-	}
-	try {
-		size_t parsed = 0;
-		auto value = std::stoll(configured, &parsed);
-		if (parsed != configured.size()) {
-			throw std::invalid_argument("trailing characters");
-		}
-		if (value < 0 || value > 31536000) {
-			throw InvalidInputException("DUCKDB_AI_CACHE_TTL_SECONDS must be between 0 and 31536000");
-		}
-		return value;
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_CACHE_TTL_SECONDS must be an integer between 0 and 31536000");
-	}
+	int64_t ttl_seconds = 0;
+	TryReadEnvInt64("DUCKDB_AI_CACHE_TTL_SECONDS", ttl_seconds, 0, 31536000);
+	return ttl_seconds;
 }
 
 bool ResponseCacheEntryExpired(const CachedHttpResponse &entry, const CompletionOptions &options) {
@@ -1637,7 +1610,11 @@ bool ConvertYyjsonValue(duckdb_yyjson::yyjson_val *source, JsonValue &target, st
 	if (duckdb_yyjson::yyjson_is_raw(source)) {
 		target.type = JsonValueType::NUMBER;
 		auto text = std::string(duckdb_yyjson::yyjson_get_raw(source), duckdb_yyjson::yyjson_get_len(source));
-		target.number_value = std::strtod(text.c_str(), nullptr);
+		// strtod follows the process LC_NUMERIC locale and would stop at the '.' under a comma-decimal locale.
+		if (!TryDoubleCast<double>(text.c_str(), text.size(), target.number_value, false)) {
+			error = "invalid JSON number";
+			return false;
+		}
 		if (!std::isfinite(target.number_value)) {
 			error = "JSON number is outside the finite DOUBLE range";
 			return false;
@@ -2766,17 +2743,12 @@ int CurlProgressCallback(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl
 	return ClientInterrupted(state ? state->client_context : nullptr) ? 1 : 0;
 }
 
+// The fallbacks below read the environment for options that were not snapshotted at bind time. They use the same
+// strict parsing and ranges as SnapshotEnvironmentOptionsInternal so both paths accept and reject the same values.
 long TimeoutSeconds() {
-	auto configured = GetEnv("DUCKDB_AI_TIMEOUT_SECONDS");
-	if (configured.empty()) {
-		return 120;
-	}
-	try {
-		auto timeout = std::stol(configured);
-		return timeout > 0 ? timeout : 120;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_TIMEOUT_SECONDS must be a positive integer");
-	}
+	int64_t timeout = 120;
+	TryReadEnvInt64("DUCKDB_AI_TIMEOUT_SECONDS", timeout, 1, 31536000);
+	return static_cast<long>(timeout);
 }
 
 long TimeoutSeconds(const CompletionOptions &options) {
@@ -2790,21 +2762,14 @@ long TimeoutSeconds(const CompletionOptions &options) {
 }
 
 long ConnectTimeoutSeconds(long timeout_seconds) {
-	auto configured = GetEnv("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS");
-	if (configured.empty()) {
+	int64_t timeout = 0;
+	if (!TryReadEnvInt64("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS", timeout, 1, 31536000)) {
 		return std::max<long>(1, std::min<long>(10, timeout_seconds));
 	}
-	try {
-		auto timeout = std::stol(configured);
-		if (timeout <= 0 || timeout > timeout_seconds) {
-			throw InvalidInputException("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS must be between 1 and the total timeout");
-		}
-		return timeout;
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS must be a positive integer");
+	if (timeout > timeout_seconds) {
+		throw InvalidInputException("DUCKDB_AI_CONNECT_TIMEOUT_SECONDS must be between 1 and the total timeout");
 	}
+	return static_cast<long>(timeout);
 }
 
 long ConnectTimeoutSeconds(const CompletionOptions &options, long timeout_seconds) {
@@ -2822,121 +2787,45 @@ long RetryCount(const CompletionOptions &options) {
 	if (options.has_retry_count) {
 		return static_cast<long>(options.retry_count);
 	}
-	auto configured = GetEnv("DUCKDB_AI_RETRY_COUNT");
-	if (configured.empty()) {
-		return 0;
-	}
-	try {
-		auto retry_count = std::stol(configured);
-		if (retry_count < 0 || retry_count > 10) {
-			throw InvalidInputException("DUCKDB_AI_RETRY_COUNT must be between 0 and 10");
-		}
-		return retry_count;
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_RETRY_COUNT must be an integer between 0 and 10");
-	}
+	int64_t retry_count = 0;
+	TryReadEnvInt64("DUCKDB_AI_RETRY_COUNT", retry_count, 0, 10);
+	return static_cast<long>(retry_count);
 }
 
 long RetryBackoffMs(const CompletionOptions &options) {
 	if (options.has_retry_backoff_ms) {
 		return static_cast<long>(options.retry_backoff_ms);
 	}
-	auto configured = GetEnv("DUCKDB_AI_RETRY_BACKOFF_MS");
-	if (configured.empty()) {
-		return 1000;
-	}
-	try {
-		auto retry_backoff_ms = std::stol(configured);
-		if (retry_backoff_ms < 0 || retry_backoff_ms > 60000) {
-			throw InvalidInputException("DUCKDB_AI_RETRY_BACKOFF_MS must be between 0 and 60000");
-		}
-		return retry_backoff_ms;
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_RETRY_BACKOFF_MS must be an integer between 0 and 60000");
-	}
+	int64_t retry_backoff_ms = 1000;
+	TryReadEnvInt64("DUCKDB_AI_RETRY_BACKOFF_MS", retry_backoff_ms, 0, 60000);
+	return static_cast<long>(retry_backoff_ms);
 }
 
 int64_t MaxConcurrentRequests(const CompletionOptions &options) {
 	if (options.has_max_concurrent_requests) {
 		return options.max_concurrent_requests;
 	}
-	auto configured = GetEnv("DUCKDB_AI_MAX_CONCURRENT_REQUESTS");
-	if (configured.empty()) {
-		return 0;
-	}
-	try {
-		size_t parsed = 0;
-		auto max_concurrent_requests = std::stoll(configured, &parsed);
-		if (parsed != configured.size()) {
-			throw std::invalid_argument("trailing characters");
-		}
-		if (max_concurrent_requests < 0 || max_concurrent_requests > MAX_PROVIDER_CHUNK_WORKERS) {
-			throw InvalidInputException("DUCKDB_AI_MAX_CONCURRENT_REQUESTS must be between 0 and %lld",
-			                            static_cast<long long>(MAX_PROVIDER_CHUNK_WORKERS));
-		}
-		return max_concurrent_requests;
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_MAX_CONCURRENT_REQUESTS must be an integer between 0 and %lld",
-		                            static_cast<long long>(MAX_PROVIDER_CHUNK_WORKERS));
-	}
+	int64_t max_concurrent_requests = 0;
+	TryReadEnvInt64("DUCKDB_AI_MAX_CONCURRENT_REQUESTS", max_concurrent_requests, 0, MAX_PROVIDER_CHUNK_WORKERS);
+	return max_concurrent_requests;
 }
 
 int64_t MinRequestIntervalMs(const CompletionOptions &options) {
 	if (options.has_min_request_interval_ms) {
 		return options.min_request_interval_ms;
 	}
-	auto configured = GetEnv("DUCKDB_AI_MIN_REQUEST_INTERVAL_MS");
-	if (configured.empty()) {
-		return 0;
-	}
-	try {
-		size_t parsed = 0;
-		auto min_request_interval_ms = std::stoll(configured, &parsed);
-		if (parsed != configured.size()) {
-			throw std::invalid_argument("trailing characters");
-		}
-		if (min_request_interval_ms < 0 || min_request_interval_ms > 60000) {
-			throw InvalidInputException("DUCKDB_AI_MIN_REQUEST_INTERVAL_MS must be between 0 and 60000");
-		}
-		return min_request_interval_ms;
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_MIN_REQUEST_INTERVAL_MS must be an integer between 0 and 60000");
-	}
+	int64_t min_request_interval_ms = 0;
+	TryReadEnvInt64("DUCKDB_AI_MIN_REQUEST_INTERVAL_MS", min_request_interval_ms, 0, 60000);
+	return min_request_interval_ms;
 }
 
 int64_t TokenLimitPerMinute(const CompletionOptions &options) {
 	if (options.has_token_limit_per_minute) {
 		return options.token_limit_per_minute;
 	}
-	auto configured = GetEnv("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE");
-	if (configured.empty()) {
-		return 0;
-	}
-	try {
-		size_t parsed = 0;
-		auto token_limit_per_minute = std::stoll(configured, &parsed);
-		if (parsed != configured.size()) {
-			throw std::invalid_argument("trailing characters");
-		}
-		if (token_limit_per_minute < 0 || token_limit_per_minute > MAX_TOKEN_LIMIT_PER_MINUTE) {
-			throw InvalidInputException("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE must be between 0 and %lld",
-			                            static_cast<long long>(MAX_TOKEN_LIMIT_PER_MINUTE));
-		}
-		return token_limit_per_minute;
-	} catch (InvalidInputException &) {
-		throw;
-	} catch (...) {
-		throw InvalidInputException("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE must be an integer between 0 and %lld",
-		                            static_cast<long long>(MAX_TOKEN_LIMIT_PER_MINUTE));
-	}
+	int64_t token_limit_per_minute = 0;
+	TryReadEnvInt64("DUCKDB_AI_TOKEN_LIMIT_PER_MINUTE", token_limit_per_minute, 0, MAX_TOKEN_LIMIT_PER_MINUTE);
+	return token_limit_per_minute;
 }
 
 void PruneProviderTokenWindow(ProviderRuntimeState &state, std::chrono::steady_clock::time_point now) {
@@ -3069,8 +2958,9 @@ bool IsRetryableHttpStatus(long status) {
 }
 
 long RetryDelayMs(long base_backoff_ms, long attempt, long retry_after_ms) {
+	// A provider may ask for a wait of up to an hour; cap it like computed backoff so a retry never parks the query.
 	if (retry_after_ms >= 0) {
-		return retry_after_ms;
+		return std::min<long>(retry_after_ms, 60000);
 	}
 	if (base_backoff_ms <= 0) {
 		return 0;
@@ -5463,10 +5353,9 @@ double LogSampleRate(const CompletionOptions &options) {
 		return 1.0;
 	}
 	try {
-		size_t parsed = 0;
-		auto rate = std::stod(configured, &parsed);
-		if (parsed != configured.size()) {
-			throw std::invalid_argument("trailing characters");
+		double rate = 0;
+		if (!TryDoubleCast<double>(configured.c_str(), configured.size(), rate, false)) {
+			throw std::invalid_argument("not a number");
 		}
 		if (!std::isfinite(rate) || rate < 0 || rate > 1) {
 			throw InvalidInputException("DUCKDB_AI_LOG_SAMPLE_RATE must be between 0 and 1");

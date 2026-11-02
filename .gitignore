@@ -7,4 +7,5 @@ local-docs/
 .DS_Store
 testext
 __pycache__/
+*.pyc
 .Rhistory

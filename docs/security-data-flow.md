@@ -56,17 +56,25 @@ starts the process. Every request must match it as well as any session
 allowlist, so `duckdb_ai_allowed_hosts` and `allowed_hosts := ...` can narrow it
 but not widen it.
 
-With `enable_external_access = false`, the extension only sends requests to
-endpoints listed in DuckDB's `allowed_directories` or `allowed_paths`, for
-example `SET allowed_directories = ['https://api.openai.com/']` before external
-access is disabled.
-
-For a shared server, such as one serving remote clients over Quack, see
-[Run on a Quack server](quack-server.md).
-
 The URL validation still runs when no host allowlist is configured. An
 allowlist controls which HTTP(S) hosts are reachable; it does not enable other
 libcurl protocols.
+
+`SET enable_external_access = false` blocks every provider and usage-log
+request, including requests to a local model server, with a `Permission Error`.
+Endpoints listed in DuckDB's `allowed_directories` or `allowed_paths` stay
+reachable, for example after
+`SET allowed_directories = ['https://api.openai.com/']` before external access
+is disabled.
+Functions that only build or inspect requests, such as
+`ai_completion_request_json`, keep working. Under `on_error := 'null'` a
+blocked row returns `NULL` and `ai_usage()` records the reason. DuckDB also
+stops reading the persistent secret directory once external access is off, so
+set `allow_persistent_secrets = false` first or use environment variables and
+temporary secrets.
+
+For a shared server, such as one serving remote clients over Quack, see
+[Run on a Quack server](quack-server.md).
 
 ## Data sent by function family
 

@@ -450,8 +450,9 @@ combination supports every feature.
 - **Egress control.** `allowed_hosts` (or `SET duckdb_ai_allowed_hosts`)
   restricts which hosts the extension may contact. The
   `DUCKDB_AI_ALLOWED_HOSTS` environment variable is a ceiling sessions cannot
-  widen, stored API keys only go to the origin they are configured for, and
-  `enable_external_access = false` is honored.
+  widen, and stored API keys only go to the origin they are configured for.
+  `SET enable_external_access = false` blocks provider requests except to
+  endpoints in `allowed_directories` or `allowed_paths`.
 - **Shared servers.** To serve AI functions to remote DuckDB clients over
   Quack, see [Run on a Quack server](docs/quack-server.md).
 - **Usage logs** stay in memory unless you configure an external collector, and
@@ -478,7 +479,7 @@ git clone --recurse-submodules https://github.com/leonardovida/duckdb-ai.git
 cd duckdb-ai
 GEN=ninja make release
 GEN=ninja make test
-python3 test/smoke/mock_provider_smoke.py
+GEN=ninja make smoke
 ./build/release/duckdb
 ```
 

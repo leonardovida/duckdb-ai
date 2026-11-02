@@ -10,6 +10,8 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
+# Keep the DuckDB CLI on its default box output when a coding agent runs these tests.
+os.environ["DUCKDB_AGENT_MODE"] = "0"
 # Environment API keys are only sent to their provider's host or to operator-allowed hosts,
 # so the mock servers on loopback have to be allowed explicitly.
 os.environ["DUCKDB_AI_ALLOWED_HOSTS"] = "127.0.0.1,localhost"
