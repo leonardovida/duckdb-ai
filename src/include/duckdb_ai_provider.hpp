@@ -247,6 +247,8 @@ ProviderCapabilities GetProviderCapabilities(const CompletionOptions &options, b
 void ApplyModelProfileOptions(CompletionOptions &options);
 //! Return a local approximate token count used by ai_count_tokens() and token-aware pacing.
 int64_t EstimateTokenCount(const std::string &input);
+//! Same estimate from the input's UTF-8 byte length.
+int64_t EstimateTokenCount(idx_t input_bytes);
 //! Build a completion request payload without making a network call.
 std::string BuildRequestJson(const std::string &prompt, const std::string &model, const std::string &provider);
 //! Build a completion request payload from a full option set.
@@ -267,8 +269,12 @@ std::string BuildEmbeddingRequestJson(const std::string &input, const Completion
 EmbeddingResult Embed(const std::string &input, const std::string &model, const std::string &provider);
 //! Execute an embedding request from a full option set.
 EmbeddingResult Embed(const std::string &input, const CompletionOptions &options);
-//! Execute a batched embedding request from a full option set.
-std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, const CompletionOptions &options);
+//! Runs task(i) for every i below task_count and returns once all of them have finished. Tasks may run concurrently.
+using TaskRunner = std::function<void(idx_t task_count, const std::function<void(idx_t)> &task)>;
+//! Execute a batched embedding request from a full option set. Separate batches go through run_tasks when given, and
+//! run one after another otherwise.
+std::vector<EmbeddingResult> EmbedMany(const std::vector<std::string> &inputs, const CompletionOptions &options,
+                                       const TaskRunner &run_tasks = nullptr);
 //! Record an embedding served by the query-local similarity cache.
 void RecordEmbeddingCacheHit(const std::string &input, int64_t dimensions, const CompletionOptions &options);
 //! POST a JSON control-plane request to DUCKDB_AI_CONTROL_PLANE_URL.
