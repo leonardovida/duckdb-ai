@@ -3271,10 +3271,10 @@ bool FailEmptyEmbeddingInput(JOB &job, bool empty) {
 	if (!empty) {
 		return false;
 	}
-	InvalidInputException error("ai_embed input must not be empty");
 	if (job.fail_on_error) {
-		throw error;
+		throw InvalidInputException("ai_embed input must not be empty");
 	}
+	InvalidInputException error("ai_embed input must not be empty");
 	job.error_message = error.what();
 	job.exception = std::make_exception_ptr(error);
 	return true;
