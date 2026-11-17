@@ -53,6 +53,8 @@ class Provider(BaseHTTPRequestHandler):
                     ],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
                 }
+            elif "RECURSIVE" in prompt:
+                response = {"choices": [{"message": {"content": json.dumps({"a": 1, "child": {"a": 2}})}}]}
             elif "BIGBODY" in prompt:
                 response = None
                 body = ("x" * 100000 + self.headers.get("Authorization", "")).encode()
@@ -213,6 +215,42 @@ SET duckdb_ai_retry_count = 0;
         )
         chat = [request for path, request, _ in Provider.requests if path.endswith("/chat/completions")]
         assert rows == [["ok"], ["0"]] and len(chat) == 1, (rows, chat)
+        checks += 1
+
+        # The per-row path still completes: the row's secret supplies the key and the context is returned.
+        rows = execute(
+            f"CREATE SECRET lateral_secret (TYPE duckdb_ai, AI_PROVIDER 'openai', API_KEY '{SECRET_KEY}', "
+            f"BASE_URL '{base_url}');"
+            "SELECT chunk_to_embed, error FROM (SELECT 'hello world' AS body) d, "
+            "ai_prep_search(d.body, enrich := true, secret := 'lateral_secret');",
+            base_env,
+        )
+        assert rows[-1] == ["Document context: ok\nContent:\nhello world", "NULL"], rows
+        assert [headers.get("Authorization") for _, _, headers in Provider.requests] == ["Bearer " + SECRET_KEY]
+        checks += 1
+
+        # A recursive response schema binds, and the recursive property comes back as JSON text.
+        schema = '{"type":"object","properties":{"a":{"type":"integer"},"child":{"$ref":"#"}}}'
+        rows = execute(f"SELECT a, child FROM ai_complete_record('RECURSIVE', '{schema}');")
+        assert rows[0][0] == "1" and json.loads(rows[0][1]) == {"a": 2}, rows
+        checks += 1
+
+        # The Cloudflare decision model is a URL path segment; a name that changes the route is rejected.
+        cloudflare_env = dict(base_env, CLOUDFLARE_API_KEY="pass3-cf-key", CLOUDFLARE_ACCOUNT_ID="acct")
+        for model in ("clef/../../x", "clef?x=1", "clef#x", "clef%2e"):
+            Provider.requests.clear()
+            result = subprocess.run(
+                command,
+                input=(
+                    setup + "SELECT ai_decide('state', {team: MAP {'a': 'A', 'b': 'B'}}, provider := 'cloudflare', "
+                    f"model := '{model}');"
+                ).encode(),
+                env=cloudflare_env,
+                capture_output=True,
+                timeout=30,
+            )
+            assert result.returncode != 0 and b"is not a valid model name" in result.stderr, result.stderr
+            assert not Provider.requests
         checks += 1
     finally:
         server.shutdown()

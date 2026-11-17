@@ -39,12 +39,13 @@ include SQL API changes and patch versions should preserve the SQL API.
   `ai_usage()`. Previously it failed as an unreadable response without token
   counts.
 - Response bodies quoted in errors are limited to 4096 bytes, and the provider
-  key is redacted from them on every path. Previously an unreadable response
-  was quoted whole, up to the response size limit, in the error and in
-  `ai_usage()`.
-- Identical concurrent requests that share one cached provider call report the
-  same error text when that call fails. Previously the waiting rows received
-  the error wrapped a second time as JSON.
+  key is redacted from an unreadable completion or embedding response.
+  Previously such a response was quoted whole and unredacted, up to the
+  response size limit, in the error and in `ai_usage()`.
+- Identical cached requests from different threads or connections that wait
+  on one provider call report its error text as the caller that sent it does.
+  Previously the waiting callers received the error wrapped a second time as
+  JSON.
 - `ai_schema_prompt` and `ai_sql` with `sample_rows` truncate long sample
   values on a character boundary. Previously a long multibyte value failed
   with an invalid Unicode error.
