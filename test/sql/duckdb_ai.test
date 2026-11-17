@@ -1756,3 +1756,88 @@ SELECT typeof(provider_events) = 'UBIGINT' AND typeof(request_attempts) = 'UBIGI
 FROM ai_usage_totals();
 ----
 true
+
+# A NULL row from a STRUCT-returning function is NULL in every field. Marking only the struct NULL left the fields
+# readable and uninitialized, which could crash the reader.
+query IIII
+SELECT r IS NULL, r.response IS NULL, length(r.response) IS NULL, r.error IS NULL
+FROM (SELECT ai_try_complete(p) AS r FROM (SELECT NULL::VARCHAR AS p FROM range(2)));
+----
+true	true	true	true
+true	true	true	true
+
+query I
+SELECT count(r.response) FROM (SELECT ai_try_complete(p) AS r FROM (SELECT NULL::VARCHAR AS p FROM range(3000)));
+----
+0
+
+query II
+SELECT r IS NULL, r.a IS NULL
+FROM (SELECT ai_extract_record(NULL::VARCHAR, '{"type":"object","properties":{"a":{"type":"string"}}}') AS r);
+----
+true	true
+
+query II
+SELECT r IS NULL, r.value IS NULL FROM (SELECT ai_classify_result(NULL::VARCHAR, ['a', 'b']) AS r);
+----
+true	true
+
+query II
+SELECT r IS NULL, r.used_fallback IS NULL FROM (SELECT ai_classify_optimized(NULL::VARCHAR, '{}') AS r);
+----
+true	true
+
+# Each row keeps the error of its own artifact when a chunk carries several.
+query II
+SELECT count(DISTINCT r.error), count(r.error)
+FROM (
+  SELECT ai_classify_optimized('x', a) AS r
+  FROM (VALUES ('{}'), ('{"version":1,"optimization":"minimize_cost"}'), ('{}')) v(a)
+);
+----
+2	3
+
+# Sample values are truncated on a character boundary.
+statement ok
+CREATE TABLE ai_multibyte_samples AS SELECT repeat('é', 200) AS s;
+
+query I
+SELECT contains(summary, 'é...') FROM ai_schema_prompt(include_tables := ['ai_multibyte_samples'], sample_rows := 1);
+----
+true
+
+statement ok
+DROP TABLE ai_multibyte_samples;
+
+# A recursive response schema binds: the recursive property has no finite column type and maps to JSON text.
+query II
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM ai_complete_record('x', '{"type":"object","properties":{"a":{"type":"integer"},"child":{"$ref":"#"}}}'))
+ORDER BY column_name;
+----
+a	BIGINT
+child	VARCHAR
+
+query I
+SELECT typeof(ai_extract_record(NULL::VARCHAR, '{"type":"object","properties":{"kids":{"type":"array","items":{"$ref":"#"}}}}'));
+----
+STRUCT(kids VARCHAR)
+
+query II
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM ai_complete_record('x', '{"$ref":"#/$defs/node","$defs":{"node":{"type":"object","properties":{"next":{"anyOf":[{"$ref":"#/$defs/node"},{"type":"null"}]}}}}}'));
+----
+next	VARCHAR
+
+# Shared references are expanded once per use; the expansion is bounded.
+statement error
+SELECT * FROM ai_complete_record('x', '{"type":"object","properties":{"r":{"$ref":"#/$defs/n0"}},"$defs":{"n0":{"type":"object","properties":{"a":{"$ref":"#/$defs/n1"},"b":{"$ref":"#/$defs/n1"}}},"n1":{"type":"object","properties":{"a":{"$ref":"#/$defs/n2"},"b":{"$ref":"#/$defs/n2"}}},"n2":{"type":"object","properties":{"a":{"$ref":"#/$defs/n3"},"b":{"$ref":"#/$defs/n3"}}},"n3":{"type":"object","properties":{"a":{"$ref":"#/$defs/n4"},"b":{"$ref":"#/$defs/n4"}}},"n4":{"type":"object","properties":{"a":{"$ref":"#/$defs/n5"},"b":{"$ref":"#/$defs/n5"}}},"n5":{"type":"object","properties":{"a":{"$ref":"#/$defs/n6"},"b":{"$ref":"#/$defs/n6"}}},"n6":{"type":"object","properties":{"a":{"$ref":"#/$defs/n7"},"b":{"$ref":"#/$defs/n7"}}},"n7":{"type":"object","properties":{"a":{"$ref":"#/$defs/n8"},"b":{"$ref":"#/$defs/n8"}}},"n8":{"type":"object","properties":{"a":{"$ref":"#/$defs/n9"},"b":{"$ref":"#/$defs/n9"}}},"n9":{"type":"object","properties":{"a":{"$ref":"#/$defs/n10"},"b":{"$ref":"#/$defs/n10"}}},"n10":{"type":"object","properties":{"a":{"$ref":"#/$defs/n11"},"b":{"$ref":"#/$defs/n11"}}},"n11":{"type":"object","properties":{"a":{"$ref":"#/$defs/n12"},"b":{"$ref":"#/$defs/n12"}}},"n12":{"type":"object","properties":{"a":{"$ref":"#/$defs/n13"},"b":{"$ref":"#/$defs/n13"}}},"n13":{"type":"object","properties":{"a":{"$ref":"#/$defs/n14"},"b":{"$ref":"#/$defs/n14"}}},"n14":{"type":"object","properties":{"a":{"$ref":"#/$defs/n15"},"b":{"$ref":"#/$defs/n15"}}},"n15":{"type":"object","properties":{"a":{"$ref":"#/$defs/n16"},"b":{"$ref":"#/$defs/n16"}}},"n16":{"type":"object","properties":{"a":{"$ref":"#/$defs/n17"},"b":{"$ref":"#/$defs/n17"}}},"n17":{"type":"object","properties":{"a":{"$ref":"#/$defs/n18"},"b":{"$ref":"#/$defs/n18"}}},"n18":{"type":"object","properties":{"a":{"$ref":"#/$defs/n19"},"b":{"$ref":"#/$defs/n19"}}},"n19":{"type":"object","properties":{"a":{"$ref":"#/$defs/n20"},"b":{"$ref":"#/$defs/n20"}}},"n20":{"type":"object","properties":{"v":{"type":"string"}}}}}');
+----
+schema expands to more than 10000 properties
+
+# A lateral ai_prep_search resolves the secret a row names instead of the one resolved at bind.
+statement error
+SELECT * FROM (SELECT 'hello world' AS body) d,
+  ai_prep_search(d.body, enrich := true, secret := 'ai_missing_secret', provider := 'openai', allowed_hosts := 'blocked.invalid');
+----
+AI secret "ai_missing_secret" was not found

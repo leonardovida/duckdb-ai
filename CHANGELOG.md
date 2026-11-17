@@ -5,6 +5,68 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
+## Unreleased
+
+### Performance
+
+- `ai_classify_optimized` parses each distinct classifier artifact once per
+  chunk instead of once per row. With a 10-label, 3072-dimension artifact,
+  4000 rows took 12.8 seconds and 680 MB before and take 1.4 seconds and 53 MB
+  now.
+
+### Fixed
+
+- NULL rows returned by `ai_try_complete`, `ai_extract_record`,
+  `ai_classify_result` and `ai_classify_optimized` are NULL in every field.
+  Previously the struct was NULL while its fields held uninitialized values, so
+  `count(r.response)` counted NULL rows and reading a field could crash the
+  process.
+- `ai_complete_record` and `ai_extract_record` accept a response schema with a
+  recursive `$ref`. The recursive property is returned as JSON text.
+  Previously binding such a schema crashed the process. A schema whose shared
+  references expand to more than 10000 properties now fails with an error
+  instead of binding for minutes.
+- A lateral `ai_prep_search` call resolves credentials per row, after the
+  row's `provider`, `secret` and `profile` options are applied. Previously the
+  secret was resolved once at bind, so a per-row `secret` was ignored and the
+  key of the session provider's secret could be sent to the provider a row
+  named.
+- An empty input no longer fails the other rows of an `ai_embed` or
+  `ai_similarity` batch under `on_error := 'null'`. Previously every row that
+  shared the request returned NULL and no request was sent.
+- A response cut at the token limit that contains only reasoning and no text
+  reports that `max_tokens` was reached and keeps its token counts in
+  `ai_usage()`. Previously it failed as an unreadable response without token
+  counts.
+- Response bodies quoted in errors are limited to 4096 bytes, and the provider
+  key is redacted from them on every path. Previously an unreadable response
+  was quoted whole, up to the response size limit, in the error and in
+  `ai_usage()`.
+- Identical concurrent requests that share one cached provider call report the
+  same error text when that call fails. Previously the waiting rows received
+  the error wrapped a second time as JSON.
+- `ai_schema_prompt` and `ai_sql` with `sample_rows` truncate long sample
+  values on a character boundary. Previously a long multibyte value failed
+  with an invalid Unicode error.
+- `ai_agg` with a `max_context_chars` smaller than one multibyte character no
+  longer splits that character into invalid UTF-8.
+- A batched embedding response that contains an empty vector is rejected, as
+  it already was for a single input.
+- Token totals for Anthropic, Ollama and decision responses, and the totals in
+  `ai_usage_summary()`, no longer overflow when counts near the BIGINT limit
+  are added.
+- `ai_decide` with `provider := 'cloudflare'` rejects a model name that
+  contains `?`, `#`, `%`, `..` or whitespace, since the model becomes part of
+  the request URL.
+- A malformed `DUCKDB_AI_CONNECT_TIMEOUT_SECONDS` no longer leaks the request
+  header list, and allocation failures while reading a response are reported
+  as request failures.
+
+### Maintenance
+
+- `test/smoke/repository_pass3_smoke.py` covers these fixes against a mock
+  provider and runs as part of `make smoke`.
+
 ## 0.9.2 - 2026-11-02
 
 This release preserves the 0.9.1 SQL API. It keeps provider credentials and
