@@ -2179,8 +2179,18 @@ const JsonValue *ResolveSchemaNode(const JsonValue &root, const JsonValue *schem
 	return schema;
 }
 
+//! Bounds the expansion of a response schema into SQL columns.
+struct SchemaExpansion {
+	//! Object schemas currently being expanded; a "$ref" back to one of them is a recursive schema.
+	std::vector<const JsonValue *> active;
+	idx_t properties = 0;
+	bool too_large = false;
+};
+
+constexpr idx_t MAX_SCHEMA_COLUMN_PROPERTIES = 10000;
+
 void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
-                               std::vector<JsonSchemaProperty> &properties) {
+                               std::vector<JsonSchemaProperty> &properties, SchemaExpansion &expansion) {
 	auto &schema = *ResolveSchemaNode(root, &schema_p);
 	if (schema.type != JsonValueType::OBJECT) {
 		return;
@@ -2189,8 +2199,19 @@ void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
 	if (!properties_schema || properties_schema->type != JsonValueType::OBJECT) {
 		return;
 	}
+	// A recursive schema has no finite column type. Leave the property without children so it maps to JSON text;
+	// response validation still follows the reference.
+	if (std::find(expansion.active.begin(), expansion.active.end(), &schema) != expansion.active.end()) {
+		return;
+	}
+	expansion.active.push_back(&schema);
 	auto required_schema = ObjectField(schema, "required");
 	for (auto &name : properties_schema->object_keys) {
+		// Shared references are expanded once per use, so nested sharing grows exponentially.
+		if (expansion.too_large || ++expansion.properties > MAX_SCHEMA_COLUMN_PROPERTIES) {
+			expansion.too_large = true;
+			break;
+		}
 		auto &property_schema = *ResolveSchemaNode(root, &properties_schema->object_value.at(name));
 		JsonSchemaProperty property;
 		property.name = name;
@@ -2205,7 +2226,7 @@ void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
 			}
 		}
 		if (property.type == "object" && property_schema.type == JsonValueType::OBJECT) {
-			ExtractSchemaPropertyList(root, property_schema, property.children);
+			ExtractSchemaPropertyList(root, property_schema, property.children, expansion);
 		}
 		if (property.type == "array" && property_schema.type == JsonValueType::OBJECT) {
 			auto items_schema = ObjectField(property_schema, "items");
@@ -2213,12 +2234,13 @@ void ExtractSchemaPropertyList(const JsonValue &root, const JsonValue &schema_p,
 				auto &item_schema = *ResolveSchemaNode(root, items_schema);
 				property.item_type = SchemaTypeName(item_schema);
 				if (property.item_type == "object") {
-					ExtractSchemaPropertyList(root, item_schema, property.item_children);
+					ExtractSchemaPropertyList(root, item_schema, property.item_children, expansion);
 				}
 			}
 		}
 		properties.push_back(std::move(property));
 	}
+	expansion.active.pop_back();
 }
 
 bool RegexMatches(const std::string &value, const std::string &pattern, const std::string &path, std::string &error) {
@@ -2662,7 +2684,13 @@ size_t WriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
 		response->limit_exceeded = true;
 		return 0;
 	}
-	response->body.append(ptr, incoming_bytes);
+	// An exception must not unwind through libcurl's C frames.
+	try {
+		response->body.append(ptr, incoming_bytes);
+	} catch (std::exception &) {
+		response->limit_exceeded = true;
+		return 0;
+	}
 	return incoming_bytes;
 }
 
@@ -2726,11 +2754,15 @@ long ParseRetryAfterMs(const std::string &value) {
 size_t HeaderCallback(char *buffer, size_t size, size_t nitems, void *userdata) {
 	auto total = size * nitems;
 	auto capture = reinterpret_cast<CurlHeaderCapture *>(userdata);
-	std::string header(buffer, total);
-	auto lower_header = LowerAscii(header);
-	const std::string prefix = "retry-after:";
-	if (lower_header.compare(0, prefix.size(), prefix) == 0) {
-		capture->retry_after_ms = ParseRetryAfterMs(header.substr(prefix.size()));
+	// An exception must not unwind through libcurl's C frames; a header that cannot be read is skipped.
+	try {
+		std::string header(buffer, total);
+		auto lower_header = LowerAscii(header);
+		const std::string prefix = "retry-after:";
+		if (lower_header.compare(0, prefix.size(), prefix) == 0) {
+			capture->retry_after_ms = ParseRetryAfterMs(header.substr(prefix.size()));
+		}
+	} catch (std::exception &) {
 	}
 	return total;
 }
@@ -2994,11 +3026,30 @@ void SleepBeforeRetry(long retry_delay_ms, ClientContext *client_context) {
 	}
 }
 
+constexpr idx_t MAX_ERROR_BODY_BYTES = 4096;
+
+//! Bounds a response body quoted in an error. Bodies can reach the response size limit and errors are kept in the
+//! usage log, so quoting one whole would hold it in memory once per failed request.
+std::string TruncateErrorBody(const std::string &body) {
+	if (body.size() <= MAX_ERROR_BODY_BYTES) {
+		return body;
+	}
+	idx_t cut = MAX_ERROR_BODY_BYTES;
+	while (cut > 0 && (static_cast<unsigned char>(body[cut]) & 0xc0) == 0x80) {
+		cut--;
+	}
+	return body.substr(0, cut) + "... (" + std::to_string(body.size() - cut) + " more bytes)";
+}
+
 HttpResponse HttpPost(const std::string &url, const std::string &payload, const std::vector<std::string> &headers,
                       long timeout_seconds, bool throw_http_errors = true, long retry_count = 0,
                       long retry_backoff_ms = 1000, ClientContext *client_context = nullptr,
                       long connect_timeout_seconds = 0) {
 	EnsureCurlGlobalInit();
+	// Resolve this before the header list exists: it throws on a malformed environment value.
+	if (connect_timeout_seconds <= 0) {
+		connect_timeout_seconds = ConnectTimeoutSeconds(timeout_seconds);
+	}
 	int64_t total_elapsed_ms = 0;
 	for (long attempt = 0; attempt <= retry_count; attempt++) {
 		auto curl = ThreadLocalCurlHandle();
@@ -3033,9 +3084,7 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 		curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
 		curl_easy_setopt(curl, CURLOPT_HEADERDATA, &header_capture);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
-		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT,
-		                 connect_timeout_seconds > 0 ? connect_timeout_seconds
-		                                             : ConnectTimeoutSeconds(timeout_seconds));
+		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, connect_timeout_seconds);
 		curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
 		curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L);
@@ -3071,7 +3120,7 @@ HttpResponse HttpPost(const std::string &url, const std::string &payload, const 
 			throw IOException("AI provider request failed: %s", curl_easy_strerror(result));
 		}
 		if (throw_http_errors && (status < 200 || status >= 300)) {
-			throw IOException("AI provider returned HTTP %ld: %s", status, response.body);
+			throw IOException("AI provider returned HTTP %ld: %s", status, TruncateErrorBody(response.body));
 		}
 		auto http_response =
 		    HttpResponse(std::move(response.body), status, total_elapsed_ms, header_capture.retry_after_ms);
@@ -3205,6 +3254,11 @@ std::string RedactProviderSecrets(const ProviderConfig &config, const std::strin
 	return RedactValue(input, config.api_key);
 }
 
+//! A response body as it may appear in an error: without the provider key, and bounded.
+std::string ErrorBodySnippet(const ProviderConfig &config, const std::string &body) {
+	return TruncateErrorBody(RedactProviderSecrets(config, body));
+}
+
 std::string ProviderErrorDetail(const ProviderConfig &config, const HttpResponse &response) {
 	auto body = RedactProviderSecrets(config, response.body);
 	std::string parse_error;
@@ -3243,7 +3297,7 @@ std::string ProviderErrorDetail(const ProviderConfig &config, const HttpResponse
 	if (!message.empty()) {
 		detail += ": " + message;
 	} else if (!body.empty()) {
-		detail += ": " + body;
+		detail += ": " + TruncateErrorBody(body);
 	}
 	return detail;
 }
@@ -3982,6 +4036,11 @@ void ApplyDecisionProtocol(ProviderConfig &config, const CompletionOptions &opti
 	if (config.provider == "cloudflare") {
 		static const std::string prefix = "@cf/cloudflare/";
 		auto model = DecisionModel(config, options, "clef");
+		// The model becomes a path segment of the request URL, so it must not carry a query, a fragment, an
+		// escape or a parent-directory step that would send the account token to another route.
+		if (model.find_first_of("?#%\\ \t\r\n") != std::string::npos || model.find("..") != std::string::npos) {
+			throw InvalidInputException("Cloudflare decision model \"%s\" is not a valid model name", model);
+		}
 		config.protocol = "cloudflare_decision";
 		config.model = StartsWith(model, prefix) ? model.substr(prefix.size()) : model;
 		config.base_url =
@@ -4580,7 +4639,8 @@ EmbeddingResult ParseEmbeddingResult(const ProviderConfig &config, const HttpRes
 		result.values = FindEmbeddingArray(root, "embeddings");
 	}
 	if (result.values.empty()) {
-		throw IOException("AI provider embedding response contained an empty embedding: %s", response.body);
+		throw IOException("AI provider embedding response contained an empty embedding: %s",
+		                  ErrorBodySnippet(config, response.body));
 	}
 	result.raw_response = response.body;
 	result.http_status = response.status;
@@ -4612,6 +4672,12 @@ std::vector<EmbeddingResult> ParseEmbeddingResults(const ProviderConfig &config,
 		throw IOException("AI provider embedding response returned %llu embeddings for %llu inputs",
 		                  static_cast<unsigned long long>(values.size()),
 		                  static_cast<unsigned long long>(expected_count));
+	}
+	// The single-input parser rejects an empty vector; a batch must not return one for the same input.
+	for (auto &embedding : values) {
+		if (embedding.empty()) {
+			throw IOException("AI provider embedding response contained an empty embedding");
+		}
 	}
 	auto prompt_tokens = FindYyjsonIntegerValue(root, "prompt_tokens");
 	auto total_tokens = FindYyjsonIntegerValue(root, "total_tokens");
@@ -4788,6 +4854,20 @@ bool ExtractMessageContentText(duckdb_yyjson::yyjson_val *message, std::string &
 	return true;
 }
 
+//! Whether the provider cut the response at the token limit: Anthropic reports "max_tokens", Ollama and
+//! OpenAI-compatible APIs report "length".
+bool ResponseStoppedAtTokenLimit(const ProviderConfig &config, duckdb_yyjson::yyjson_val *root) {
+	std::string reason;
+	if (config.protocol == "anthropic_messages") {
+		return YyjsonDirectString(root, "stop_reason", reason) && reason == "max_tokens";
+	}
+	if (config.protocol == "ollama_chat") {
+		return YyjsonDirectString(root, "done_reason", reason) && reason == "length";
+	}
+	auto first_choice = YyjsonArrayGet(YyjsonObjectGet(root, "choices"), 0);
+	return YyjsonDirectString(first_choice, "finish_reason", reason) && reason == "length";
+}
+
 std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::yyjson_val *root,
                                   const std::string &body) {
 	std::string value;
@@ -4832,7 +4912,13 @@ std::string ExtractCompletionText(const ProviderConfig &config, duckdb_yyjson::y
 			return value;
 		}
 	}
-	throw IOException("AI provider response did not contain a supported completion text field: %s", body);
+	if (root && ResponseStoppedAtTokenLimit(config, root)) {
+		// Nothing but reasoning fit in the token limit. Return no text so the caller reports the limit and keeps
+		// the token counts, instead of failing here as an unreadable response.
+		return std::string();
+	}
+	throw IOException("AI provider response did not contain a supported completion text field: %s",
+	                  ErrorBodySnippet(config, body));
 }
 
 //! Reasoning models served by llama.cpp, vLLM, LM Studio and some gateways put their reasoning inline as a leading
@@ -5003,6 +5089,18 @@ bool ValidateJevResponse(duckdb_yyjson::yyjson_val *root) {
 	return saw_answer;
 }
 
+//! Adds non-negative token counts. Each count fits BIGINT but their sum may not; -1 marks the total as unknown.
+int64_t CheckedTokenSum(std::initializer_list<int64_t> counts) {
+	int64_t total = 0;
+	for (auto count : counts) {
+		if (count > std::numeric_limits<int64_t>::max() - total) {
+			return -1;
+		}
+		total += count;
+	}
+	return total;
+}
+
 CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpResponse &response,
                                        bool native = false) {
 	std::string error;
@@ -5070,7 +5168,7 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 		result.prompt_tokens = YyjsonIntegerOrMissing(usage, "input_tokens");
 		result.completion_tokens = YyjsonIntegerOrMissing(usage, "output_tokens");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
-			result.total_tokens = result.prompt_tokens + result.completion_tokens;
+			result.total_tokens = CheckedTokenSum({result.prompt_tokens, result.completion_tokens});
 		}
 		return result;
 	}
@@ -5082,9 +5180,9 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 		result.cached_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_read_input_tokens");
 		result.cache_creation_prompt_tokens = YyjsonIntegerOrMissing(usage, "cache_creation_input_tokens");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
-			result.total_tokens = result.prompt_tokens + result.completion_tokens +
-			                      std::max<int64_t>(0, result.cached_prompt_tokens) +
-			                      std::max<int64_t>(0, result.cache_creation_prompt_tokens);
+			result.total_tokens = CheckedTokenSum({result.prompt_tokens, result.completion_tokens,
+			                                       std::max<int64_t>(0, result.cached_prompt_tokens),
+			                                       std::max<int64_t>(0, result.cache_creation_prompt_tokens)});
 		}
 		YyjsonDirectString(root, "stop_reason", result.finish_reason);
 		return result;
@@ -5094,7 +5192,7 @@ CompletionResult ParseCompletionResult(const ProviderConfig &config, const HttpR
 		result.completion_tokens = YyjsonIntegerOrMissing(root, "eval_count");
 		result.cached_prompt_tokens = YyjsonIntegerOrMissing(root, "prompt_eval_cached_count");
 		if (result.prompt_tokens >= 0 && result.completion_tokens >= 0) {
-			result.total_tokens = result.prompt_tokens + result.completion_tokens;
+			result.total_tokens = CheckedTokenSum({result.prompt_tokens, result.completion_tokens});
 		}
 		YyjsonDirectString(root, "done_reason", result.finish_reason);
 		return result;
@@ -5759,7 +5857,8 @@ HttpResponse FetchProviderResponse(const std::string &operation, const ProviderC
 		FinishPendingCachedResponse(runtime_state, cache_key, pending, fresh_response);
 		return fresh_response;
 	} catch (std::exception &ex) {
-		FailPendingCachedResponse(runtime_state, cache_key, pending, ex.what());
+		// what() is DuckDB's JSON envelope; waiters wrap the text in their own exception, so pass the bare message.
+		FailPendingCachedResponse(runtime_state, cache_key, pending, UsageErrorMessage(ex));
 		throw;
 	} catch (...) {
 		FailPendingCachedResponse(runtime_state, cache_key, pending, "unknown AI provider error");
@@ -6577,7 +6676,14 @@ bool ExtractJsonSchemaProperties(const std::string &schema, std::vector<JsonSche
 		error = "schema must define at least one top-level object property";
 		return false;
 	}
-	ExtractSchemaPropertyList(schema_value, root_schema, properties);
+	SchemaExpansion expansion;
+	ExtractSchemaPropertyList(schema_value, root_schema, properties, expansion);
+	if (expansion.too_large) {
+		properties.clear();
+		error = "schema expands to more than " + std::to_string(MAX_SCHEMA_COLUMN_PROPERTIES) +
+		        " properties; reduce nested \"$ref\" reuse";
+		return false;
+	}
 	return true;
 }
 

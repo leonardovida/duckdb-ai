@@ -230,6 +230,10 @@ struct AiChunkScanData : public LocalTableFunctionState {
 	std::string enrichment_error;
 	//! Per-row settings when options come from lateral input columns.
 	unique_ptr<AiChunkBindData> row_bind_data;
+	//! The last per-row secret resolution; consecutive rows usually share their options.
+	bool has_resolved_options = false;
+	duckdb_ai::CompletionOptions unresolved_options;
+	duckdb_ai::CompletionOptions resolved_options;
 };
 
 struct ExternalModelBindData : public FunctionData {
@@ -2464,7 +2468,6 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	auto result_type = AiTryCompleteReturnType();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader prompt_reader(args, bind_data.prompt_index);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
@@ -2475,14 +2478,14 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string prompt;
 		if (!prompt_reader.Read(row, prompt)) {
-			result_validity.SetInvalid(row);
+			FlatVector::SetNull(result, row, true);
 			continue;
 		}
 
 		duckdb_ai::CompletionOptions options;
 		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
-			result_validity.SetInvalid(row);
+			FlatVector::SetNull(result, row, true);
 			continue;
 		}
 
@@ -2510,7 +2513,7 @@ void AiTryCompleteFunction(DataChunk &args, ExpressionState &state, Vector &resu
 			continue;
 		}
 		if (!job.completed) {
-			result_validity.SetInvalid(job.row);
+			FlatVector::SetNull(result, job.row, true);
 			continue;
 		}
 		result.SetValue(job.row, AiTryCompleteValue(result_type, job.output, false, ""));
@@ -2869,7 +2872,6 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 	auto &bind_data = func_expr.BindInfo()->Cast<AiExtractRecordBindData>();
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	auto model_reader = OptionalStringReader(args, bind_data.has_model_arg, bind_data.model_index);
 	auto provider_reader = OptionalStringReader(args, bind_data.has_provider_arg, bind_data.provider_index);
@@ -2880,14 +2882,14 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 	for (idx_t row = 0; row < args.size(); row++) {
 		std::string input_text;
 		if (!input_reader.Read(row, input_text)) {
-			result_validity.SetInvalid(row);
+			FlatVector::SetNull(result, row, true);
 			continue;
 		}
 
 		duckdb_ai::CompletionOptions options;
 		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
-			result_validity.SetInvalid(row);
+			FlatVector::SetNull(result, row, true);
 			continue;
 		}
 
@@ -2906,7 +2908,7 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 			if (options.fail_on_error) {
 				throw;
 			}
-			result_validity.SetInvalid(row);
+			FlatVector::SetNull(result, row, true);
 		}
 	}
 
@@ -2919,9 +2921,15 @@ void AiExtractRecordFunction(DataChunk &args, ExpressionState &state, Vector &re
 	});
 
 	for (auto &job : jobs) {
-		if (ProviderJobResultAvailable(job, result_validity)) {
-			result.SetValue(job.row, job.record);
+		if (job.exception && job.fail_on_error) {
+			std::rethrow_exception(job.exception);
 		}
+		if (job.exception || !job.completed) {
+			// SetNull also marks the struct fields NULL; clearing only the struct's validity bit leaves them readable.
+			FlatVector::SetNull(result, job.row, true);
+			continue;
+		}
+		result.SetValue(job.row, job.record);
 	}
 }
 
@@ -3256,6 +3264,22 @@ void AiRerankFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	}
 }
 
+//! Fails a job whose embedding input is empty, with the provider's own message. One batched request carries many
+//! rows, so an input the provider rejects locally must not fail the rows that share its request.
+template <class JOB>
+bool FailEmptyEmbeddingInput(JOB &job, bool empty) {
+	if (!empty) {
+		return false;
+	}
+	if (job.fail_on_error) {
+		throw InvalidInputException("ai_embed input must not be empty");
+	}
+	InvalidInputException error("ai_embed input must not be empty");
+	job.error_message = error.what();
+	job.exception = std::make_exception_ptr(error);
+	return true;
+}
+
 //! Embeds every distinct input once per option set and scores each job. The query cache lock covers only lookups and
 //! inserts, so threads scanning other chunks keep sending their embedding requests while this one waits.
 void ComputeSimilarityScores(ClientContext &context, std::vector<ProviderDoubleJob> &jobs) {
@@ -3285,6 +3309,14 @@ void ComputeSimilarityScores(ClientContext &context, std::vector<ProviderDoubleJ
 			}
 			return inserted.first->second;
 		};
+		std::vector<idx_t> scored_rows;
+		scored_rows.reserve(group_rows.size());
+		for (auto row : group_rows) {
+			if (!FailEmptyEmbeddingInput(jobs[row], jobs[row].left.empty() || jobs[row].right.empty())) {
+				scored_rows.push_back(row);
+			}
+		}
+		group_rows = std::move(scored_rows);
 		for (auto row : group_rows) {
 			auto left = input_index(jobs[row].left);
 			row_inputs.emplace_back(left, input_index(jobs[row].right));
@@ -3475,28 +3507,35 @@ void AiEmbedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 		can_batch = CompletionOptionsEqual(jobs[0].options, jobs[i].options);
 	}
 	if (can_batch) {
+		std::vector<idx_t> batch_jobs;
+		batch_jobs.reserve(jobs.size());
+		for (idx_t i = 0; i < jobs.size(); i++) {
+			if (!FailEmptyEmbeddingInput(jobs[i], jobs[i].input.empty())) {
+				batch_jobs.push_back(i);
+			}
+		}
 		try {
 			std::vector<std::string> inputs;
-			inputs.reserve(jobs.size());
-			for (auto &job : jobs) {
-				inputs.push_back(job.input);
+			inputs.reserve(batch_jobs.size());
+			for (auto index : batch_jobs) {
+				inputs.push_back(jobs[index].input);
 			}
 			auto outputs = duckdb_ai::EmbedMany(inputs, jobs[0].options, ProviderTaskRunner(jobs[0].options));
-			if (outputs.size() != jobs.size()) {
+			if (outputs.size() != batch_jobs.size()) {
 				throw InvalidInputException("AI embedding provider returned %llu embeddings for %llu inputs",
 				                            static_cast<unsigned long long>(outputs.size()),
-				                            static_cast<unsigned long long>(jobs.size()));
+				                            static_cast<unsigned long long>(batch_jobs.size()));
 			}
-			for (idx_t i = 0; i < jobs.size(); i++) {
-				jobs[i].output = std::move(outputs[i].values);
-				jobs[i].completed = true;
+			for (idx_t i = 0; i < batch_jobs.size(); i++) {
+				jobs[batch_jobs[i]].output = std::move(outputs[i].values);
+				jobs[batch_jobs[i]].completed = true;
 			}
 		} catch (InterruptException &) {
 			throw;
 		} catch (std::exception &ex) {
-			for (auto &job : jobs) {
-				job.exception = std::current_exception();
-				job.error_message = ex.what();
+			for (auto index : batch_jobs) {
+				jobs[index].exception = std::current_exception();
+				jobs[index].error_message = ex.what();
 			}
 		}
 	} else {
@@ -3863,7 +3902,15 @@ idx_t Utf8SafeChunkEnd(const std::string &input, idx_t start, idx_t requested_en
 	while (end > start && end < input.size() && (static_cast<unsigned char>(input[end]) & 0xc0) == 0x80) {
 		end--;
 	}
-	return end == start ? MinValue<idx_t>(requested_end, input.size()) : end;
+	if (end != start) {
+		return end;
+	}
+	// The limit is smaller than one character: take the whole character instead of splitting it.
+	end = MinValue<idx_t>(start + 1, input.size());
+	while (end < input.size() && (static_cast<unsigned char>(input[end]) & 0xc0) == 0x80) {
+		end++;
+	}
+	return end;
 }
 
 std::vector<std::string> SplitAggregateValues(const std::string &values, idx_t max_chars) {
@@ -4712,7 +4759,12 @@ std::string NormalizeSampleValue(std::string value) {
 		}
 	}
 	if (value.size() > 160) {
-		value = value.substr(0, 157) + "...";
+		// Cut on a character boundary; a split multibyte character is invalid UTF-8.
+		idx_t cut = 157;
+		while (cut > 0 && (static_cast<unsigned char>(value[cut]) & 0xc0) == 0x80) {
+			cut--;
+		}
+		value = value.substr(0, cut) + "...";
 	}
 	return value;
 }
@@ -5173,7 +5225,6 @@ void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &r
 	auto &bind_data = func_expr.BindInfo()->Cast<AiTaskBindData>();
 	auto result_type = AiClassifyResultReturnType();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	auto label_reader = OptionalStringReader(args, !bind_data.parameter_is_label_list, 1);
 	unique_ptr<StringListVectorReader> label_list_reader;
@@ -5190,13 +5241,13 @@ void AiClassifyResultFunction(DataChunk &args, ExpressionState &state, Vector &r
 		auto read_labels =
 		    bind_data.parameter_is_label_list ? label_list_reader->Read(row, labels) : label_reader->Read(row, labels);
 		if (!input_reader.Read(row, input) || !read_labels) {
-			result_validity.SetInvalid(row);
+			FlatVector::SetNull(result, row, true);
 			continue;
 		}
 		duckdb_ai::CompletionOptions options;
 		if (!ReadRuntimeOptions(state.GetContext(), bind_data.options, bind_data.has_model_arg, model_reader.get(),
 		                        bind_data.has_provider_arg, provider_reader.get(), row, options)) {
-			result_validity.SetInvalid(row);
+			FlatVector::SetNull(result, row, true);
 			continue;
 		}
 		try {
@@ -7938,7 +7989,8 @@ struct ParsedClassifierArtifact {
 struct OptimizedClassifierRow {
 	idx_t row = 0;
 	std::string input;
-	ParsedClassifierArtifact artifact;
+	//! Shared by every row of a chunk that passes the same artifact text.
+	std::shared_ptr<const ParsedClassifierArtifact> artifact;
 	std::vector<double> embedding;
 	std::string local_error;
 	double best_score = 0;
@@ -8107,7 +8159,7 @@ std::string OptimizedClassifierMetadata(const OptimizedClassifierRow &row, const
 	std::ostringstream output;
 	output.imbue(std::locale::classic());
 	output << std::setprecision(17) << "{\"path\":\"" << JsonEscapeSqlText(path)
-	       << "\",\"artifact_accuracy\":" << row.artifact.accuracy;
+	       << "\",\"artifact_accuracy\":" << row.artifact->accuracy;
 	if (!reason.empty()) {
 		output << ",\"reason\":\"" << JsonEscapeSqlText(reason) << '"';
 	}
@@ -8124,42 +8176,63 @@ std::string OptimizedClassifierMetadata(const OptimizedClassifierRow &row, const
 	return output.str();
 }
 
+//! One parsed artifact, or the reason it could not be used.
+struct CachedClassifierArtifact {
+	std::shared_ptr<const ParsedClassifierArtifact> artifact;
+	std::string error;
+};
+
 void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = func_expr.BindInfo()->Cast<OptimizedClassifierBindData>();
 	auto result_type = AiOptimizedClassifierReturnType();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::ValidityMutable(result);
 	StringVectorReader input_reader(args, 0);
 	StringVectorReader artifact_reader(args, 1);
 	std::vector<OptimizedClassifierRow> rows;
 	std::vector<SecretResolutionCacheEntry> embedding_secret_cache;
+	std::unordered_map<std::string, CachedClassifierArtifact> artifacts;
 	for (idx_t row_index = 0; row_index < args.size(); row_index++) {
 		std::string input;
 		std::string artifact;
 		if (!input_reader.Read(row_index, input) || !artifact_reader.Read(row_index, artifact)) {
-			result_validity.SetInvalid(row_index);
+			FlatVector::SetNull(result, row_index, true);
 			continue;
 		}
-		try {
-			OptimizedClassifierRow row;
-			row.row = row_index;
-			row.input = std::move(input);
-			row.artifact = ParseClassifierArtifact(state.GetContext(), artifact);
-			row.artifact.embedding_options.query_id = bind_data.fallback_options.query_id + ":embed";
-			if (!row.artifact.usable) {
-				row.local_error = "artifact quality threshold was not met";
-			} else {
-				ApplyAiProviderSecretCached(state.GetContext(), row.artifact.embedding_options, embedding_secret_cache);
+		// The artifact is usually one value joined to every row. Parsing it per row re-reads the JSON and copies
+		// every centroid, which dominates both time and memory for large artifacts.
+		auto cached = artifacts.find(artifact);
+		if (cached == artifacts.end()) {
+			CachedClassifierArtifact entry;
+			try {
+				auto parsed =
+				    std::make_shared<ParsedClassifierArtifact>(ParseClassifierArtifact(state.GetContext(), artifact));
+				parsed->embedding_options.query_id = bind_data.fallback_options.query_id + ":embed";
+				if (parsed->usable) {
+					ApplyAiProviderSecretCached(state.GetContext(), parsed->embedding_options, embedding_secret_cache);
+				}
+				entry.artifact = std::move(parsed);
+			} catch (InterruptException &) {
+				throw;
+			} catch (std::exception &ex) {
+				entry.error = ex.what();
 			}
-			rows.push_back(std::move(row));
-		} catch (InterruptException &) {
-			throw;
-		} catch (std::exception &ex) {
-			auto metadata = "{\"path\":\"error\",\"reason\":\"invalid classifier artifact\"}";
-			result.SetValue(row_index,
-			                AiOptimizedClassifierResultValue(result_type, "", false, 0, false, ex.what(), metadata));
+			cached = artifacts.emplace(std::move(artifact), std::move(entry)).first;
 		}
+		if (!cached->second.artifact) {
+			auto metadata = "{\"path\":\"error\",\"reason\":\"invalid classifier artifact\"}";
+			result.SetValue(row_index, AiOptimizedClassifierResultValue(result_type, "", false, 0, false,
+			                                                            cached->second.error, metadata));
+			continue;
+		}
+		OptimizedClassifierRow row;
+		row.row = row_index;
+		row.input = std::move(input);
+		row.artifact = cached->second.artifact;
+		if (!row.artifact->usable) {
+			row.local_error = "artifact quality threshold was not met";
+		}
+		rows.push_back(std::move(row));
 	}
 
 	std::vector<bool> grouped(rows.size(), false);
@@ -8172,8 +8245,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 		std::unordered_map<std::string, idx_t> input_indexes;
 		for (idx_t row = group_start; row < rows.size(); row++) {
 			if (grouped[row] || !rows[row].local_error.empty() ||
-			    !CompletionOptionsEqual(rows[group_start].artifact.embedding_options,
-			                            rows[row].artifact.embedding_options)) {
+			    !CompletionOptionsEqual(rows[group_start].artifact->embedding_options,
+			                            rows[row].artifact->embedding_options)) {
 				continue;
 			}
 			grouped[row] = true;
@@ -8184,8 +8257,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 			}
 		}
 		try {
-			auto embeddings = duckdb_ai::EmbedMany(unique_inputs, rows[group_start].artifact.embedding_options,
-			                                       ProviderTaskRunner(rows[group_start].artifact.embedding_options));
+			auto embeddings = duckdb_ai::EmbedMany(unique_inputs, rows[group_start].artifact->embedding_options,
+			                                       ProviderTaskRunner(rows[group_start].artifact->embedding_options));
 			if (embeddings.size() != unique_inputs.size()) {
 				throw InvalidInputException("embedding provider returned the wrong number of classifier embeddings");
 			}
@@ -8210,8 +8283,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 			try {
 				double best = -std::numeric_limits<double>::infinity();
 				double second = -std::numeric_limits<double>::infinity();
-				for (idx_t label = 0; label < row.artifact.centroids.size(); label++) {
-					auto score = CosineSimilarity(row.embedding, row.artifact.centroids[label]);
+				for (idx_t label = 0; label < row.artifact->centroids.size(); label++) {
+					auto score = CosineSimilarity(row.embedding, row.artifact->centroids[label]);
 					if (score > best) {
 						second = best;
 						best = score;
@@ -8222,10 +8295,10 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 				}
 				row.best_score = best;
 				row.score_margin = best - second;
-				if (row.score_margin >= row.artifact.confidence_margin) {
+				if (row.score_margin >= row.artifact->confidence_margin) {
 					auto metadata = OptimizedClassifierMetadata(row, "local", "");
 					result.SetValue(row.row,
-					                AiOptimizedClassifierResultValue(result_type, row.artifact.labels[row.best_label],
+					                AiOptimizedClassifierResultValue(result_type, row.artifact->labels[row.best_label],
 					                                                 false, row.best_score, true, "", metadata));
 					continue;
 				}
@@ -8242,7 +8315,7 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 			ProviderStringJob job;
 			job.row = row.row;
 			job.input = row.input;
-			job.parameter = JoinClassifierLabels(row.artifact.labels);
+			job.parameter = JoinClassifierLabels(row.artifact->labels);
 			job.options = std::move(options);
 			job.fail_on_error = false;
 			fallback_row_indexes[job.row] = row_index;
@@ -8277,8 +8350,8 @@ void AiOptimizedClassifierFunction(DataChunk &args, ExpressionState &state, Vect
 		}
 		// The fallback already returned a canonical artifact label. Decoding it
 		// again would alter literal quotes, surrounding spaces, or Markdown fences.
-		auto label = std::find(row.artifact.labels.begin(), row.artifact.labels.end(), job.output);
-		if (label == row.artifact.labels.end()) {
+		auto label = std::find(row.artifact->labels.begin(), row.artifact->labels.end(), job.output);
+		if (label == row.artifact->labels.end()) {
 			result.SetValue(job.row, AiOptimizedClassifierResultValue(
 			                             result_type, "", true, 0, false,
 			                             "fallback classifier returned a label outside the artifact", metadata));
@@ -8503,8 +8576,9 @@ unique_ptr<FunctionData> AiChunkBindInternal(ClientContext &context, TableFuncti
 			bind_data->row_options.emplace_back(i, name);
 		}
 	}
-	// Only ai_prep_search can call a provider; a lateral call may turn enrich on per row.
-	if (prep_search && (bind_data->enrich || lateral)) {
+	// Only ai_prep_search can call a provider. A lateral call sets provider, secret and enrich per row, so its
+	// credentials are resolved per row in PrepareSearchContext, after those options are applied.
+	if (prep_search && bind_data->enrich && !lateral) {
 		ApplyAiProviderSecret(context, bind_data->options);
 	}
 	if (prep_search) {
@@ -8557,6 +8631,17 @@ void PrepareSearchContext(ClientContext &context, const AiChunkBindData &bind_da
 	}
 	try {
 		auto options = bind_data.options;
+		if (!bind_data.row_options.empty()) {
+			// Resolving at bind would pair one provider's key with the provider or secret a row names.
+			if (!state.has_resolved_options || !CompletionOptionsEqual(state.unresolved_options, options)) {
+				state.has_resolved_options = false;
+				state.unresolved_options = options;
+				state.resolved_options = options;
+				ApplyAiProviderSecret(context, state.resolved_options);
+				state.has_resolved_options = true;
+			}
+			options = state.resolved_options;
+		}
 		AppendSystemPrompt(options,
 		                   "Create a concise document-level retrieval context. Preserve the subject, entities, dates, "
 		                   "and terminology needed to disambiguate individual chunks. Return only the context.");
@@ -8831,7 +8916,10 @@ unique_ptr<GlobalTableFunctionState> AiUsageSummaryInit(ClientContext &context, 
 		row.failures += event.status == "error" ? 1 : 0;
 		row.cache_hits += event.cache_hit ? 1 : 0;
 		if (event.total_tokens >= 0) {
-			row.total_tokens += event.total_tokens;
+			// Saturate: summed events can pass the BIGINT range even though each one fits.
+			row.total_tokens = event.total_tokens > NumericLimits<int64_t>::Maximum() - row.total_tokens
+			                       ? NumericLimits<int64_t>::Maximum()
+			                       : row.total_tokens + event.total_tokens;
 			row.has_total_tokens = true;
 		}
 		row.elapsed_ms += MaxValue<int64_t>(0, event.elapsed_ms);
