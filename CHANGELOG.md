@@ -5,7 +5,11 @@ All notable changes to `duckdb_ai` are documented here.
 This project uses semantic versioning. Before `1.0.0`, minor versions may
 include SQL API changes and patch versions should preserve the SQL API.
 
-## Unreleased
+## 0.9.3 - 2026-11-17
+
+This release preserves the 0.9.2 SQL API. It fixes two process crashes, a case
+where a lateral `ai_prep_search` call sent a provider key to another provider,
+and several per-row error handling defects. It targets DuckDB 2.0.0.
 
 ### Performance
 
